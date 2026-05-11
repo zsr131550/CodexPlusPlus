@@ -8,6 +8,16 @@
   const codexArchiveDeleteAllVersion = "2";
   const codexPlusVersion = "1.0.4";
   const codexPlusSettingsKey = "codexPlusSettings";
+  const selectors = {
+    sidebarThread: "[data-app-action-sidebar-thread-id]",
+    threadTitle: "[data-thread-title]",
+    appHeader: ".app-header-tint",
+    nativeMenuBar: ".flex.items-center.gap-0\\.5, [class*=\"flex items-center gap-0.5\"]",
+    archiveNav: 'button[aria-label="已归档对话"], button[aria-label="Archived conversations"]',
+    disabledInstallButton: 'button:disabled.w-full.justify-center, [role="button"][aria-disabled="true"].cursor-not-allowed',
+    pluginNavButton: 'nav[role="navigation"] button.h-token-nav-row.w-full',
+    pluginSvgPath: 'svg path[d^="M7.94562 14.0277"]',
+  };
 
   function installStyle() {
     const existingStyle = document.getElementById(styleId);
@@ -290,8 +300,8 @@
 
   function findNativeMenuInsertionPoint() {
     if (!codexPlusSettings().nativeMenuPlacement) return null;
-    const header = document.querySelector(".app-header-tint");
-    const menuBar = header?.querySelector(".flex.items-center.gap-0\\.5") || header?.querySelector('[class*="flex items-center gap-0.5"]');
+    const header = document.querySelector(selectors.appHeader);
+    const menuBar = header?.querySelector(selectors.nativeMenuBar);
     if (!menuBar) return null;
     const buttons = Array.from(menuBar.querySelectorAll("button")).filter((button) => !button.closest(`#${codexPlusMenuId}`));
     return { parent: menuBar, before: buttons[buttons.length - 1]?.nextSibling || null, nativeButtonClass: buttons[buttons.length - 1]?.className || "" };
@@ -377,7 +387,10 @@
   }
 
   function pluginEntryButton() {
-    return document.querySelector('nav[role="navigation"] button.h-token-nav-row.w-full svg path[d^="M7.94562 14.0277"]')?.closest("button");
+    const byIcon = document.querySelector(`${selectors.pluginNavButton} ${selectors.pluginSvgPath}`)?.closest("button");
+    if (byIcon) return byIcon;
+    return Array.from(document.querySelectorAll(selectors.pluginNavButton))
+      .find((button) => /^(插件|Plugins)(\s+-\s+.*)?$/i.test((button.textContent || "").trim())) || null;
   }
 
   function labelUnlockedPluginEntry(button) {
@@ -413,7 +426,7 @@
   }
 
   function pluginInstallCandidates() {
-    return Array.from(document.querySelectorAll('button:disabled.w-full.justify-center, [role="button"][aria-disabled="true"].cursor-not-allowed'));
+    return Array.from(document.querySelectorAll(selectors.disabledInstallButton));
   }
 
   function installButtonLabel(element) {
@@ -461,7 +474,7 @@
       if (cachedSessionRows.length > 0) return cachedSessionRows;
     }
 
-    cachedSessionRows = Array.from(document.querySelectorAll('[data-app-action-sidebar-thread-id]'));
+    cachedSessionRows = Array.from(document.querySelectorAll(selectors.sidebarThread));
     cachedSessionRowsAt = now;
     return cachedSessionRows;
   }
@@ -469,14 +482,21 @@
   function archivePageHintVisible() {
     if (window.location.href.includes("archive")) return true;
     if (document.querySelector('[data-codex-archive-page-row="true"], [data-codex-archive-delete-all]')) return true;
-    const archiveNav = document.querySelector('button[aria-label="已归档对话"], button[aria-label="Archived conversations"]');
+    const archiveNav = document.querySelector(selectors.archiveNav);
     if (archiveNav?.className?.includes?.("bg-token-list-hover-background")) return true;
     return !!Array.from(document.querySelectorAll("h1, h2, h3")).find((element) => (element.textContent || "").trim() === "已归档对话");
   }
 
+  function archiveRowFromUnarchiveButton(button) {
+    return button.closest('[data-codex-archive-page-row="true"]')
+      || button.closest('[role="listitem"], [role="row"]')
+      || button.closest(".flex.w-full.items-center.justify-between")
+      || button.parentElement;
+  }
+
   function archivedPageRows() {
     if (!archivePageHintVisible()) return [];
-    const rows = Array.from(document.querySelectorAll("button")).filter((button) => (button.textContent || "").trim() === "取消归档").map((button) => button.closest(".flex.w-full.items-center.justify-between") || button.parentElement).filter(Boolean);
+    const rows = Array.from(document.querySelectorAll("button")).filter((button) => (button.textContent || "").trim() === "取消归档").map(archiveRowFromUnarchiveButton).filter(Boolean);
     rows.forEach((row) => {
       row.dataset.codexArchivePageRow = "true";
       row.setAttribute("data-codex-archive-page-row", "true");
@@ -504,7 +524,7 @@
     const codexThreadId = row.getAttribute("data-app-action-sidebar-thread-id") || "";
     const fallbackId = row.getAttribute("data-session-id") || row.getAttribute("data-testid") || "";
     const sessionId = codexThreadId || (idMatch && idMatch[1]) || fallbackId;
-    const titleNode = row.querySelector('[data-thread-title]');
+    const titleNode = row.querySelector(selectors.threadTitle);
     const title = ((titleNode || row).textContent || "Untitled session").replace("删除", "").trim().slice(0, 160);
     return { session_id: sessionId, title };
   }
@@ -764,9 +784,16 @@
     event.stopImmediatePropagation?.();
   }
 
+  function isArchiveTitleText(value) {
+    return value === "已归档对话" || value === "Archived conversations";
+  }
+
   function archiveTitleContainer() {
+    const heading = Array.from(document.querySelectorAll("h1, h2, h3"))
+      .find((element) => isArchiveTitleText((element.textContent || "").trim()));
+    if (heading) return heading;
     return Array.from(document.querySelectorAll("h1, h2, h3, div, span"))
-      .find((element) => (element.textContent || "").trim() === "已归档对话" && element.getBoundingClientRect().x > 350);
+      .find((element) => isArchiveTitleText((element.textContent || "").trim()) && element.getBoundingClientRect().x > 350);
   }
 
   async function deleteArchivedSessions(rows) {
@@ -901,7 +928,14 @@
     return !!node?.closest?.(".codex-delete-toast, .codex-delete-confirm-overlay, .codex-plus-modal-overlay, #codex-plus-menu");
   }
 
-  const scanRelevantSelector = '[data-app-action-sidebar-thread-id], [data-codex-archive-page-row="true"], [data-codex-archive-delete-all], .app-header-tint, button[aria-label="已归档对话"], button[aria-label="Archived conversations"], button:disabled.w-full.justify-center, [role="button"][aria-disabled="true"].cursor-not-allowed';
+  const scanRelevantSelector = [
+    selectors.sidebarThread,
+    '[data-codex-archive-page-row="true"]',
+    "[data-codex-archive-delete-all]",
+    selectors.appHeader,
+    selectors.archiveNav,
+    selectors.disabledInstallButton,
+  ].join(", ");
 
   function isScanRelevantNode(node) {
     if (node.nodeType !== 1) return false;

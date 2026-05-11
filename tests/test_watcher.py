@@ -87,3 +87,34 @@ def test_wait_for_cdp_returns_true_when_listening(monkeypatch):
 def test_wait_for_cdp_returns_false_on_timeout(monkeypatch):
     monkeypatch.setattr(watcher, "cdp_listening", lambda port: False)
     assert watcher.wait_for_cdp(port=9229, timeout=0.3) is False
+
+
+def test_spawn_launcher_passes_debug_port(monkeypatch):
+    calls = []
+
+    class FakePopen:
+        pass
+
+    monkeypatch.setattr(watcher.subprocess, "Popen", lambda args, **kwargs: calls.append((args, kwargs)) or FakePopen())
+
+    assert watcher.spawn_launcher(debug_port=9333) is not None
+
+    args, _ = calls[0]
+    assert "--debug-port" in args
+    assert "9333" in args
+
+
+def test_takeover_skips_kill_when_cdp_appears(monkeypatch):
+    killed = []
+    stopped = []
+    monkeypatch.setattr(watcher, "cdp_listening", lambda port: True)
+    monkeypatch.setattr(watcher, "stop_launcher_processes", lambda: stopped.append(True))
+    monkeypatch.setattr(watcher, "kill_processes", lambda pids: killed.append(pids))
+
+    assert watcher.takeover(debug_port=9229) is True
+    assert stopped == []
+    assert killed == []
+
+
+def test_takeover_failure_backoff_is_not_too_short():
+    assert watcher.TAKEOVER_FAILURE_BACKOFF_SECONDS >= 30.0

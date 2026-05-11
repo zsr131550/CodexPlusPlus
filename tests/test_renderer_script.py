@@ -23,11 +23,15 @@ def test_renderer_script_supports_codex_sidebar_thread_attributes():
     start = text.index("function sessionRows")
     end = text.index("\n\n  function archivePageHintVisible", start)
     session_rows_code = text[start:end]
-    assert "data-app-action-sidebar-thread-id" in session_rows_code
+    assert "const selectors" in text
+    assert "sidebarThread" in text
+    assert "data-app-action-sidebar-thread-id" in text
+    assert "threadTitle" in text
     assert "data-thread-title" in text
+    assert "selectors.sidebarThread" in session_rows_code
     assert "a[href*='session']" not in session_rows_code
     assert "conversation" not in session_rows_code
-    assert "thread" not in session_rows_code.replace("data-app-action-sidebar-thread-id", "")
+    assert "thread" not in session_rows_code.replace("sidebarThread", "")
     assert "hasSessionHint" not in session_rows_code
 
 
@@ -48,8 +52,10 @@ def test_renderer_script_enables_plugin_entry_for_api_key_users():
     plugin_entry_code = text[start:end]
     assert "enablePluginEntry" in plugin_entry_code
     assert "pluginEntryButton" in plugin_entry_code
-    assert "nav[role=\"navigation\"] button.h-token-nav-row.w-full" in plugin_entry_code
-    assert "svg path[d^=\"M7.94562 14.0277\"]" in plugin_entry_code
+    assert "nav[role=\"navigation\"] button.h-token-nav-row.w-full" in text
+    assert "svg path[d^=\"M7.94562 14.0277\"]" in text
+    assert "selectors.pluginNavButton" in plugin_entry_code
+    assert "selectors.pluginSvgPath" in plugin_entry_code
     assert "document.querySelectorAll(\"button\")" not in plugin_entry_code
     assert "disabled = false" in plugin_entry_code
     assert "removeAttribute(\"disabled\")" in plugin_entry_code
@@ -73,8 +79,9 @@ def test_renderer_script_unblocks_connector_unavailable_plugin_install_buttons_w
     plugin_unlock_code = text[start:end]
     assert "unblockPluginInstallButtons" in plugin_unlock_code
     assert "pluginInstallCandidates" in plugin_unlock_code
-    assert "button:disabled.w-full.justify-center" in plugin_unlock_code
-    assert "[role=\"button\"][aria-disabled=\"true\"].cursor-not-allowed" in plugin_unlock_code
+    assert "button:disabled.w-full.justify-center" in text
+    assert "[role=\"button\"][aria-disabled=\"true\"].cursor-not-allowed" in text
+    assert "selectors.disabledInstallButton" in plugin_unlock_code
     assert "document.body.textContent" not in plugin_unlock_code
     assert "button.disabled = false" in plugin_unlock_code
     assert "removeAttribute(\"aria-disabled\")" in plugin_unlock_code
@@ -118,8 +125,8 @@ def test_renderer_script_ignores_chat_content_mutations_before_scheduling_scan()
     should_schedule_only = text[should_start:should_end]
     assert "node.nodeType === 1 && !isExtensionUiNode(node)" in should_schedule_only
     assert "Array.from(mutation.addedNodes).some(isScanRelevantNode)" not in should_schedule_only
-    assert "data-app-action-sidebar-thread-id" in should_schedule_code
-    assert "app-header-tint" in should_schedule_code
+    assert "selectors.sidebarThread" in should_schedule_code
+    assert "selectors.appHeader" in should_schedule_code
 
 
 def test_renderer_script_chat_filter_keeps_relevant_node_escape_hatch():
@@ -129,9 +136,11 @@ def test_renderer_script_chat_filter_keeps_relevant_node_escape_hatch():
     relevant_code = text[start:end]
     assert "node.matches?.(scanRelevantSelector)" in relevant_code
     assert "node.querySelector?.(scanRelevantSelector)" in relevant_code
-    assert "button[aria-label=\"已归档对话\"]" in relevant_code
-    assert "button:disabled.w-full.justify-center" in relevant_code
-    assert "[role=\"button\"][aria-disabled=\"true\"].cursor-not-allowed" in relevant_code
+    assert "selectors.archiveNav" in relevant_code
+    assert "selectors.disabledInstallButton" in relevant_code
+    assert "button[aria-label=\"已归档对话\"]" in text
+    assert "button:disabled.w-full.justify-center" in text
+    assert "[role=\"button\"][aria-disabled=\"true\"].cursor-not-allowed" in text
 
 
 def test_renderer_script_clears_focus_and_removes_deleted_rows():
@@ -244,6 +253,19 @@ def test_renderer_script_sidebar_delete_opens_on_pointerup_when_click_is_unrelia
     assert "data-app-action-sidebar-thread-id" in text
     assert "取消归档" in text
     assert "已归档对话" in text
+    assert "archiveRowFromUnarchiveButton" in text
+    assert "[role=\"listitem\"], [role=\"row\"]" in text
+    assert "Archived conversations" in text
+
+
+def test_renderer_script_uses_bridge_only_helper_calls():
+    text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
+    assert "window.__codexSessionDeleteBridge" in text
+    assert "fetch(" not in text
+    assert "XMLHttpRequest" not in text
+    assert "postJson(\"/delete\"" in text
+    assert "postJson(\"/undo\"" in text
+    assert "postJson(\"/archived-thread\"" in text
 
 
 def test_renderer_script_uses_chinese_delete_toast_fallbacks():

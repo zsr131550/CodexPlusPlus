@@ -80,9 +80,10 @@ Codex++ 使用外部启动方式运行 Codex：
 1. 启动 Codex App，并附加：
    - `--remote-debugging-port=9229`
    - `--remote-allow-origins=http://127.0.0.1:9229`
-2. 启动本地 helper 服务，用于删除/撤销会话。
+2. 启动本地 helper 服务，保留健康检查和运行生命周期。
 3. 通过 CDP 注入 `renderer-inject.js`。
-4. 渲染端通过 CDP bridge 与本地 helper 通信，避免被 Codex 页面 CSP 拦截。
+4. 渲染端通过 CDP bridge 调用本地删除服务；默认不开放 HTTP 删除/撤销入口，避免本机其他页面误触发删除类操作。
+5. 启动 Codex 时会继承现有 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`；如果这些环境变量未设置，会自动探测常见本地代理端口（如 `127.0.0.1:7897`），帮助 Codex 加载需要访问 GitHub 的技能资源。
 
 这种方式不会修改 Codex 的 `app.asar`，也不需要往 Codex 安装目录写 DLL。
 
@@ -258,11 +259,11 @@ Codex++ 默认读取 Codex 本地数据库：
 
 默认情况下 Codex++ 只在你**从 `Codex++` 快捷方式启动时**生效。如果你从开始菜单、任务栏或系统原生入口直接启动 Codex，那一次不会有注入，`Codex++` 菜单和插件解锁都不会出现。
 
-Windows 可以注册一个常驻 watcher 解决这个问题。它会每 3 秒探测一次本机 CDP 端口，发现 Codex 在跑但 CDP 没起来，就把这一批 Codex 进程杀掉、通过 launcher 重拉一次带注入的版本。这样不管你从哪里打开 Codex，都会被自动接管。
+Windows 可以注册一个常驻 watcher 解决这个问题。它会每 3 秒探测一次本机 CDP 端口，发现 Codex 在跑但 CDP 没起来，会先短暂等待并二次确认，确认仍没有 CDP 后再把这一批 Codex 进程杀掉、通过 launcher 重拉一次带注入的版本。这样不管你从哪里打开 Codex，都会被自动接管。
 
 注意代价：
 
-- 每次 Codex 通过原生路径启动，都会先打开一瞬间，再被 kill，再被 launcher 带 CDP 重开。视觉上是 1 ~ 2 秒的“打开→关闭→重开”闪烁。
+- 每次 Codex 通过原生路径启动，仍可能先打开一瞬间，再被 kill，再被 launcher 带 CDP 重开；watcher 会通过等待、二次确认和失败 backoff 尽量减少频繁闪烁。
 - watcher 以 `pythonw.exe` 常驻运行，登录时自动启动（通过 `HKCU\...\Run` 和 Startup 文件夹双路径注册，后者防止某些注册表清理工具干扰）。
 
 ### 安装
@@ -321,6 +322,16 @@ python -m codex_session_delete watch-enable
 - 9229 端口被占用
 - Python 环境不可用
 
+### 技能推荐加载失败
+
+如果技能页提示 `git fetch failed`、`unable to access 'https://github.com/openai/skills.git/'` 或无法连接 GitHub，通常是本机网络不能直连 GitHub。Codex++ 启动时会优先继承现有代理环境变量；如果未设置，会自动探测常见本地代理端口。也可以手动指定：
+
+```powershell
+$env:HTTP_PROXY="http://127.0.0.1:7897"
+$env:HTTPS_PROXY="http://127.0.0.1:7897"
+python -m codex_session_delete launch
+```
+
 ### Codex++ 菜单没出现
 
 确认是从 `Codex++` 快捷方式启动，而不是直接启动原版 Codex。
@@ -364,6 +375,7 @@ codex_session_delete/
   inject/renderer-inject.js
 
 tests/                   自动化测试
+docs/ai/                 项目级 AI 协作状态和 skills 配置中枢
 ```
 
 ## 说明

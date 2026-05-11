@@ -50,6 +50,30 @@ def test_launch_codex_windows_allows_devtools_websocket_origin(monkeypatch):
     assert "--remote-allow-origins=http://127.0.0.1:9229" in popen_calls[0]
 
 
+def test_launch_codex_injects_detected_local_proxy(monkeypatch):
+    app_dir = Path("C:/Codex/app")
+    popen_calls = []
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.setattr(launcher, "local_proxy_url", lambda: "http://127.0.0.1:7897")
+    monkeypatch.setattr(launcher.subprocess, "Popen", lambda args, **kw: popen_calls.append((args, kw)))
+
+    launch_codex_app(app_dir, 9229)
+
+    assert popen_calls[0][1]["env"]["HTTP_PROXY"] == "http://127.0.0.1:7897"
+    assert popen_calls[0][1]["env"]["HTTPS_PROXY"] == "http://127.0.0.1:7897"
+
+
+def test_launch_codex_keeps_explicit_proxy(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
+    monkeypatch.setattr(launcher, "local_proxy_url", lambda: (_ for _ in ()).throw(AssertionError("should not auto-detect")))
+
+    env = launcher.codex_process_environment()
+
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:9999"
+
+
 def test_launch_codex_macos_uses_open_command(monkeypatch, tmp_path):
     app = tmp_path / "Codex.app"
     (app / "Contents" / "MacOS").mkdir(parents=True)

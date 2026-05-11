@@ -14,6 +14,9 @@ WATCHER_INTERVAL_SECONDS = 3.0
 CDP_PROBE_TIMEOUT_SECONDS = 0.5
 CDP_WAIT_TIMEOUT_SECONDS = 25.0
 KILL_WAIT_TIMEOUT_SECONDS = 8.0
+TAKEOVER_GRACE_SECONDS = 2.0
+TAKEOVER_FAILURE_BACKOFF_SECONDS = 30.0
+TAKEOVER_SUCCESS_COOLDOWN_SECONDS = 15.0
 CODEX_PROCESS_NAMES = {"codex.exe"}
 
 
@@ -101,11 +104,11 @@ def wait_for_cdp(port: int, timeout: float = CDP_WAIT_TIMEOUT_SECONDS) -> bool:
     return False
 
 
-def spawn_launcher() -> subprocess.Popen | None:
+def spawn_launcher(debug_port: int) -> subprocess.Popen | None:
     python = sys.executable
     pythonw = Path(python).with_name("pythonw.exe")
     exe = str(pythonw if pythonw.exists() else python)
-    args = [exe, "-m", "codex_session_delete", "launch"]
+    args = [exe, "-m", "codex_session_delete", "launch", "--debug-port", str(debug_port)]
     creationflags = 0
     if sys.platform == "win32":
         creationflags = (
@@ -141,6 +144,10 @@ def takeover(debug_port: int) -> bool:
 
     Returns True on success (CDP up), False otherwise. On failure, caller should back off briefly.
     """
+    if cdp_listening(debug_port):
+        log("takeover: CDP became available before kill; skipping takeover")
+        return True
+
     # Step 1: Kill existing launcher processes (stale / failed) so we start from a known state.
     stop_launcher_processes()
 
@@ -156,7 +163,7 @@ def takeover(debug_port: int) -> bool:
     time.sleep(1.5)
 
     # Step 4: Spawn a fresh launcher that will activate the packaged app with CDP args.
-    proc = spawn_launcher()
+    proc = spawn_launcher(debug_port)
     if proc is None:
         return False
 
@@ -184,6 +191,9 @@ def watch_loop(debug_port: int = 9229) -> int:
     log(f"watcher started (interval={WATCHER_INTERVAL_SECONDS}s)")
     last_state = None
     backoff_until = 0.0
+    cooldown_until = 0.0
+    candidate_pids: tuple[int, ...] | None = None
+    candidate_since = 0.0
 
     while True:
         try:
@@ -198,6 +208,7 @@ def watch_loop(debug_port: int = 9229) -> int:
                 if last_state != "cdp_ok":
                     log("CDP is up")
                 last_state = "cdp_ok"
+                candidate_pids = None
                 time.sleep(WATCHER_INTERVAL_SECONDS)
                 continue
 
@@ -206,10 +217,18 @@ def watch_loop(debug_port: int = 9229) -> int:
                 if last_state != "idle":
                     log("no Codex running; idling")
                 last_state = "idle"
+                candidate_pids = None
                 time.sleep(WATCHER_INTERVAL_SECONDS)
                 continue
 
             now = time.time()
+            if now < cooldown_until:
+                if last_state != "cooldown":
+                    log(f"in cooldown after takeover; {cooldown_until - now:.1f}s remaining")
+                last_state = "cooldown"
+                time.sleep(WATCHER_INTERVAL_SECONDS)
+                continue
+
             if now < backoff_until:
                 if last_state != "backoff":
                     log(f"in backoff after failed takeover; {backoff_until - now:.1f}s remaining")
@@ -217,13 +236,36 @@ def watch_loop(debug_port: int = 9229) -> int:
                 time.sleep(WATCHER_INTERVAL_SECONDS)
                 continue
 
-            log(f"Codex running without CDP (pids={codex_pids}); attempting takeover")
+            codex_key = tuple(sorted(codex_pids))
+            if candidate_pids != codex_key:
+                candidate_pids = codex_key
+                candidate_since = now
+                log(f"Codex running without CDP (pids={codex_pids}); waiting before takeover")
+                last_state = "grace"
+                time.sleep(WATCHER_INTERVAL_SECONDS)
+                continue
+
+            if now - candidate_since < TAKEOVER_GRACE_SECONDS:
+                if last_state != "grace":
+                    log(f"waiting for Codex CDP grace period (pids={codex_pids})")
+                last_state = "grace"
+                time.sleep(WATCHER_INTERVAL_SECONDS)
+                continue
+
+            if cdp_listening(debug_port):
+                candidate_pids = None
+                last_state = "cdp_ok"
+                continue
+
+            log(f"Codex running without CDP after grace period (pids={codex_pids}); attempting takeover")
             last_state = "takeover"
             success = takeover(debug_port)
+            candidate_pids = None
             if success:
+                cooldown_until = time.time() + TAKEOVER_SUCCESS_COOLDOWN_SECONDS
                 last_state = "cdp_ok"
             else:
-                backoff_until = time.time() + 10.0
+                backoff_until = time.time() + TAKEOVER_FAILURE_BACKOFF_SECONDS
                 last_state = "failed"
         except Exception as exc:
             log("watch loop error: " + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))

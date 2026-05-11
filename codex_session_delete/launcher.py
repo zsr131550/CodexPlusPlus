@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import socket
 import subprocess
 import sys
@@ -79,6 +80,33 @@ def build_codex_arguments(debug_port: int) -> list[str]:
         f"--remote-debugging-port={debug_port}",
         f"--remote-allow-origins=http://127.0.0.1:{debug_port}",
     ]
+
+
+def has_proxy_environment(env: dict[str, str] | None = None) -> bool:
+    source = env or os.environ
+    return any(source.get(name) for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"))
+
+
+def local_proxy_url() -> str | None:
+    for port in (7897, 7890, 10809, 10808, 1080):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return f"http://127.0.0.1:{port}"
+        except OSError:
+            continue
+    return None
+
+
+def codex_process_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    if has_proxy_environment(env):
+        return env
+    proxy = local_proxy_url()
+    if proxy:
+        env.setdefault("HTTP_PROXY", proxy)
+        env.setdefault("HTTPS_PROXY", proxy)
+        env.setdefault("ALL_PROXY", proxy)
+    return env
 
 
 def build_codex_executable(app_dir: Path) -> Path:
@@ -184,12 +212,23 @@ def activate_packaged_app(app_user_model_id: str, arguments: str) -> int:
 
 def launch_codex_app(app_dir: Path, debug_port: int) -> Any:
     app_user_model_id = packaged_app_user_model_id(app_dir) if sys.platform == "win32" else None
+    env = codex_process_environment()
     if app_user_model_id:
-        return activate_packaged_app(app_user_model_id, subprocess.list2cmdline(build_codex_arguments(debug_port)))
+        proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+        previous = {key: os.environ.get(key) for key in proxy_keys}
+        os.environ.update({key: env[key] for key in proxy_keys if key in env})
+        try:
+            return activate_packaged_app(app_user_model_id, subprocess.list2cmdline(build_codex_arguments(debug_port)))
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
     if app_dir.suffix == ".app":
-        subprocess.run(["open", "-a", str(app_dir), "--args", *build_codex_arguments(debug_port)], check=True)
+        subprocess.run(["open", "-a", str(app_dir), "--args", *build_codex_arguments(debug_port)], check=True, env=env)
         return None
-    return subprocess.Popen(build_codex_command(app_dir, debug_port))
+    return subprocess.Popen(build_codex_command(app_dir, debug_port), env=env)
 
 
 def start_helper(service, host: str = "127.0.0.1", port: int = 57321) -> HelperServer:

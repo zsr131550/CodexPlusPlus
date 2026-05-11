@@ -1,5 +1,6 @@
 import json
 import threading
+import urllib.error
 import urllib.request
 
 from codex_session_delete.helper_server import HelperServer
@@ -25,16 +26,17 @@ class FakeDeleteService:
         return SessionRef(session_id="archived-t1", title=title)
 
 
-def post_json(url, payload):
+def post_json(url, payload, headers=None):
     data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    request_headers = {"Content-Type": "application/json", **(headers or {})}
+    request = urllib.request.Request(url, data=data, headers=request_headers, method="POST")
     with urllib.request.urlopen(request, timeout=3) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def test_helper_server_delete_and_undo():
     service = FakeDeleteService()
-    server = HelperServer("127.0.0.1", 0, service)
+    server = HelperServer("127.0.0.1", 0, service, allow_http_mutation=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -54,7 +56,7 @@ def test_helper_server_delete_and_undo():
 
 def test_helper_server_resolves_archived_thread_by_title():
     service = FakeDeleteService()
-    server = HelperServer("127.0.0.1", 0, service)
+    server = HelperServer("127.0.0.1", 0, service, allow_http_mutation=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -66,6 +68,46 @@ def test_helper_server_resolves_archived_thread_by_title():
 
     assert resolved == {"session_id": "archived-t1", "title": "Codex Thread"}
     assert service.archived_title_queries == ["Codex Thread"]
+
+
+def test_helper_server_rejects_http_mutation_by_default():
+    service = FakeDeleteService()
+    server = HelperServer("127.0.0.1", 0, service)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.port}"
+        try:
+            post_json(base + "/delete", {"session_id": "s1", "title": "First"})
+            assert False, "expected forbidden response"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+    assert service.deleted == []
+
+
+def test_helper_server_accepts_http_mutation_token():
+    service = FakeDeleteService()
+    server = HelperServer("127.0.0.1", 0, service, http_mutation_token="test-token")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.port}"
+        try:
+            post_json(base + "/delete", {"session_id": "s1", "title": "First"})
+            assert False, "expected forbidden response"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+        deleted = post_json(base + "/delete", {"session_id": "s1", "title": "First"}, {"X-Codex-Session-Delete-Token": "test-token"})
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+    assert deleted["status"] == "local_deleted"
+    assert service.deleted[0].session_id == "s1"
 
 
 def test_helper_server_allows_private_network_preflight():
@@ -86,8 +128,10 @@ def test_helper_server_allows_private_network_preflight():
         )
         with urllib.request.urlopen(request, timeout=3) as response:
             private_network = response.headers.get("Access-Control-Allow-Private-Network")
+            allow_headers = response.headers.get("Access-Control-Allow-Headers")
     finally:
         server.shutdown()
         thread.join(timeout=3)
 
     assert private_network == "true"
+    assert "X-Codex-Session-Delete-Token" in allow_headers
