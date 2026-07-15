@@ -342,6 +342,71 @@ fn manager_no_longer_exposes_mobile_control() {
 }
 
 #[test]
+fn manager_recommendations_page_is_removed_without_removing_injected_ads() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manager_src = manifest_dir.parent().unwrap().join("src");
+    let app_tsx =
+        std::fs::read_to_string(manager_src.join("App.tsx")).expect("read manager App.tsx");
+    let styles =
+        std::fs::read_to_string(manager_src.join("styles.css")).expect("read manager styles.css");
+    let i18n_en =
+        std::fs::read_to_string(manager_src.join("i18n-en.ts")).expect("read manager i18n-en.ts");
+    let commands_rs = std::fs::read_to_string(manifest_dir.join("src/commands.rs"))
+        .expect("read manager commands.rs");
+    let lib_rs =
+        std::fs::read_to_string(manifest_dir.join("src/lib.rs")).expect("read manager lib.rs");
+    let repository_root = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .unwrap();
+    let core_lib =
+        std::fs::read_to_string(repository_root.join("crates/codex-plus-core/src/lib.rs"))
+            .expect("read core lib.rs");
+    let renderer_inject =
+        std::fs::read_to_string(repository_root.join("assets/inject/renderer-inject.js"))
+            .expect("read renderer injection script");
+
+    assert!(!app_tsx.contains("\"recommendations\""));
+    assert!(!app_tsx.contains("RecommendationsScreen"));
+    assert!(!app_tsx.contains("AdsResult"));
+    assert!(!app_tsx.contains("function AdGrid"));
+    assert!(!styles.contains(".recommend-hero"));
+    assert!(!styles.contains(".ad-grid"));
+    assert!(!i18n_en.contains("\"推荐内容\":"));
+    assert!(!commands_rs.contains("struct AdsPayload"));
+    assert!(!commands_rs.contains("pub async fn load_ads"));
+    assert!(!commands_rs.contains("fn ads_payload"));
+    assert!(!lib_rs.contains("commands::load_ads"));
+    assert!(core_lib.contains("pub mod ads;"));
+    assert!(renderer_inject.contains("data-codex-plus-tab=\"sponsor\""));
+}
+
+#[test]
+fn manager_overview_no_longer_promotes_official_relay_but_keeps_provider_presets() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manager_src = manifest_dir.parent().unwrap().join("src");
+    let app_tsx =
+        std::fs::read_to_string(manager_src.join("App.tsx")).expect("read manager App.tsx");
+    let styles =
+        std::fs::read_to_string(manager_src.join("styles.css")).expect("read manager styles.css");
+    let i18n_en =
+        std::fs::read_to_string(manager_src.join("i18n-en.ts")).expect("read manager i18n-en.ts");
+    let presets =
+        std::fs::read_to_string(manager_src.join("presets.ts")).expect("read manager presets.ts");
+
+    assert!(!app_tsx.contains("jojocode-overview"));
+    assert!(!app_tsx.contains("<h2>JOJO Code</h2>"));
+    assert!(!app_tsx.contains("https://jojocode.com/"));
+    assert!(!styles.contains(".jojocode-overview"));
+    assert!(!styles.contains(".jojocode-model-tags"));
+    assert!(!i18n_en.contains("\"官方中转站\":"));
+    assert!(!i18n_en.contains("\"打开 JOJO Code\":"));
+    assert!(presets.contains("id: \"jojocode\""));
+    assert!(presets.contains("baseUrl: \"https://jojocode.com/v1\""));
+}
+
+#[test]
 fn manager_ui_no_longer_exposes_command_wrapper_or_startup_marketplace_prompt() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let app_tsx = manifest_dir.parent().unwrap().join("src/App.tsx");
@@ -364,4 +429,54 @@ fn manager_update_install_keeps_visible_progress_bar() {
     assert!(app_tsx.contains("安装包更新进度"));
     assert!(app_tsx.contains("completedTitle={t(\"上次更新结果\")}"));
     assert!(app_tsx.contains("progress={updateInstallProgress}"));
+}
+
+#[test]
+fn manager_paginates_large_local_session_lists() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manager_src = manifest_dir.parent().unwrap().join("src");
+    let app_tsx =
+        std::fs::read_to_string(manager_src.join("App.tsx")).expect("read manager App.tsx");
+    let styles =
+        std::fs::read_to_string(manager_src.join("styles.css")).expect("read manager styles.css");
+
+    assert!(app_tsx.contains("const SESSION_PAGE_SIZE = 50;"));
+    assert!(app_tsx.contains("visibleSessions.map((session)"));
+    assert!(!app_tsx.contains("{items.map((session)"));
+    assert!(app_tsx.contains("className=\"session-pagination\""));
+    assert!(styles.contains(".session-pagination"));
+}
+
+#[test]
+fn manager_runs_independent_refresh_commands_concurrently() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let app_tsx = manifest_dir.parent().unwrap().join("src/App.tsx");
+    let app_tsx = std::fs::read_to_string(&app_tsx).expect("read manager App.tsx");
+
+    assert!(
+        app_tsx.matches("await Promise.all([").count() >= 8,
+        "startup and route refresh groups should run concurrently"
+    );
+    assert!(app_tsx.contains("refreshRemotePluginMarketplace(true),"));
+}
+
+#[test]
+fn pending_provider_import_refresh_is_event_driven() {
+    const EVENT_NAME: &str = "manager://pending-provider-import-changed";
+
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let app_tsx = std::fs::read_to_string(manifest_dir.parent().unwrap().join("src/App.tsx"))
+        .expect("read manager App.tsx");
+    let lib_rs =
+        std::fs::read_to_string(manifest_dir.join("src/lib.rs")).expect("read manager lib.rs");
+    let main_rs =
+        std::fs::read_to_string(manifest_dir.join("src/main.rs")).expect("read manager main.rs");
+
+    assert!(app_tsx.contains(EVENT_NAME));
+    assert!(lib_rs.contains(EVENT_NAME));
+    assert!(app_tsx.contains("listen(PENDING_PROVIDER_IMPORT_EVENT"));
+    assert!(app_tsx.contains("onFocusChanged"));
+    assert!(!app_tsx.contains("}, 1200);"));
+    assert!(lib_rs.contains("start_single_instance_signal_listener"));
+    assert!(main_rs.contains("notify_pending_provider_import"));
 }

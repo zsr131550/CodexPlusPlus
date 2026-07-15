@@ -1,17 +1,22 @@
 pub mod commands;
 pub mod install;
 
+use std::io::{Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 
 const TRAY_ID: &str = "codex_plus_tray";
 
 static APP_EXITING: AtomicBool = AtomicBool::new(false);
 const TRAY_MENU_SHOW: &str = "tray_show_main";
 const TRAY_MENU_QUIT: &str = "tray_quit_app";
+const PENDING_PROVIDER_IMPORT_EVENT: &str = "manager://pending-provider-import-changed";
+const PENDING_PROVIDER_IMPORT_SIGNAL: &[u8] = b"provider-import\n";
 
 pub fn run() {
     install_panic_logger();
@@ -21,9 +26,20 @@ pub fn run() {
             "version": env!("CARGO_PKG_VERSION")
         }),
     );
-    let Some(_guard) = acquire_single_instance_guard() else {
+    let Some(guard) = acquire_single_instance_guard() else {
         return;
     };
+    let single_instance_listener = match guard.try_clone_listener() {
+        Ok(listener) => listener,
+        Err(error) => {
+            let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
+                "manager.guard_listener_clone_failed",
+                serde_json::json!({ "error": error.to_string() }),
+            );
+            None
+        }
+    };
+    let _guard = guard;
     let show_update = commands::startup_should_show_update();
     let run_result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -44,6 +60,9 @@ pub fn run() {
             let main_window = main_window_builder.build()?;
             install_tray(app)?;
             register_main_window_events(main_window);
+            if let Some(listener) = single_instance_listener {
+                start_single_instance_signal_listener(app.handle().clone(), listener);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -66,7 +85,6 @@ pub fn run() {
             commands::delete_local_session,
             commands::load_provider_sync_targets,
             commands::sync_providers_now,
-            commands::load_ads,
             commands::refresh_script_market,
             commands::install_market_script,
             commands::set_user_script_enabled,
@@ -125,6 +143,38 @@ pub fn run() {
             }),
         );
     }
+}
+
+fn start_single_instance_signal_listener<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    listener: TcpListener,
+) {
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else {
+                break;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            let mut signal = Vec::with_capacity(PENDING_PROVIDER_IMPORT_SIGNAL.len());
+            if stream.take(64).read_to_end(&mut signal).is_ok()
+                && signal == PENDING_PROVIDER_IMPORT_SIGNAL
+            {
+                let _ = app_handle.emit(PENDING_PROVIDER_IMPORT_EVENT, ());
+            }
+        }
+    });
+}
+
+pub fn notify_pending_provider_import() {
+    let address = SocketAddr::from(([127, 0, 0, 1], codex_plus_core::ports::manager_guard_port()));
+    let _ = notify_pending_provider_import_at(address);
+}
+
+fn notify_pending_provider_import_at(address: SocketAddr) -> std::io::Result<()> {
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(200))?;
+    stream.set_write_timeout(Some(Duration::from_millis(200)))?;
+    stream.write_all(PENDING_PROVIDER_IMPORT_SIGNAL)?;
+    stream.shutdown(Shutdown::Write)
 }
 
 fn install_tray<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
@@ -332,5 +382,26 @@ fn acquire_single_instance_guard() -> Option<codex_plus_core::ports::LoopbackPor
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_provider_import_notification_writes_expected_signal() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut signal = Vec::new();
+            stream.read_to_end(&mut signal).unwrap();
+            signal
+        });
+
+        notify_pending_provider_import_at(address).unwrap();
+
+        assert_eq!(receiver.join().unwrap(), PENDING_PROVIDER_IMPORT_SIGNAL);
     }
 }

@@ -13,6 +13,9 @@ apps/codex-plus-manager/src-tauri/gen/
 .codex_asar_extract_latest/
 .superpowers/
 .claude/
+.agents/
+.codex/
+.trellis/
 docs/superpowers/
 
 *.log

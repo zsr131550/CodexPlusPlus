@@ -16,9 +16,11 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
+  ArrowRight,
   Bell,
   CheckCircle2,
   CircleArrowUp,
@@ -561,22 +563,6 @@ type UpdateResult = CommandResult<{
   progress?: number;
 }>;
 
-type AdItem = {
-  id?: string;
-  type: "sponsor" | "normal" | string;
-  title: string;
-  description: string;
-  url: string;
-  image?: string;
-  highlights?: string[];
-  expires_at?: string;
-};
-
-type AdsResult = CommandResult<{
-  version: number;
-  ads: AdItem[];
-}>;
-
 type ScriptMarketItem = {
   id: string;
   name: string;
@@ -654,8 +640,11 @@ type StartupResult = CommandResult<{
   showUpdate: boolean;
 }>;
 
-type Route = "overview" | "relay" | "relayEnvironment" | "sessions" | "context" | "enhance" | "zedRemote" | "userScripts" | "recommendations" | "maintenance" | "about" | "settings";
+type Route = "overview" | "relay" | "relayEnvironment" | "sessions" | "context" | "enhance" | "zedRemote" | "userScripts" | "maintenance" | "about" | "settings";
 type Theme = "dark" | "light";
+
+const PENDING_PROVIDER_IMPORT_EVENT = "manager://pending-provider-import-changed";
+const SESSION_PAGE_SIZE = 50;
 
 const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string }> = [
   { id: "overview", label: t("概览"), icon: LayoutDashboard },
@@ -665,7 +654,6 @@ const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string
   { id: "enhance", label: t("Codex增强"), icon: Hammer },
   { id: "zedRemote", label: t("Zed 远程项目"), icon: ExternalLink },
   { id: "userScripts", label: t("脚本市场"), icon: FileCode2 },
-  { id: "recommendations", label: t("推荐内容"), icon: ExternalLink },
   { id: "maintenance", label: t("安装维护"), icon: Wrench },
   { id: "about", label: t("关于"), icon: Info },
   { id: "settings", label: t("设置"), icon: Settings },
@@ -784,7 +772,6 @@ export function App() {
     percent: 0,
     message: t("尚未运行安装包更新。"),
   });
-  const [ads, setAds] = useState<AdsResult | null>(null);
   const [scriptMarket, setScriptMarket] = useState<ScriptMarketResult | null>(null);
   const [launchForm, setLaunchForm] = useState({
     appPath: "",
@@ -1157,41 +1144,54 @@ export function App() {
     setRoute(next);
     if (next === "overview") await refreshOverview(true);
     if (next === "relay") {
-      await refreshSettings(true);
-      await refreshRelay(true);
-      await refreshRelayFiles(true);
-      await refreshEnvConflicts(true);
-      await refreshCcsProviders(true);
+      await Promise.all([
+        refreshSettings(true),
+        refreshRelay(true),
+        refreshRelayFiles(true),
+        refreshEnvConflicts(true),
+        refreshCcsProviders(true),
+      ]);
     }
     if (next === "relayEnvironment") await refreshRelayEnvironment(true);
     if (next === "sessions") {
-      await refreshSettings(true);
-      await refreshLocalSessions(true);
-      await refreshProviderSyncTargets(true);
+      await Promise.all([
+        refreshSettings(true),
+        refreshLocalSessions(true),
+        refreshProviderSyncTargets(true),
+      ]);
     }
     if (next === "zedRemote") {
-      await refreshSettings(true);
-      await refreshZedRemoteProjects(true);
+      await Promise.all([
+        refreshSettings(true),
+        refreshZedRemoteProjects(true),
+      ]);
     }
     if (next === "context") {
-      await refreshSettings(true);
-      await refreshRelayFiles(true);
-      await refreshLiveContextEntries(true);
+      await Promise.all([
+        refreshSettings(true),
+        refreshRelayFiles(true),
+        refreshLiveContextEntries(true),
+      ]);
     }
     if (next === "settings") await refreshSettings(true);
     if (next === "userScripts") {
-      await refreshSettings(true);
-      await refreshScriptMarket(true);
+      await Promise.all([
+        refreshSettings(true),
+        refreshScriptMarket(true),
+      ]);
     }
-    if (next === "recommendations") await refreshAds(true);
     if (next === "about") {
-      await refreshOverview(true);
-      await refreshLogs(true);
-      await refreshDiagnostics(true);
+      await Promise.all([
+        refreshOverview(true),
+        refreshLogs(true),
+        refreshDiagnostics(true),
+      ]);
     }
     if (next === "maintenance") {
-      await refreshOverview(true);
-      await refreshWatcher(true);
+      await Promise.all([
+        refreshOverview(true),
+        refreshWatcher(true),
+      ]);
     }
   };
 
@@ -1455,14 +1455,6 @@ export function App() {
       setSettings(result);
       setSettingsForm(normalizeSettings(result.settings));
       showNotice(t("图片覆盖层"), result.message, result.status);
-    }
-  };
-
-  const refreshAds = async (silent = false) => {
-    const result = await run(() => call<AdsResult>("load_ads"));
-    if (result) {
-      setAds(result);
-      if (!silent) showResultNotice(t("推荐内容"), result, { silentSuccess: true });
     }
   };
 
@@ -1839,6 +1831,46 @@ export function App() {
   };
 
   useEffect(() => {
+    let disposed = false;
+    let unlistenPendingImport: (() => void) | undefined;
+    let unlistenWindowFocus: (() => void) | undefined;
+
+    void (async () => {
+      try {
+        const stopPendingImport = await listen(PENDING_PROVIDER_IMPORT_EVENT, () => {
+          void refreshPendingProviderImport(true);
+        });
+        if (disposed) {
+          stopPendingImport();
+          return;
+        }
+        unlistenPendingImport = stopPendingImport;
+
+        const stopWindowFocus = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+          if (focused) void refreshPendingProviderImport(true);
+        });
+        if (disposed) {
+          stopWindowFocus();
+          return;
+        }
+        unlistenWindowFocus = stopWindowFocus;
+      } catch (error) {
+        logDiagnostic("manager.pending_provider_import_listener_failed", {
+          error: stringifyError(error),
+        });
+      } finally {
+        if (!disposed) void refreshPendingProviderImport(true);
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      unlistenPendingImport?.();
+      unlistenWindowFocus?.();
+    };
+  }, []);
+
+  useEffect(() => {
     void (async () => {
       const startup = await run(() => call<StartupResult>("startup_options"));
       if (startup?.showUpdate) {
@@ -1847,13 +1879,14 @@ export function App() {
       } else {
         void checkUpdate(true);
       }
-      await refreshOverview(true);
-      await refreshSettings(true);
-      await refreshRelay(true);
-      await refreshEnvConflicts(true);
-      await refreshProviderSyncTargets(true);
-      await refreshPendingProviderImport(true);
-      await refreshRemotePluginMarketplace(true);
+      await Promise.all([
+        refreshOverview(true),
+        refreshSettings(true),
+        refreshRelay(true),
+        refreshEnvConflicts(true),
+        refreshProviderSyncTargets(true),
+        refreshRemotePluginMarketplace(true),
+      ]);
     })();
   }, []);
 
@@ -1865,13 +1898,6 @@ export function App() {
         windowTitle: "Codex++ Manager",
       });
     }
-  }, []);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void refreshPendingProviderImport(true);
-    }, 1200);
-    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -2000,7 +2026,6 @@ export function App() {
       importCcsProviders,
       refreshLiveContextEntries,
       syncLiveContextEntries,
-      refreshAds,
       refreshScriptMarket,
       installMarketScript,
       setUserScriptEnabled,
@@ -2183,7 +2208,6 @@ export function App() {
             <ZedRemoteScreen projects={zedRemoteProjects} form={settingsForm} onFormChange={setSettingsForm} actions={actions} />
           ) : null}
           {route === "userScripts" ? <UserScriptsScreen settings={settings} market={scriptMarket} actions={actions} /> : null}
-          {route === "recommendations" ? <RecommendationsScreen ads={ads} actions={actions} /> : null}
           {route === "maintenance" ? (
             <MaintenanceScreen
               overview={overview}
@@ -2276,7 +2300,6 @@ type Actions = {
   importCcsProviders: () => Promise<void>;
   refreshLiveContextEntries: () => Promise<LiveContextEntriesResult | null>;
   syncLiveContextEntries: (settings: BackendSettings, silent?: boolean) => Promise<LiveContextEntriesResult | null>;
-  refreshAds: () => Promise<void>;
   refreshScriptMarket: () => Promise<void>;
   installMarketScript: (id: string) => Promise<void>;
   setUserScriptEnabled: (key: string, enabled: boolean) => Promise<void>;
@@ -2334,40 +2357,6 @@ function OverviewScreen({
   const health = healthItems(overview);
   return (
     <>
-      <Panel className="jojocode-overview">
-        <CardContent>
-          <div className="jojocode-overview-layout">
-            <div className="jojocode-overview-main">
-              <div className="jojocode-overview-mark">
-                <Network className="h-5 w-5" />
-              </div>
-              <div>
-                <span className="eyebrow">{t("官方中转站")}</span>
-                <h2>JOJO Code</h2>
-                <p>
-                  {t("Codex++ 官方中转站，主打稳定接入和划算价格，支持 GPT-5.6 全系列、Fable 5、Sonnet 5、GPT-5.5、GPT-5.4、Claude Opus 4.8、Claude Opus 4.7、gpt-image-2 等模型与图像能力。")}
-                </p>
-              </div>
-            </div>
-            <div className="jojocode-overview-side">
-              <div className="jojocode-model-tags">
-                <span>GPT-5.6 全系列</span>
-                <span>Fable 5</span>
-                <span>Sonnet 5</span>
-                <span>GPT-5.5</span>
-                <span>GPT-5.4</span>
-                <span>Opus 4.8</span>
-                <span>Opus 4.7</span>
-                <span>gpt-image-2</span>
-              </div>
-              <Button onClick={() => void actions.openExternalUrl("https://jojocode.com/")}>
-                <ExternalLink className="h-4 w-4" />
-                {t("打开 JOJO Code")}
-              </Button>
-            </div>
-          </div>
-        </CardContent>
-      </Panel>
       <Panel>
         <CardHead title={t("健康检查")} detail={t("概览只展示关键问题，具体配置在对应页面处理")} />
         <CardContent>
@@ -3102,9 +3091,16 @@ function SessionsScreen({
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(() => new Set());
   const [selectionMode, setSelectionMode] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
   const selectedSessions = useMemo(() => items.filter((session) => selectedSessionIds.has(session.id)), [items, selectedSessionIds]);
   const selectedCount = selectedSessions.length;
   const allSelected = items.length > 0 && selectedCount === items.length;
+  const totalPages = Math.max(1, Math.ceil(items.length / SESSION_PAGE_SIZE));
+  const visiblePage = Math.min(currentPage, totalPages);
+  const visibleSessions = useMemo(() => {
+    const firstIndex = (visiblePage - 1) * SESSION_PAGE_SIZE;
+    return items.slice(firstIndex, firstIndex + SESSION_PAGE_SIZE);
+  }, [items, visiblePage]);
 
   useEffect(() => {
     const itemIds = new Set(items.map((session) => session.id));
@@ -3113,6 +3109,10 @@ function SessionsScreen({
       return next.size === current.size ? current : next;
     });
   }, [items]);
+
+  useEffect(() => {
+    setCurrentPage((page) => Math.min(page, totalPages));
+  }, [totalPages]);
 
   const toggleSessionSelection = (sessionId: string, checked: boolean) => {
     setSelectedSessionIds((current) => {
@@ -3241,8 +3241,35 @@ function SessionsScreen({
                   </Button>
                 </div>
               </div>
+              {totalPages > 1 ? (
+                <div className="session-pagination">
+                  <span className="session-pagination-status">{tf("第 {0} / {1} 页", [visiblePage, totalPages])}</span>
+                  <div className="session-pagination-actions">
+                    <Button
+                      aria-label={t("上一页")}
+                      disabled={visiblePage <= 1}
+                      onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                      size="icon"
+                      title={t("上一页")}
+                      variant="outline"
+                    >
+                      <ArrowLeft className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      aria-label={t("下一页")}
+                      disabled={visiblePage >= totalPages}
+                      onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                      size="icon"
+                      title={t("下一页")}
+                      variant="outline"
+                    >
+                      <ArrowRight className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
               <div className="session-list">
-                {items.map((session) => {
+                {visibleSessions.map((session) => {
                   const selected = selectedSessionIds.has(session.id);
                   return (
                     <div className="session-row" data-selection-mode={selectionMode} data-selected={selected} key={session.id}>
@@ -3278,43 +3305,6 @@ function SessionsScreen({
           ) : (
             <div className="empty">{t("未读取到本地会话，或当前 SQLite 会话库不存在。")}</div>
           )}
-        </CardContent>
-      </Panel>
-    </>
-  );
-}
-
-function RecommendationsScreen({ ads, actions }: { ads: AdsResult | null; actions: Actions }) {
-  const items = (ads?.ads ?? []).filter((ad) => !isExpiredAd(ad));
-  const sponsors = items.filter((ad) => ad.type === "sponsor");
-  const normal = items.filter((ad) => ad.type === "normal");
-  return (
-    <>
-      <Panel>
-        <CardHead title={t("推荐内容")} detail={t("与 Codex 内插件菜单使用同一个远端广告源")} />
-        <CardContent>
-          <div className="recommend-hero">
-            <div>
-              <strong>{ads ? tf("已加载 {0} 条推荐", [items.length]) : t("尚未加载推荐内容")}</strong>
-              <span>{t("内容来自 BigPizzaV3/Ad-List，分为赞助商推荐和普通推荐。")}</span>
-            </div>
-            <Button onClick={() => void actions.refreshAds()}>
-              <RefreshCw className="h-4 w-4" />
-              {t("刷新推荐")}
-            </Button>
-          </div>
-        </CardContent>
-      </Panel>
-      <Panel>
-        <CardHead title={t("赞助商推荐")} detail={tf("{0} 条", [sponsors.length])} />
-        <CardContent>
-          <AdGrid actions={actions} ads={sponsors} empty={t("暂无赞助商推荐。")} />
-        </CardContent>
-      </Panel>
-      <Panel>
-        <CardHead title={t("普通推荐")} detail={tf("{0} 条", [normal.length])} />
-        <CardContent>
-          <AdGrid actions={actions} ads={normal} empty={t("暂无普通推荐。")} />
         </CardContent>
       </Panel>
     </>
@@ -5365,40 +5355,6 @@ function ScriptRow({ script, actions }: { script: NonNullable<UserScriptInventor
   );
 }
 
-function AdGrid({ ads, empty, actions }: { ads: AdItem[]; empty: string; actions: Actions }) {
-  if (!ads.length) return <div className="empty">{empty}</div>;
-  return (
-    <div className="ad-grid">
-      {ads.map((ad) => (
-        <button className="ad-card" key={ad.id || `${ad.type}-${ad.title}`} onClick={() => void actions.openExternalUrl(ad.url)} type="button">
-          {ad.image ? <img alt="" className="ad-image" src={ad.image} /> : null}
-          <div>
-            <strong>{ad.title}</strong>
-            <p>{ad.description}</p>
-          </div>
-          {ad.highlights?.length ? (
-            <div className="ad-tags">
-              {ad.highlights.map((item) => (
-                <span key={item}>{item}</span>
-              ))}
-            </div>
-          ) : null}
-          <span className="ad-link">
-            {t("打开")}
-            <ExternalLink className="h-4 w-4" />
-          </span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function isExpiredAd(ad: AdItem) {
-  if (!ad.expires_at) return false;
-  const expiresAt = Date.parse(ad.expires_at);
-  return Number.isFinite(expiresAt) && expiresAt < Date.now();
-}
-
 function routeTitle(route: Route) {
   return routes.find((item) => item.id === route)?.label ?? t("概览");
 }
@@ -5413,7 +5369,6 @@ function routeSubtitle(route: Route) {
     enhance: t("会话删除、导出、项目移动和脚本能力"),
     zedRemote: t("管理 Codex SSH 项目并加入 Zed workspace"),
     userScripts: t("内置和用户自定义脚本清单"),
-    recommendations: t("赞助商推荐与普通推荐"),
     maintenance: t("入口安装、修复、Watcher 与手动启动"),
     about: t("版本信息、项目链接、GitHub Release 更新、日志与诊断"),
     settings: t("主题和启动参数"),

@@ -174,6 +174,13 @@ impl LoopbackPortGuard {
             .then_some(())
             .and_then(|_| self.lock_path.as_deref())
     }
+
+    pub fn try_clone_listener(&self) -> std::io::Result<Option<TcpListener>> {
+        self._listener
+            .as_ref()
+            .map(TcpListener::try_clone)
+            .transpose()
+    }
 }
 
 pub fn acquire_resilient_loopback_port_guard(port: u16) -> std::io::Result<LoopbackPortGuard> {
@@ -242,6 +249,7 @@ fn normalize_lock_error(error: std::io::Error) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
     use std::sync::{Mutex, MutexGuard};
 
     static GUARD_PORT_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -256,6 +264,25 @@ mod tests {
         assert!(guard.lock_path.is_some());
         assert!(guard._listener.is_some());
         assert!(guard.fallback_path().is_none());
+    }
+
+    #[test]
+    fn resilient_guard_can_clone_its_listener_for_single_instance_signals() {
+        let temp = tempfile::tempdir().unwrap();
+        let port = find_available_loopback_port();
+        let guard = acquire_resilient_loopback_port_guard_at(port, temp.path()).unwrap();
+        let listener = guard.try_clone_listener().unwrap().unwrap();
+
+        let sender = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream.write_all(b"provider-import\n").unwrap();
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut signal = String::new();
+        stream.read_to_string(&mut signal).unwrap();
+        sender.join().unwrap();
+
+        assert_eq!(signal, "provider-import\n");
     }
 
     #[test]

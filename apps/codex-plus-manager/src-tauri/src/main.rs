@@ -12,6 +12,7 @@ fn main() {
                             "baseUrl": request.base_url
                         }),
                     );
+                    codex_plus_manager_lib::notify_pending_provider_import();
                     codex_plus_manager_lib::focus_existing_manager_window();
                 }
                 Err(error) => {
