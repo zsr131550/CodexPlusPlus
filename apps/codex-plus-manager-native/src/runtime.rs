@@ -32,6 +32,15 @@ impl OverviewDispatcher {
                     }
 
                     let result = source.load_overview().map(Arc::new);
+                    if let Err(error) = &result {
+                        let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
+                            "native_manager.overview_failed",
+                            serde_json::json!({
+                                "kind": format!("{:?}", error.kind()),
+                                "detail": error.detail(),
+                            }),
+                        );
+                    }
                     if response_tx
                         .send(OverviewResponse { request_id, result })
                         .is_err()
@@ -73,8 +82,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use codex_plus_manager_service::{
-        LocatedResource, OverviewError, OverviewSnapshot, OverviewSource, ResourcePresence,
-        ShortcutSnapshot, UpdateCheckState,
+        LocatedResource, OverviewError, OverviewErrorKind, OverviewSnapshot, OverviewSource,
+        ResourcePresence, ShortcutSnapshot, UpdateCheckState,
     };
 
     use super::*;
@@ -99,6 +108,17 @@ mod tests {
     struct ExitSource {
         exited: Option<mpsc::Sender<()>>,
         calls: Arc<AtomicUsize>,
+    }
+
+    struct FailingSource;
+
+    impl OverviewSource for FailingSource {
+        fn load_overview(&self) -> Result<OverviewSnapshot, OverviewError> {
+            Err(OverviewError::new(
+                OverviewErrorKind::LoadFailed,
+                "deterministic failure",
+            ))
+        }
     }
 
     impl OverviewSource for ExitSource {
@@ -210,5 +230,26 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("worker should release its source after request channel closes");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn service_failures_are_logged_by_the_worker_before_delivery() {
+        let temp = tempfile::tempdir().unwrap();
+        let log_path = temp.path().join("diagnostic.log");
+        codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+        let dispatcher = OverviewDispatcher::spawn(Arc::new(FailingSource), Arc::new(|| {}));
+
+        dispatcher.request(1).unwrap();
+        let response = receive(&dispatcher);
+        assert_eq!(response.request_id, 1);
+        assert_eq!(
+            response.result.unwrap_err().kind(),
+            OverviewErrorKind::LoadFailed
+        );
+
+        let log = std::fs::read_to_string(log_path).unwrap();
+        codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
+        assert!(log.contains("native_manager.overview_failed"));
+        assert!(log.contains("deterministic failure"));
     }
 }
