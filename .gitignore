@@ -24,6 +24,9 @@ Thumbs.db
 .env
 tools/codex-wechat/config.local.json
 
+**/tests/snapshots/**/*.diff.png
+**/tests/snapshots/**/*.new.png
+
 # pnpm artifacts (project uses npm)
 pnpm-lock.yaml
 pnpm-workspace.yaml
