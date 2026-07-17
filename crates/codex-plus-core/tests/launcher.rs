@@ -172,7 +172,18 @@ fn app_paths_resolves_portable_current_link_to_directory_version() {
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(target.join("Codex.exe"), "").unwrap();
     std::fs::write(target.join("version"), "42.1.0\n").unwrap();
-    std::os::windows::fs::symlink_dir(&target, &current).unwrap();
+    let junction = std::process::Command::new("cmd")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&current)
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(
+        junction.status.success(),
+        "mklink failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&junction.stdout),
+        String::from_utf8_lossy(&junction.stderr)
+    );
 
     assert_eq!(
         codex_app_version(&current).as_deref(),
