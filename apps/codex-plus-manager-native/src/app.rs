@@ -5,6 +5,8 @@ use codex_plus_manager_service::OverviewSource;
 use eframe::egui;
 
 use crate::fonts;
+use crate::i18n::{Locale, ThemeMode};
+use crate::perf::{PerfRecorder, PerfScriptAction};
 use crate::persistence::{self, PersistedUiState};
 use crate::runtime::{DispatchError, OverviewDispatcher};
 use crate::state::{AppState, OverviewFailureKind, OverviewPhase};
@@ -17,6 +19,7 @@ pub struct NativeManagerApp {
     dispatcher: OverviewDispatcher,
     last_updated: Option<String>,
     worker_stopped: bool,
+    perf: Option<PerfRecorder>,
 }
 
 impl NativeManagerApp {
@@ -24,6 +27,7 @@ impl NativeManagerApp {
         creation: &eframe::CreationContext<'_>,
         cjk_font: Option<Vec<u8>>,
         source: Arc<dyn OverviewSource>,
+        perf: Option<PerfRecorder>,
     ) -> Self {
         egui_extras::install_image_loaders(&creation.egui_ctx);
         if let Some(bytes) = cjk_font {
@@ -41,6 +45,7 @@ impl NativeManagerApp {
             dispatcher,
             last_updated: None,
             worker_stopped: false,
+            perf,
         };
         app.refresh();
         app
@@ -79,6 +84,9 @@ impl NativeManagerApp {
                         && self.state.overview.phase == OverviewPhase::Ready
                     {
                         self.last_updated = Some(current_utc_time());
+                        if let Some(perf) = &mut self.perf {
+                            perf.record_overview_ready();
+                        }
                     }
                 }
                 Ok(None) => break,
@@ -108,22 +116,63 @@ impl NativeManagerApp {
             renderer: "WGPU".to_owned(),
         }
     }
+
+    fn apply_perf_action(&mut self, ctx: &egui::Context, action: PerfScriptAction) {
+        let action = match action {
+            PerfScriptAction::NavigateAbout => ShellAction::Navigate(crate::state::Route::About),
+            PerfScriptAction::NavigateOverview => {
+                ShellAction::Navigate(crate::state::Route::Overview)
+            }
+            PerfScriptAction::ToggleLocale => ShellAction::SetLocale(match self.persisted.locale {
+                Locale::ZhCn => Locale::En,
+                Locale::En => Locale::ZhCn,
+            }),
+            PerfScriptAction::ToggleTheme => ShellAction::SetTheme(match self.persisted.theme {
+                ThemeMode::Dark => ThemeMode::Light,
+                ThemeMode::Light => ThemeMode::Dark,
+            }),
+            PerfScriptAction::Refresh => ShellAction::Refresh,
+        };
+        self.apply_action(ctx, action);
+    }
 }
 
 impl eframe::App for NativeManagerApp {
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.reduce_ready_responses();
+        if let Some(perf) = &mut self.perf {
+            perf.drive(ctx);
+        }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let scripted_action = self.perf.as_ref().and_then(|perf| perf.scripted_action(ui));
+        if let Some(action) = scripted_action {
+            self.apply_perf_action(ui.ctx(), action);
+        }
         let model = self.view_model();
         for action in render_shell(ui, &model) {
             self.apply_action(ui.ctx(), action);
+        }
+        if let Some(perf) = &mut self.perf {
+            perf.record_ui_frame(frame.info().cpu_usage);
         }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         persistence::save(storage, &self.persisted);
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        if let Some(perf) = &mut self.perf {
+            perf.raw_input_hook(ctx, input);
+        }
+    }
+
+    fn on_exit(&mut self) {
+        if let Some(perf) = &mut self.perf {
+            perf.finish();
+        }
     }
 }
 

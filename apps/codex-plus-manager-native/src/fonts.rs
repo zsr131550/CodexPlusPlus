@@ -40,7 +40,7 @@ fn platform_cjk_font_candidates() -> Vec<PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
     let fonts = windows.join("Fonts");
-    ["msyh.ttc", "msyhbd.ttc", "simsun.ttc"]
+    ["simhei.ttf", "msyh.ttc", "msyhbd.ttc", "simsun.ttc"]
         .into_iter()
         .map(|name| fonts.join(name))
         .collect()
@@ -121,10 +121,10 @@ mod tests {
         assert_eq!(
             candidates
                 .iter()
-                .take(3)
+                .take(4)
                 .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
                 .collect::<Vec<_>>(),
-            ["msyh.ttc", "msyhbd.ttc", "simsun.ttc"]
+            ["simhei.ttf", "msyh.ttc", "msyhbd.ttc", "simsun.ttc"]
         );
 
         #[cfg(target_os = "macos")]

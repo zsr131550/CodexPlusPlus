@@ -2,16 +2,21 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use codex_plus_manager_native::app::NativeManagerApp;
 use codex_plus_manager_native::fonts;
+use codex_plus_manager_native::perf::PerfRecorder;
 use codex_plus_manager_service::SystemOverviewSource;
 use eframe::egui;
 
 const APP_ID: &str = "com.codexplusplus.manager.native";
 const APP_TITLE: &str = "Codex++ Native Manager";
+const MEBIBYTE: u64 = 1024 * 1024;
 
 fn main() -> eframe::Result {
+    let process_started = Instant::now();
+    let perf = PerfRecorder::from_env(process_started);
     let cjk_font = match fonts::load_cjk_font() {
         Ok(bytes) => Some(bytes),
         Err(error) => {
@@ -32,6 +37,7 @@ fn main() -> eframe::Result {
             .with_inner_size([1180.0, 820.0])
             .with_min_inner_size([960.0, 720.0]),
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: memory_efficient_wgpu_configuration(),
         persist_window: true,
         persistence_path: persistence_path_from_env(),
         centered: true,
@@ -46,9 +52,47 @@ fn main() -> eframe::Result {
                 creation,
                 cjk_font,
                 Arc::new(SystemOverviewSource::default()),
+                perf,
             )))
         }),
     )
+}
+
+fn memory_efficient_wgpu_configuration() -> eframe::WgpuConfiguration {
+    memory_efficient_wgpu_configuration_for(eframe::wgpu::Backends::from_env())
+}
+
+fn memory_efficient_wgpu_configuration_for(
+    backend_override: Option<eframe::wgpu::Backends>,
+) -> eframe::WgpuConfiguration {
+    let mut configuration = eframe::WgpuConfiguration {
+        surface: eframe::SurfaceConfig::LOW_LATENCY,
+        ..Default::default()
+    };
+    let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut configuration.wgpu_setup else {
+        unreachable!("default WGPU configuration must create a device")
+    };
+    setup.instance_descriptor.backends =
+        backend_override.unwrap_or(platform_default_wgpu_backends());
+    let default_device_descriptor = Arc::clone(&setup.device_descriptor);
+    setup.device_descriptor = Arc::new(move |adapter| {
+        let mut descriptor = default_device_descriptor(adapter);
+        descriptor.memory_hints = eframe::wgpu::MemoryHints::Manual {
+            suballocated_device_memory_block_size: 4 * MEBIBYTE..8 * MEBIBYTE,
+        };
+        descriptor
+    });
+    configuration
+}
+
+#[cfg(windows)]
+fn platform_default_wgpu_backends() -> eframe::wgpu::Backends {
+    eframe::wgpu::Backends::GL
+}
+
+#[cfg(not(windows))]
+fn platform_default_wgpu_backends() -> eframe::wgpu::Backends {
+    eframe::wgpu::Backends::PRIMARY | eframe::wgpu::Backends::GL
 }
 
 fn persistence_path_from_env() -> Option<PathBuf> {
@@ -56,4 +100,37 @@ fn persistence_path_from_env() -> Option<PathBuf> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .map(|directory| directory.join("app.ron"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wgpu_configuration_uses_a_low_memory_windows_backend() {
+        let configuration = memory_efficient_wgpu_configuration_for(None);
+        assert_eq!(configuration.surface, eframe::SurfaceConfig::LOW_LATENCY);
+
+        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = configuration.wgpu_setup else {
+            panic!("configuration should create a WGPU device")
+        };
+        #[cfg(windows)]
+        assert_eq!(
+            setup.instance_descriptor.backends,
+            eframe::wgpu::Backends::GL
+        );
+    }
+
+    #[test]
+    fn wgpu_backend_environment_override_is_preserved() {
+        let configuration =
+            memory_efficient_wgpu_configuration_for(Some(eframe::wgpu::Backends::DX12));
+        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = configuration.wgpu_setup else {
+            panic!("configuration should create a WGPU device")
+        };
+        assert_eq!(
+            setup.instance_descriptor.backends,
+            eframe::wgpu::Backends::DX12
+        );
+    }
 }

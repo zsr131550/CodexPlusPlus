@@ -2,6 +2,7 @@ pub mod app;
 pub mod fonts;
 pub mod i18n;
 pub mod icons;
+pub mod perf;
 pub mod persistence;
 pub mod runtime;
 pub mod state;
