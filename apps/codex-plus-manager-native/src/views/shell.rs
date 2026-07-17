@@ -4,22 +4,24 @@ use codex_plus_manager_service::OverviewSnapshot;
 use eframe::egui;
 
 use crate::i18n::{Locale, TextKey, ThemeMode, text};
+use crate::state::provider::{ProviderLoadPhase, ProviderViewState};
 use crate::state::{OverviewFailureKind, OverviewPhase, Route};
 use crate::{icons, theme};
 
-use super::{about, overview};
+use super::{about, overview, provider};
 
 pub const SIDEBAR_WIDTH: f32 = 176.0;
 pub const HEADER_HEIGHT: f32 = 58.0;
 pub const STATUS_HEIGHT: f32 = 28.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellAction {
     Navigate(Route),
     Refresh,
     SetLocale(Locale),
     SetTheme(ThemeMode),
     Retry,
+    Provider(provider::ProviderAction),
 }
 
 #[derive(Debug, Clone)]
@@ -34,7 +36,11 @@ pub struct ShellViewModel {
     pub renderer: String,
 }
 
-pub fn render_shell(ui: &mut egui::Ui, model: &ShellViewModel) -> Vec<ShellAction> {
+pub fn render_shell(
+    ui: &mut egui::Ui,
+    model: &ShellViewModel,
+    provider_state: Option<&ProviderViewState>,
+) -> Vec<ShellAction> {
     let mut actions = Vec::new();
 
     egui::Panel::left("native_manager_sidebar")
@@ -63,7 +69,7 @@ pub fn render_shell(ui: &mut egui::Ui, model: &ShellViewModel) -> Vec<ShellActio
                 .fill(ui.visuals().window_fill)
                 .inner_margin(egui::Margin::symmetric(16, 4)),
         )
-        .show(ui, |ui| render_status(ui, model));
+        .show(ui, |ui| render_status(ui, model, provider_state));
 
     egui::CentralPanel::default()
         .frame(
@@ -73,6 +79,13 @@ pub fn render_shell(ui: &mut egui::Ui, model: &ShellViewModel) -> Vec<ShellActio
         )
         .show(ui, |ui| match model.route {
             Route::Overview => overview::render(ui, model, &mut actions),
+            Route::Providers => {
+                if let Some(state) = provider_state {
+                    let mut provider_actions = Vec::new();
+                    provider::render(ui, state, model.locale, &mut provider_actions);
+                    actions.extend(provider_actions.into_iter().map(ShellAction::Provider));
+                }
+            }
             Route::About => about::render(ui, model),
         });
 
@@ -94,6 +107,14 @@ fn render_sidebar(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<S
         text(model.locale, TextKey::Overview),
         model.route == Route::Overview,
         Route::Overview,
+        actions,
+    );
+    navigation_button(
+        ui,
+        icons::server_cog(),
+        text(model.locale, TextKey::Providers),
+        model.route == Route::Providers,
+        Route::Providers,
         actions,
     );
     navigation_button(
@@ -206,6 +227,11 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
                     text(model.locale, TextKey::AppName),
                     text(model.locale, TextKey::Overview)
                 ),
+                Route::Providers => format!(
+                    "{} {}",
+                    text(model.locale, TextKey::AppName),
+                    text(model.locale, TextKey::Providers)
+                ),
                 Route::About => format!(
                     "{} {}",
                     text(model.locale, TextKey::About),
@@ -215,6 +241,7 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
             ui.label(egui::RichText::new(title).strong().size(17.0));
             let subtitle = match model.route {
                 Route::Overview => TextKey::OverviewSubtitle,
+                Route::Providers => TextKey::ProvidersSubtitle,
                 Route::About => TextKey::AboutSubtitle,
             };
             ui.label(
@@ -255,7 +282,40 @@ fn icon_button(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, label: &str)
     response.on_hover_text(label)
 }
 
-fn render_status(ui: &mut egui::Ui, model: &ShellViewModel) {
+fn render_status(
+    ui: &mut egui::Ui,
+    model: &ShellViewModel,
+    provider_state: Option<&ProviderViewState>,
+) {
+    if model.route == Route::Providers {
+        let phase = provider_state.map_or(ProviderLoadPhase::Idle, |state| state.load_phase);
+        let (status, color) = match phase {
+            ProviderLoadPhase::Idle | ProviderLoadPhase::Loading => {
+                (text(model.locale, TextKey::Loading), theme::WARNING_COLOR)
+            }
+            ProviderLoadPhase::Ready => (text(model.locale, TextKey::Ready), theme::SUCCESS_COLOR),
+            ProviderLoadPhase::Refreshing => (
+                text(model.locale, TextKey::Refreshing),
+                theme::WARNING_COLOR,
+            ),
+            ProviderLoadPhase::Error => (
+                match model.locale {
+                    Locale::ZhCn => "供应商加载失败",
+                    Locale::En => "Provider load failed",
+                },
+                theme::ERROR_COLOR,
+            ),
+        };
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                color,
+                format!("{}: {status}", text(model.locale, TextKey::Status)),
+            );
+            render_status_metadata(ui, model);
+        });
+        return;
+    }
+
     let phase = match model.overview_phase {
         OverviewPhase::Idle | OverviewPhase::Loading => TextKey::Loading,
         OverviewPhase::Ready => TextKey::Ready,
@@ -279,20 +339,24 @@ fn render_status(ui: &mut egui::Ui, model: &ShellViewModel) {
                 text(model.locale, phase)
             ),
         );
-        ui.separator();
-        ui.label(format!(
-            "{}: {}",
-            text(model.locale, TextKey::Renderer),
-            model.renderer
-        ));
-        ui.separator();
-        ui.label(format!(
-            "{}: {}",
-            text(model.locale, TextKey::Language),
-            match model.locale {
-                Locale::ZhCn => text(model.locale, TextKey::Chinese),
-                Locale::En => text(model.locale, TextKey::English),
-            }
-        ));
+        render_status_metadata(ui, model);
     });
+}
+
+fn render_status_metadata(ui: &mut egui::Ui, model: &ShellViewModel) {
+    ui.separator();
+    ui.label(format!(
+        "{}: {}",
+        text(model.locale, TextKey::Renderer),
+        model.renderer
+    ));
+    ui.separator();
+    ui.label(format!(
+        "{}: {}",
+        text(model.locale, TextKey::Language),
+        match model.locale {
+            Locale::ZhCn => text(model.locale, TextKey::Chinese),
+            Locale::En => text(model.locale, TextKey::English),
+        }
+    ));
 }

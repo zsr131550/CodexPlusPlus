@@ -6,5 +6,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 codex-plus-core = { path = "../codex-plus-core" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,6 +1,6 @@
 use eframe::egui;
 
-pub const ICON_FILES: [&str; 8] = [
+pub const ICON_FILES: [&str; 20] = [
     "layout-dashboard.svg",
     "info.svg",
     "refresh-cw.svg",
@@ -9,6 +9,18 @@ pub const ICON_FILES: [&str; 8] = [
     "moon.svg",
     "circle-check.svg",
     "triangle-alert.svg",
+    "server-cog.svg",
+    "plus.svg",
+    "copy.svg",
+    "chevron-up.svg",
+    "chevron-down.svg",
+    "trash-2.svg",
+    "panel-left-close.svg",
+    "panel-left-open.svg",
+    "save.svg",
+    "eye.svg",
+    "eye-off.svg",
+    "stethoscope.svg",
 ];
 
 pub fn layout_dashboard() -> egui::ImageSource<'static> {
@@ -43,6 +55,54 @@ pub fn triangle_alert() -> egui::ImageSource<'static> {
     egui::include_image!("../assets/icons/triangle-alert.svg")
 }
 
+pub fn server_cog() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/server-cog.svg")
+}
+
+pub fn plus() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/plus.svg")
+}
+
+pub fn copy() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/copy.svg")
+}
+
+pub fn chevron_up() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/chevron-up.svg")
+}
+
+pub fn chevron_down() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/chevron-down.svg")
+}
+
+pub fn trash_2() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/trash-2.svg")
+}
+
+pub fn panel_left_close() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/panel-left-close.svg")
+}
+
+pub fn panel_left_open() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/panel-left-open.svg")
+}
+
+pub fn save() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/save.svg")
+}
+
+pub fn eye() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/eye.svg")
+}
+
+pub fn eye_off() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/eye-off.svg")
+}
+
+pub fn stethoscope() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/stethoscope.svg")
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -53,7 +113,7 @@ mod tests {
     #[test]
     fn declared_lucide_assets_exist_and_are_safe_standalone_svgs() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icons");
-        assert_eq!(ICON_FILES.len(), 8);
+        assert_eq!(ICON_FILES.len(), 20);
 
         for file in ICON_FILES {
             let path = root.join(file);

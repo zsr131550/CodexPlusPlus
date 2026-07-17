@@ -322,11 +322,12 @@ fn provider_presets_include_runapi() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let presets = manifest_dir.parent().unwrap().join("src/presets.ts");
     let presets = std::fs::read_to_string(&presets).expect("read manager presets.ts");
+    let runapi = provider_preset("runapi");
 
-    assert!(presets.contains("id: \"runapi\""));
-    assert!(presets.contains("name: \"RunAPI\""));
-    assert!(presets.contains("category: \"aggregator\""));
-    assert!(presets.contains("baseUrl: \"https://runapi.co/v1\""));
+    assert!(presets.contains("provider-presets.json"));
+    assert_eq!(runapi["name"].as_str(), Some("RunAPI"));
+    assert_eq!(runapi["category"].as_str(), Some("aggregator"));
+    assert_eq!(runapi["baseUrl"].as_str(), Some("https://runapi.co/v1"));
 }
 
 #[test]
@@ -392,8 +393,7 @@ fn manager_overview_no_longer_promotes_official_relay_but_keeps_provider_presets
         std::fs::read_to_string(manager_src.join("styles.css")).expect("read manager styles.css");
     let i18n_en =
         std::fs::read_to_string(manager_src.join("i18n-en.ts")).expect("read manager i18n-en.ts");
-    let presets =
-        std::fs::read_to_string(manager_src.join("presets.ts")).expect("read manager presets.ts");
+    let jojocode = provider_preset("jojocode");
 
     assert!(!app_tsx.contains("jojocode-overview"));
     assert!(!app_tsx.contains("<h2>JOJO Code</h2>"));
@@ -402,8 +402,27 @@ fn manager_overview_no_longer_promotes_official_relay_but_keeps_provider_presets
     assert!(!styles.contains(".jojocode-model-tags"));
     assert!(!i18n_en.contains("\"官方中转站\":"));
     assert!(!i18n_en.contains("\"打开 JOJO Code\":"));
-    assert!(presets.contains("id: \"jojocode\""));
-    assert!(presets.contains("baseUrl: \"https://jojocode.com/v1\""));
+    assert_eq!(
+        jojocode["baseUrl"].as_str(),
+        Some("https://jojocode.com/v1")
+    );
+}
+
+fn provider_preset(id: &str) -> serde_json::Value {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repository_root = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .expect("resolve repository root");
+    let contents = std::fs::read_to_string(repository_root.join("assets/provider-presets.json"))
+        .expect("read shared provider presets");
+    let presets = serde_json::from_str::<Vec<serde_json::Value>>(&contents)
+        .expect("parse shared provider presets");
+    presets
+        .into_iter()
+        .find(|preset| preset["id"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("provider preset {id} should exist"))
 }
 
 #[test]

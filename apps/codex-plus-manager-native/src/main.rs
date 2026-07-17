@@ -7,7 +7,9 @@ use std::time::Instant;
 use codex_plus_manager_native::app::NativeManagerApp;
 use codex_plus_manager_native::fonts;
 use codex_plus_manager_native::perf::PerfRecorder;
-use codex_plus_manager_service::SystemOverviewSource;
+use codex_plus_manager_service::{
+    ProviderService, SystemOverviewSource, SystemProviderEnvironment,
+};
 use eframe::egui;
 
 const APP_ID: &str = "com.codexplusplus.manager.native";
@@ -52,6 +54,9 @@ fn main() -> eframe::Result {
                 creation,
                 cjk_font,
                 Arc::new(SystemOverviewSource::default()),
+                Arc::new(ProviderService::new(
+                    SystemProviderEnvironment::for_native_process(),
+                )),
                 perf,
             )))
         }),

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use fs2::FileExt;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item};
@@ -691,33 +692,60 @@ impl SettingsStore {
     }
 
     pub fn save(&self, settings: &BackendSettings) -> anyhow::Result<()> {
-        let mut settings = normalize_settings_config_sections(settings.clone());
-        settings.codex_extra_args = normalize_codex_extra_args(&settings.codex_extra_args);
-        let bytes = serde_json::to_vec_pretty(&settings)?;
-        atomic_write(&self.path, &bytes)
+        self.with_exclusive_lock(|| {
+            let mut settings = normalize_settings_config_sections(settings.clone());
+            settings.codex_extra_args = normalize_codex_extra_args(&settings.codex_extra_args);
+            let bytes = serde_json::to_vec_pretty(&settings)?;
+            atomic_write(&self.path, &bytes)
+        })
     }
 
     pub fn update(&self, payload: Value) -> anyhow::Result<BackendSettings> {
-        let Value::Object(payload) = payload else {
+        if !payload.is_object() {
             return self.load();
-        };
+        }
 
-        let mut raw = self.load_raw_object()?;
-        merge_known_setting_fields(&mut raw, &payload);
-        let settings = normalize_settings_config_sections(
-            serde_json::from_value(Value::Object(raw.clone())).unwrap_or_default(),
-        );
-        raw.insert(
-            "relayCommonConfigContents".to_string(),
-            Value::String(settings.relay_common_config_contents.clone()),
-        );
-        raw.insert(
-            "relayContextConfigContents".to_string(),
-            Value::String(settings.relay_context_config_contents.clone()),
-        );
-        let bytes = serde_json::to_vec_pretty(&Value::Object(raw))?;
-        atomic_write(&self.path, &bytes)?;
-        Ok(settings)
+        self.update_if(payload, |_| true)?
+            .context("unconditional settings update was rejected")
+    }
+
+    pub fn update_if<F>(
+        &self,
+        payload: Value,
+        predicate: F,
+    ) -> anyhow::Result<Option<BackendSettings>>
+    where
+        F: FnOnce(&BackendSettings) -> bool,
+    {
+        self.with_exclusive_lock(|| {
+            let mut raw = self.load_raw_object()?;
+            let current = normalize_settings_config_sections(
+                serde_json::from_value(Value::Object(raw.clone())).unwrap_or_default(),
+            );
+            if !predicate(&current) {
+                return Ok(None);
+            }
+
+            let Value::Object(payload) = payload else {
+                return Ok(Some(current));
+            };
+
+            merge_known_setting_fields(&mut raw, &payload);
+            let settings = normalize_settings_config_sections(
+                serde_json::from_value(Value::Object(raw.clone())).unwrap_or_default(),
+            );
+            raw.insert(
+                "relayCommonConfigContents".to_string(),
+                Value::String(settings.relay_common_config_contents.clone()),
+            );
+            raw.insert(
+                "relayContextConfigContents".to_string(),
+                Value::String(settings.relay_context_config_contents.clone()),
+            );
+            let bytes = serde_json::to_vec_pretty(&Value::Object(raw))?;
+            atomic_write(&self.path, &bytes)?;
+            Ok(Some(settings))
+        })
     }
 
     fn load_raw_object(&self) -> anyhow::Result<Map<String, Value>> {
@@ -736,6 +764,43 @@ impl SettingsStore {
             Ok(Value::Object(map)) => Ok(map),
             Ok(_) | Err(_) => Ok(settings_to_object(&BackendSettings::default())),
         }
+    }
+
+    fn with_exclusive_lock<T>(
+        &self,
+        operation: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let lock_path = self.lock_path();
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        }
+        let lock_file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open settings lock {}", lock_path.display()))?;
+        FileExt::lock_exclusive(&lock_file)
+            .with_context(|| format!("failed to lock settings {}", self.path.display()))?;
+
+        let result = operation();
+        let unlock_result = FileExt::unlock(&lock_file)
+            .with_context(|| format!("failed to unlock settings {}", self.path.display()));
+        match result {
+            Ok(value) => {
+                unlock_result?;
+                Ok(value)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        let mut path = self.path.as_os_str().to_os_string();
+        path.push(".lock");
+        PathBuf::from(path)
     }
 }
 
@@ -1204,6 +1269,8 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -1807,6 +1874,112 @@ experimental_bearer_token = "sk-existing""#
             ]
         );
         assert_eq!(store.load().unwrap(), updated);
+    }
+
+    #[test]
+    fn settings_store_update_if_writes_only_when_current_state_matches() {
+        let dir = temp_dir();
+        let path = dir.join("settings.json");
+        let store = SettingsStore::new(path.clone());
+        store
+            .save(&BackendSettings {
+                relay_test_model: "model-a".to_string(),
+                ..BackendSettings::default()
+            })
+            .unwrap();
+
+        let updated = store
+            .update_if(json!({"relayTestModel": "model-b"}), |current| {
+                current.relay_test_model == "model-a"
+            })
+            .unwrap()
+            .expect("matching revision should be written");
+        assert_eq!(updated.relay_test_model, "model-b");
+
+        let bytes_after_match = std::fs::read(&path).unwrap();
+        let rejected = store
+            .update_if(json!({"relayTestModel": "model-c"}), |current| {
+                current.relay_test_model == "model-a"
+            })
+            .unwrap();
+
+        assert!(rejected.is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes_after_match);
+        assert_eq!(store.load().unwrap().relay_test_model, "model-b");
+    }
+
+    #[test]
+    fn settings_store_update_if_preserves_existing_unknown_fields() {
+        let dir = temp_dir();
+        let path = dir.join("settings.json");
+        let store = SettingsStore::new(path.clone());
+        std::fs::write(
+            &path,
+            r#"{"relayTestModel":"model-a","customField":{"nested":true}}"#,
+        )
+        .unwrap();
+
+        let updated = store
+            .update_if(json!({"relayTestModel": "model-b"}), |current| {
+                current.relay_test_model == "model-a"
+            })
+            .unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+
+        assert_eq!(updated.unwrap().relay_test_model, "model-b");
+        assert_eq!(saved["customField"], json!({"nested": true}));
+    }
+
+    #[test]
+    fn settings_store_save_waits_for_update_if_lock() {
+        let dir = temp_dir();
+        let path = dir.join("settings.json");
+        let store = SettingsStore::new(path);
+        store
+            .save(&BackendSettings {
+                relay_test_model: "model-a".to_string(),
+                ..BackendSettings::default()
+            })
+            .unwrap();
+
+        let (predicate_entered_tx, predicate_entered_rx) = mpsc::channel();
+        let (release_predicate_tx, release_predicate_rx) = mpsc::channel();
+        let updating_store = store.clone();
+        let updating = std::thread::spawn(move || {
+            updating_store
+                .update_if(json!({"relayTestModel": "model-b"}), |current| {
+                    predicate_entered_tx.send(()).unwrap();
+                    release_predicate_rx.recv().unwrap();
+                    current.relay_test_model == "model-a"
+                })
+                .unwrap()
+        });
+        predicate_entered_rx.recv().unwrap();
+
+        let (save_started_tx, save_started_rx) = mpsc::channel();
+        let (save_finished_tx, save_finished_rx) = mpsc::channel();
+        let saving_store = store.clone();
+        let saving = std::thread::spawn(move || {
+            save_started_tx.send(()).unwrap();
+            saving_store
+                .save(&BackendSettings {
+                    relay_test_model: "model-c".to_string(),
+                    ..BackendSettings::default()
+                })
+                .unwrap();
+            save_finished_tx.send(()).unwrap();
+        });
+        save_started_rx.recv().unwrap();
+
+        assert!(
+            save_finished_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
+        release_predicate_tx.send(()).unwrap();
+        assert!(updating.join().unwrap().is_some());
+        saving.join().unwrap();
+        assert_eq!(store.load().unwrap().relay_test_model, "model-c");
     }
 
     #[test]

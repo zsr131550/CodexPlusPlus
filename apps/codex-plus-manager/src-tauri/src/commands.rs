@@ -13,7 +13,13 @@ use codex_plus_core::status::LaunchStatus;
 use codex_plus_core::user_scripts::UserScriptManager;
 use codex_plus_core::zed_remote::{ZedOpenStrategy, ZedRemoteProject};
 use codex_plus_manager_service::{
-    OverviewSnapshot, OverviewSource, ResourcePresence, SystemOverviewSource, UpdateCheckState,
+    DiagnoseProviderProfile, DoctorCheckStatus, DoctorDetailKind, DoctorOutcome,
+    DoctorRecommendation, FetchProviderModels, OverviewSnapshot, OverviewSource,
+    ProviderDoctorCheck as ServiceProviderDoctorCheck, ProviderDoctorCheckId, ProviderDoctorReport,
+    ProviderModelsResult, ProviderNetworkError, ProviderNetworkFailureKind,
+    ProviderProfile as ServiceProviderProfile, ProviderService, ProviderSource,
+    ProviderTestOutcome, ProviderTestResult, ResourcePresence, SystemOverviewSource,
+    SystemProviderEnvironment, TestProviderProfile, UpdateCheckState,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -2123,60 +2129,20 @@ pub fn extract_relay_common_config(
 
 #[tauri::command]
 pub async fn test_relay_profile(profile: RelayProfile) -> CommandResult<RelayProfileTestPayload> {
-    let profile_name = if profile.name.trim().is_empty() {
-        "未命名供应商"
-    } else {
-        profile.name.trim()
-    };
-    let settings = SettingsStore::default().load().unwrap_or_default();
-    let test_model: String = if !profile.test_model.trim().is_empty() {
-        // 1. 使用者在該供應商明確填的測試模型
-        profile.test_model.trim().to_string()
-    } else {
-        // 2. 該供應商自己 config.toml 裡的 model（避免串味）
-        let from_profile = codex_plus_core::relay_config::relay_profile_model(&profile);
-        if from_profile.trim().is_empty() {
-            // 3. 最後才用全域預設
-            settings.relay_test_model.trim().to_string()
-        } else {
-            from_profile
-        }
-    };
-    match codex_plus_core::relay_config::test_relay_profile(&profile, &test_model).await {
-        Ok(result) => {
-            let status = if result.http_status < 400 {
-                "ok"
-            } else {
-                "failed"
-            };
-            let preview = result.response_preview.trim();
-            let detail = if preview.is_empty() {
-                "响应内容为空".to_string()
-            } else {
-                format!("响应：{preview}")
-            };
-            CommandResult {
-                status: status.to_string(),
-                message: format!(
-                    "已向「{profile_name}」用模型「{test_model}」发送 hi，HTTP {}。{detail}",
-                    result.http_status
-                ),
-                payload: RelayProfileTestPayload {
-                    http_status: result.http_status,
-                    endpoint: result.endpoint,
-                    response_preview: result.response_preview,
-                },
-            }
-        }
-        Err(error) => failed(
-            &format!("测试「{profile_name}」失败：{error}"),
-            RelayProfileTestPayload {
-                http_status: 0,
-                endpoint: String::new(),
-                response_preview: String::new(),
-            },
-        ),
-    }
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let source = system_provider_source();
+        let default_test_model = source
+            .load_workspace()
+            .map(|workspace| workspace.document.default_test_model)
+            .unwrap_or_default();
+        source.test_profile(TestProviderProfile {
+            profile: ServiceProviderProfile::Ordinary(profile),
+            default_test_model,
+        })
+    })
+    .await
+    .unwrap_or_else(|_| Err(provider_worker_error()));
+    map_provider_test_result(result)
 }
 
 #[tauri::command]
@@ -2221,234 +2187,32 @@ pub async fn test_stepwise_settings(
 pub async fn fetch_relay_profile_models(
     profile: RelayProfile,
 ) -> CommandResult<RelayProfileModelsPayload> {
-    let profile_name = if profile.name.trim().is_empty() {
-        "未命名供应商"
-    } else {
-        profile.name.trim()
-    };
-    match codex_plus_core::model_catalog::fetch_relay_profile_model_ids(&profile).await {
-        Ok((models, endpoint)) => ok(
-            &format!("已从「{profile_name}」获取 {} 个模型。", models.len()),
-            RelayProfileModelsPayload { models, endpoint },
-        ),
-        Err(error) => failed(
-            &format!("从「{profile_name}」获取模型失败：{error}"),
-            RelayProfileModelsPayload {
-                models: Vec::new(),
-                endpoint: String::new(),
-            },
-        ),
-    }
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        system_provider_source().fetch_models(FetchProviderModels {
+            profile: ServiceProviderProfile::Ordinary(profile),
+        })
+    })
+    .await
+    .unwrap_or_else(|_| Err(provider_worker_error()));
+    map_provider_models_result(result)
 }
 
 #[tauri::command]
 pub async fn diagnose_relay_profile(profile: RelayProfile) -> CommandResult<ProviderDoctorPayload> {
-    let profile_name = if profile.name.trim().is_empty() {
-        "未命名供应商".to_string()
-    } else {
-        profile.name.trim().to_string()
-    };
-    let settings = SettingsStore::default().load().unwrap_or_default();
-    let test_model = if !profile.test_model.trim().is_empty() {
-        profile.test_model.trim().to_string()
-    } else {
-        let from_profile = codex_plus_core::relay_config::relay_profile_model(&profile);
-        if from_profile.trim().is_empty() {
-            settings.relay_test_model.trim().to_string()
-        } else {
-            from_profile
-        }
-    };
-    let mut checks = Vec::new();
-
-    if profile.relay_mode == codex_plus_core::settings::RelayMode::Official
-        && !profile.official_mix_api_key
-    {
-        checks.push(ProviderDoctorCheck {
-            id: "config".to_string(),
-            title: "配置完整性".to_string(),
-            status: "ok".to_string(),
-            detail: "官方登录供应商不需要 Base URL / API Key。".to_string(),
-        });
-        let payload = ProviderDoctorPayload {
-            profile_name,
-            model: test_model,
-            summary: "官方登录供应商无需 API 诊断。".to_string(),
-            recommendation: "如果 Codex 官方账号可用，直接使用官方登录模式即可。".to_string(),
-            checks,
-        };
-        return ok("Provider Doctor：官方登录供应商无需 API 诊断。", payload);
-    }
-
-    if codex_plus_core::relay_config::relay_profile_base_url(&profile)
-        .trim()
-        .is_empty()
-        || codex_plus_core::relay_config::relay_profile_api_key(&profile)
-            .trim()
-            .is_empty()
-    {
-        checks.push(ProviderDoctorCheck {
-            id: "config".to_string(),
-            title: "配置完整性".to_string(),
-            status: "failed".to_string(),
-            detail: "Base URL 或 API Key 为空。".to_string(),
-        });
-        let payload = ProviderDoctorPayload {
-            profile_name,
-            model: test_model,
-            summary: "配置不完整，无法发起上游诊断。".to_string(),
-            recommendation: "先填写 Base URL 和 API Key；如果是官方账号，请切换到官方登录模式。"
-                .to_string(),
-            checks,
-        };
-        return failed("Provider Doctor：配置不完整。", payload);
-    }
-
-    checks.push(ProviderDoctorCheck {
-        id: "config".to_string(),
-        title: "配置完整性".to_string(),
-        status: "ok".to_string(),
-        detail: format!(
-            "{} / {}",
-            codex_plus_core::relay_config::relay_profile_base_url(&profile),
-            match profile.protocol {
-                codex_plus_core::settings::RelayProtocol::Responses => "Responses API",
-                codex_plus_core::settings::RelayProtocol::ChatCompletions => "Chat Completions",
-            }
-        ),
-    });
-
-    match codex_plus_core::model_catalog::fetch_relay_profile_model_ids(&profile).await {
-        Ok((models, endpoint)) => {
-            let contains_model = !test_model.trim().is_empty()
-                && models.iter().any(|model| model == test_model.trim());
-            let status = if models.is_empty() {
-                "failed"
-            } else if contains_model || test_model.trim().is_empty() {
-                "ok"
-            } else {
-                "warning"
-            };
-            let detail = if models.is_empty() {
-                format!("{endpoint} 返回 0 个模型。")
-            } else if contains_model || test_model.trim().is_empty() {
-                format!("{endpoint} 返回 {} 个模型。", models.len())
-            } else {
-                format!(
-                    "{endpoint} 返回 {} 个模型，但未看到测试模型「{}」。",
-                    models.len(),
-                    test_model
-                )
-            };
-            checks.push(ProviderDoctorCheck {
-                id: "models".to_string(),
-                title: "模型列表".to_string(),
-                status: status.to_string(),
-                detail,
-            });
-        }
-        Err(error) => checks.push(ProviderDoctorCheck {
-            id: "models".to_string(),
-            title: "模型列表".to_string(),
-            status: "failed".to_string(),
-            detail: error.to_string(),
-        }),
-    }
-
-    match codex_plus_core::relay_config::test_relay_profile(&profile, &test_model).await {
-        Ok(result) => {
-            let status = if result.http_status < 400 {
-                "ok"
-            } else {
-                "failed"
-            };
-            let preview = result.response_preview.trim();
-            checks.push(ProviderDoctorCheck {
-                id: "request".to_string(),
-                title: "真实请求".to_string(),
-                status: status.to_string(),
-                detail: if preview.is_empty() {
-                    format!(
-                        "{} 返回 HTTP {}，响应内容为空。",
-                        result.endpoint, result.http_status
-                    )
-                } else {
-                    format!(
-                        "{} 返回 HTTP {}：{}",
-                        result.endpoint, result.http_status, preview
-                    )
-                },
-            });
-        }
-        Err(error) => checks.push(ProviderDoctorCheck {
-            id: "request".to_string(),
-            title: "真实请求".to_string(),
-            status: "failed".to_string(),
-            detail: error.to_string(),
-        }),
-    }
-
-    let failed_count = checks
-        .iter()
-        .filter(|check| check.status == "failed")
-        .count();
-    let warning_count = checks
-        .iter()
-        .filter(|check| check.status == "warning")
-        .count();
-    let status = if failed_count > 0 {
-        "failed"
-    } else if warning_count > 0 {
-        "ok"
-    } else {
-        "ok"
-    };
-    let summary = if failed_count > 0 {
-        format!("发现 {failed_count} 项失败，Codex 可能无法使用该供应商。")
-    } else if warning_count > 0 {
-        format!("基础连接可用，但有 {warning_count} 项需要确认。")
-    } else {
-        "供应商基础诊断通过。".to_string()
-    };
-    let recommendation = provider_doctor_recommendation(&checks);
-    let message = format!("Provider Doctor：{summary}");
-    CommandResult {
-        status: status.to_string(),
-        message,
-        payload: ProviderDoctorPayload {
-            profile_name,
-            model: test_model,
-            summary,
-            recommendation,
-            checks,
-        },
-    }
-}
-
-fn provider_doctor_recommendation(checks: &[ProviderDoctorCheck]) -> String {
-    if checks
-        .iter()
-        .any(|check| check.id == "config" && check.status == "failed")
-    {
-        return "先补齐 Base URL 和 API Key；如果使用官方账号，请切换到官方登录模式。".to_string();
-    }
-    if checks
-        .iter()
-        .any(|check| check.id == "models" && check.status == "failed")
-    {
-        return "优先检查 Base URL 是否包含正确的 /v1 前缀，以及供应商是否支持 /v1/models。"
-            .to_string();
-    }
-    if checks
-        .iter()
-        .any(|check| check.id == "request" && check.status == "failed")
-    {
-        return "优先检查测试模型名称、上游协议选择和 Key 权限；如果 Chat Completions 可用，请切到对应协议。".to_string();
-    }
-    if checks.iter().any(|check| check.status == "warning") {
-        return "连接可用，但测试模型没有出现在模型列表里；建议改用上游返回的模型名。".to_string();
-    }
-    "可以作为 Codex 供应商使用；如果真实对话仍失败，请查看协议代理日志里的上游响应。".to_string()
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let source = system_provider_source();
+        let default_test_model = source
+            .load_workspace()
+            .map(|workspace| workspace.document.default_test_model)
+            .unwrap_or_default();
+        source.diagnose_profile(DiagnoseProviderProfile {
+            profile: ServiceProviderProfile::Ordinary(profile),
+            default_test_model,
+        })
+    })
+    .await
+    .unwrap_or_else(|_| Err(provider_worker_error()));
+    map_provider_doctor_result(result)
 }
 
 #[tauri::command]
@@ -3198,6 +2962,239 @@ fn read_tail(path: &Path, max_lines: usize) -> std::io::Result<String> {
     Ok(lines.join("\n"))
 }
 
+fn system_provider_source() -> &'static ProviderService<SystemProviderEnvironment> {
+    static SOURCE: OnceLock<ProviderService<SystemProviderEnvironment>> = OnceLock::new();
+    SOURCE.get_or_init(|| ProviderService::new(SystemProviderEnvironment::default()))
+}
+
+fn provider_worker_error() -> ProviderNetworkError {
+    ProviderNetworkError::for_failure(ProviderNetworkFailureKind::Network, None, None)
+}
+
+fn map_provider_test_result(
+    result: Result<ProviderTestResult, ProviderNetworkError>,
+) -> CommandResult<RelayProfileTestPayload> {
+    match result {
+        Ok(result) => {
+            let (status, message, preview) = match result.outcome {
+                ProviderTestOutcome::Success => (
+                    "ok",
+                    "供应商连接测试通过。".to_string(),
+                    "request_succeeded".to_string(),
+                ),
+                ProviderTestOutcome::OfficialNoApiRequired => (
+                    "ok",
+                    "官方登录供应商无需 API 连接测试。".to_string(),
+                    "official_no_api_required".to_string(),
+                ),
+                ProviderTestOutcome::Failure(kind) => (
+                    "failed",
+                    format!("供应商连接测试失败：{}。", network_failure_code(kind)),
+                    network_failure_code(kind).to_string(),
+                ),
+            };
+            CommandResult {
+                status: status.to_string(),
+                message,
+                payload: RelayProfileTestPayload {
+                    http_status: result.http_status.unwrap_or_default(),
+                    endpoint: result
+                        .endpoint
+                        .map(|endpoint| endpoint.as_str().to_string())
+                        .unwrap_or_default(),
+                    response_preview: preview,
+                },
+            }
+        }
+        Err(error) => failed(
+            &format!(
+                "供应商连接测试失败：{}。",
+                network_failure_code(error.kind())
+            ),
+            RelayProfileTestPayload {
+                http_status: error.http_status().unwrap_or_default(),
+                endpoint: error
+                    .endpoint()
+                    .map(|endpoint| endpoint.as_str().to_string())
+                    .unwrap_or_default(),
+                response_preview: network_failure_code(error.kind()).to_string(),
+            },
+        ),
+    }
+}
+
+fn map_provider_models_result(
+    result: Result<ProviderModelsResult, ProviderNetworkError>,
+) -> CommandResult<RelayProfileModelsPayload> {
+    match result {
+        Ok(result) => ok(
+            &format!("已获取 {} 个模型。", result.models.len()),
+            RelayProfileModelsPayload {
+                models: result.models,
+                endpoint: result.endpoint.as_str().to_string(),
+            },
+        ),
+        Err(error) => failed(
+            &format!("获取模型失败：{}。", network_failure_code(error.kind())),
+            RelayProfileModelsPayload {
+                models: Vec::new(),
+                endpoint: error
+                    .endpoint()
+                    .map(|endpoint| endpoint.as_str().to_string())
+                    .unwrap_or_default(),
+            },
+        ),
+    }
+}
+
+fn map_provider_doctor_result(
+    result: Result<ProviderDoctorReport, ProviderNetworkError>,
+) -> CommandResult<ProviderDoctorPayload> {
+    let Ok(report) = result else {
+        let error = result.unwrap_err();
+        return failed(
+            &format!("Provider Doctor：{}。", network_failure_code(error.kind())),
+            ProviderDoctorPayload {
+                profile_name: String::new(),
+                model: String::new(),
+                summary: "诊断未完成。".to_string(),
+                recommendation: "检查网络后重试。".to_string(),
+                checks: Vec::new(),
+            },
+        );
+    };
+    let summary = doctor_summary(report.outcome).to_string();
+    let recommendation = doctor_recommendation(report.recommendation).to_string();
+    let status = if matches!(
+        report.outcome,
+        DoctorOutcome::Failed | DoctorOutcome::AggregateUnsupported
+    ) {
+        "failed"
+    } else {
+        "ok"
+    };
+    CommandResult {
+        status: status.to_string(),
+        message: format!("Provider Doctor：{summary}"),
+        payload: ProviderDoctorPayload {
+            profile_name: report.profile_name,
+            model: report.model,
+            summary,
+            recommendation,
+            checks: report
+                .checks
+                .iter()
+                .map(map_provider_doctor_check)
+                .collect(),
+        },
+    }
+}
+
+fn map_provider_doctor_check(check: &ServiceProviderDoctorCheck) -> ProviderDoctorCheck {
+    ProviderDoctorCheck {
+        id: match check.id {
+            ProviderDoctorCheckId::Config => "config",
+            ProviderDoctorCheckId::Models => "models",
+            ProviderDoctorCheckId::Request => "request",
+        }
+        .to_string(),
+        title: match check.id {
+            ProviderDoctorCheckId::Config => "配置完整性",
+            ProviderDoctorCheckId::Models => "模型列表",
+            ProviderDoctorCheckId::Request => "真实请求",
+        }
+        .to_string(),
+        status: match check.status {
+            DoctorCheckStatus::Passed => "ok",
+            DoctorCheckStatus::Warning => "warning",
+            DoctorCheckStatus::Failed => "failed",
+            DoctorCheckStatus::Skipped => "skipped",
+        }
+        .to_string(),
+        detail: doctor_check_detail(check),
+    }
+}
+
+fn doctor_check_detail(check: &ServiceProviderDoctorCheck) -> String {
+    let endpoint = check
+        .endpoint
+        .as_ref()
+        .map(|endpoint| endpoint.as_str())
+        .unwrap_or("安全端点不可用");
+    match check.detail {
+        DoctorDetailKind::ConfigReady => format!("配置可用：{endpoint}。"),
+        DoctorDetailKind::MissingConfiguration => "Base URL、API Key 或测试模型缺失。".to_string(),
+        DoctorDetailKind::InvalidEndpoint => "Base URL 不是有效的 HTTP(S) 地址。".to_string(),
+        DoctorDetailKind::OfficialNoApiRequired => {
+            "官方登录供应商不需要 Base URL 或 API Key。".to_string()
+        }
+        DoctorDetailKind::AggregateUnsupported => "请分别诊断聚合配置中的普通成员。".to_string(),
+        DoctorDetailKind::ModelsAvailable => format!(
+            "模型列表返回 {} 个模型。",
+            check.model_count.unwrap_or_default()
+        ),
+        DoctorDetailKind::ModelsUnavailable => format!(
+            "模型列表不可用：{}。",
+            check
+                .failure
+                .map(network_failure_code)
+                .unwrap_or("invalid_response")
+        ),
+        DoctorDetailKind::TestModelMissing => format!(
+            "模型列表包含 {} 个模型，但未找到测试模型。",
+            check.model_count.unwrap_or_default()
+        ),
+        DoctorDetailKind::RequestSucceeded => format!(
+            "真实请求成功，HTTP {}。",
+            check.http_status.unwrap_or_default()
+        ),
+        DoctorDetailKind::RequestFailed => format!(
+            "真实请求失败：{}。",
+            check
+                .failure
+                .map(network_failure_code)
+                .unwrap_or("upstream_failure")
+        ),
+    }
+}
+
+fn doctor_summary(outcome: DoctorOutcome) -> &'static str {
+    match outcome {
+        DoctorOutcome::Passed => "供应商基础诊断通过。",
+        DoctorOutcome::Warning => "测试模型不在模型列表中。",
+        DoctorOutcome::Failed => "发现诊断失败项。",
+        DoctorOutcome::OfficialNoApiRequired => "官方登录供应商无需 API 诊断。",
+        DoctorOutcome::AggregateUnsupported => "聚合供应商需要逐个诊断成员。",
+    }
+}
+
+fn doctor_recommendation(recommendation: DoctorRecommendation) -> &'static str {
+    match recommendation {
+        DoctorRecommendation::Ready => "供应商配置可用。",
+        DoctorRecommendation::CompleteConfiguration => "补齐 Base URL、API Key 和测试模型。",
+        DoctorRecommendation::CheckModelsEndpoint => "检查 Base URL 与 /models 支持情况。",
+        DoctorRecommendation::UseDiscoveredModel => "改用上游模型列表中返回的模型名。",
+        DoctorRecommendation::CheckCredentialsOrProtocol => "检查 Key 权限、模型名与上游协议。",
+        DoctorRecommendation::UseOfficialLogin => "继续使用 Codex 官方登录模式。",
+        DoctorRecommendation::TestAggregateMembers => "分别测试聚合配置中的普通成员。",
+    }
+}
+
+fn network_failure_code(kind: ProviderNetworkFailureKind) -> &'static str {
+    match kind {
+        ProviderNetworkFailureKind::MissingConfiguration => "missing_configuration",
+        ProviderNetworkFailureKind::InvalidEndpoint => "invalid_endpoint",
+        ProviderNetworkFailureKind::Unauthorized => "unauthorized",
+        ProviderNetworkFailureKind::NotFound => "not_found",
+        ProviderNetworkFailureKind::RateLimited => "rate_limited",
+        ProviderNetworkFailureKind::UpstreamFailure => "upstream_failure",
+        ProviderNetworkFailureKind::Timeout => "timeout",
+        ProviderNetworkFailureKind::Network => "network",
+        ProviderNetworkFailureKind::InvalidResponse => "invalid_response",
+        ProviderNetworkFailureKind::AggregateUnsupported => "aggregate_unsupported",
+    }
+}
+
 fn ok<T: Serialize>(message: &str, payload: T) -> CommandResult<T> {
     CommandResult {
         status: "ok".to_string(),
@@ -3424,49 +3421,108 @@ mod tests {
     }
 
     #[test]
-    fn provider_doctor_recommendation_prioritizes_actionable_failures() {
-        let recommendation = provider_doctor_recommendation(&[
-            ProviderDoctorCheck {
-                id: "models".to_string(),
-                title: "模型列表".to_string(),
-                status: "failed".to_string(),
-                detail: "上游不支持 /v1/models".to_string(),
-            },
-            ProviderDoctorCheck {
-                id: "request".to_string(),
-                title: "真实请求".to_string(),
-                status: "failed".to_string(),
-                detail: "HTTP 404".to_string(),
-            },
-        ]);
+    fn provider_connectivity_mapper_keeps_payload_shape_and_redacts_content() {
+        use codex_plus_manager_service::{
+            ProviderNetworkFailureKind, ProviderTestOutcome, ProviderTestResult, SafeEndpoint,
+        };
 
-        assert!(recommendation.contains("/v1/models"));
+        let success = map_provider_test_result(Ok(ProviderTestResult {
+            http_status: Some(200),
+            endpoint: SafeEndpoint::parse("https://user:secret@example.test/v1?token=secret"),
+            outcome: ProviderTestOutcome::Success,
+        }));
+        assert_eq!(
+            serde_json::to_value(success).unwrap(),
+            json!({
+                "status": "ok",
+                "message": "供应商连接测试通过。",
+                "httpStatus": 200,
+                "endpoint": "https://example.test/v1",
+                "responsePreview": "request_succeeded"
+            })
+        );
+
+        let failure = map_provider_test_result(Ok(ProviderTestResult {
+            http_status: Some(401),
+            endpoint: SafeEndpoint::parse("https://example.test/v1"),
+            outcome: ProviderTestOutcome::Failure(ProviderNetworkFailureKind::Unauthorized),
+        }));
+        let serialized = serde_json::to_string(&failure).unwrap();
+        assert_eq!(failure.status, "failed");
+        assert_eq!(failure.payload.response_preview, "unauthorized");
+        assert!(!serialized.contains("secret"));
     }
 
     #[test]
-    fn provider_doctor_recommendation_reports_model_warning() {
-        let recommendation = provider_doctor_recommendation(&[
-            ProviderDoctorCheck {
-                id: "config".to_string(),
-                title: "配置完整性".to_string(),
-                status: "ok".to_string(),
-                detail: "https://example.test/v1 / Responses API".to_string(),
-            },
-            ProviderDoctorCheck {
-                id: "models".to_string(),
-                title: "模型列表".to_string(),
-                status: "warning".to_string(),
-                detail: "未看到测试模型".to_string(),
-            },
-            ProviderDoctorCheck {
-                id: "request".to_string(),
-                title: "真实请求".to_string(),
-                status: "ok".to_string(),
-                detail: "HTTP 200".to_string(),
-            },
-        ]);
+    fn provider_models_mapper_keeps_success_and_empty_failure_fallbacks() {
+        use codex_plus_manager_service::{
+            ProviderModelsResult, ProviderNetworkError, ProviderNetworkFailureKind, SafeEndpoint,
+        };
 
-        assert!(recommendation.contains("测试模型"));
+        let success = map_provider_models_result(Ok(ProviderModelsResult {
+            models: vec!["model-a".to_string(), "model-b".to_string()],
+            endpoint: SafeEndpoint::parse("https://example.test/v1/models").unwrap(),
+        }));
+        assert_eq!(
+            serde_json::to_value(success).unwrap(),
+            json!({
+                "status": "ok",
+                "message": "已获取 2 个模型。",
+                "models": ["model-a", "model-b"],
+                "endpoint": "https://example.test/v1/models"
+            })
+        );
+
+        let failure = map_provider_models_result(Err(ProviderNetworkError::for_failure(
+            ProviderNetworkFailureKind::Timeout,
+            None,
+            None,
+        )));
+        assert_eq!(failure.status, "failed");
+        assert!(failure.payload.models.is_empty());
+        assert!(failure.payload.endpoint.is_empty());
+    }
+
+    #[test]
+    fn provider_doctor_mapper_serializes_typed_checks_to_legacy_fields() {
+        use codex_plus_manager_service::{
+            DoctorCheckStatus, DoctorDetailKind, DoctorOutcome, DoctorRecommendation,
+            ProviderDoctorCheck as ServiceDoctorCheck, ProviderDoctorCheckId, ProviderDoctorReport,
+        };
+
+        let result = map_provider_doctor_result(Ok(ProviderDoctorReport {
+            profile_name: "Relay A".to_string(),
+            model: "model-a".to_string(),
+            outcome: DoctorOutcome::Warning,
+            recommendation: DoctorRecommendation::UseDiscoveredModel,
+            checks: vec![ServiceDoctorCheck {
+                id: ProviderDoctorCheckId::Models,
+                status: DoctorCheckStatus::Warning,
+                detail: DoctorDetailKind::TestModelMissing,
+                failure: None,
+                http_status: None,
+                endpoint: None,
+                model_count: Some(2),
+            }],
+        }));
+
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            json!({
+                "status": "ok",
+                "message": "Provider Doctor：测试模型不在模型列表中。",
+                "profileName": "Relay A",
+                "model": "model-a",
+                "summary": "测试模型不在模型列表中。",
+                "recommendation": "改用上游模型列表中返回的模型名。",
+                "checks": [{
+                    "id": "models",
+                    "title": "模型列表",
+                    "status": "warning",
+                    "detail": "模型列表包含 2 个模型，但未找到测试模型。"
+                }]
+            })
+        );
     }
 
     #[test]

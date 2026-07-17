@@ -3,9 +3,19 @@ use std::thread;
 
 use codex_plus_manager_service::{OverviewError, OverviewSnapshot, OverviewSource};
 
+pub mod provider;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchError {
     WorkerStopped,
+}
+
+pub(crate) fn try_receive<T>(receiver: &mpsc::Receiver<T>) -> Result<Option<T>, DispatchError> {
+    match receiver.try_recv() {
+        Ok(response) => Ok(Some(response)),
+        Err(mpsc::TryRecvError::Empty) => Ok(None),
+        Err(mpsc::TryRecvError::Disconnected) => Err(DispatchError::WorkerStopped),
+    }
 }
 
 #[derive(Debug)]
@@ -65,11 +75,7 @@ impl OverviewDispatcher {
     }
 
     pub fn try_recv(&self) -> Result<Option<OverviewResponse>, DispatchError> {
-        match self.responses.try_recv() {
-            Ok(response) => Ok(Some(response)),
-            Err(mpsc::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::TryRecvError::Disconnected) => Err(DispatchError::WorkerStopped),
-        }
+        try_receive(&self.responses)
     }
 }
 

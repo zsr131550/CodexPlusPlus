@@ -16,15 +16,18 @@ pub struct PerfReport {
     pub overview_ready_ms: Option<f64>,
     pub cpu_frame_samples_ms: Vec<f64>,
     pub input_latency_samples_ms: Vec<f64>,
+    #[serde(default)]
+    pub script_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerfScriptAction {
-    NavigateAbout,
+    NavigateProviders,
+    SelectNextProvider,
+    EditProviderName,
+    DiscardProvider,
+    ToggleProviderList,
     NavigateOverview,
-    ToggleLocale,
-    ToggleTheme,
-    Refresh,
 }
 
 enum PerfEvent {
@@ -32,6 +35,7 @@ enum PerfEvent {
     OverviewReady(f64),
     CpuFrame(f64),
     InputLatency(f64),
+    ScriptAction(&'static str),
     Final(mpsc::Sender<()>),
 }
 
@@ -101,6 +105,9 @@ impl PerfRecorder {
             input.events.push(key_event(key, true));
             input.events.push(key_event(key, false));
             self.pending_input_started = Some(now);
+            if let Some(action) = script_action_for_key(key) {
+                self.send(PerfEvent::ScriptAction(action.name()));
+            }
             self.next_script_step += 1;
             ctx.request_repaint();
         }
@@ -108,19 +115,18 @@ impl PerfRecorder {
 
     pub fn scripted_action(&self, ui: &egui::Ui) -> Option<PerfScriptAction> {
         ui.input(|input| {
-            if input.key_pressed(egui::Key::F6) {
-                Some(PerfScriptAction::NavigateAbout)
-            } else if input.key_pressed(egui::Key::F7) {
-                Some(PerfScriptAction::NavigateOverview)
-            } else if input.key_pressed(egui::Key::F8) {
-                Some(PerfScriptAction::ToggleLocale)
-            } else if input.key_pressed(egui::Key::F9) {
-                Some(PerfScriptAction::ToggleTheme)
-            } else if input.key_pressed(egui::Key::F10) {
-                Some(PerfScriptAction::Refresh)
-            } else {
-                None
-            }
+            [
+                egui::Key::F5,
+                egui::Key::F6,
+                egui::Key::F7,
+                egui::Key::F8,
+                egui::Key::F9,
+                egui::Key::F10,
+                egui::Key::F11,
+            ]
+            .into_iter()
+            .find(|key| input.key_pressed(*key))
+            .and_then(script_action_for_key)
         })
     }
 
@@ -192,16 +198,43 @@ fn valid_samples(samples: &[f64]) -> Vec<f64> {
 }
 
 fn script_step(index: usize) -> Option<(Duration, egui::Key)> {
-    const STEPS: [(u64, egui::Key); 5] = [
-        (500, egui::Key::F6),
-        (1_000, egui::Key::F7),
-        (1_500, egui::Key::F8),
-        (2_000, egui::Key::F9),
-        (2_500, egui::Key::F10),
+    const STEPS: [(u64, egui::Key); 7] = [
+        (500, egui::Key::F5),
+        (1_000, egui::Key::F6),
+        (1_500, egui::Key::F7),
+        (2_000, egui::Key::F8),
+        (2_500, egui::Key::F9),
+        (3_000, egui::Key::F10),
+        (3_500, egui::Key::F11),
     ];
     STEPS
         .get(index)
         .map(|(milliseconds, key)| (Duration::from_millis(*milliseconds), *key))
+}
+
+fn script_action_for_key(key: egui::Key) -> Option<PerfScriptAction> {
+    match key {
+        egui::Key::F5 => Some(PerfScriptAction::NavigateProviders),
+        egui::Key::F6 => Some(PerfScriptAction::SelectNextProvider),
+        egui::Key::F7 => Some(PerfScriptAction::EditProviderName),
+        egui::Key::F8 => Some(PerfScriptAction::DiscardProvider),
+        egui::Key::F9 | egui::Key::F10 => Some(PerfScriptAction::ToggleProviderList),
+        egui::Key::F11 => Some(PerfScriptAction::NavigateOverview),
+        _ => None,
+    }
+}
+
+impl PerfScriptAction {
+    fn name(self) -> &'static str {
+        match self {
+            Self::NavigateProviders => "navigate_providers",
+            Self::SelectNextProvider => "select_next_provider",
+            Self::EditProviderName => "edit_provider_name",
+            Self::DiscardProvider => "discard_provider",
+            Self::ToggleProviderList => "toggle_provider_list",
+            Self::NavigateOverview => "navigate_overview",
+        }
+    }
 }
 
 fn key_event(key: egui::Key, pressed: bool) -> egui::Event {
@@ -236,6 +269,10 @@ fn report_worker(path: PathBuf, events: mpsc::Receiver<PerfEvent>) {
             }
             PerfEvent::InputLatency(value) => {
                 report.input_latency_samples_ms.push(value);
+                (false, None)
+            }
+            PerfEvent::ScriptAction(action) => {
+                report.script_actions.push(action.to_owned());
                 (false, None)
             }
             PerfEvent::Final(ack) => (true, Some(ack)),
@@ -273,7 +310,14 @@ fn write_report(path: &Path, report: &PerfReport) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PerfReport, maximum_ms, percentile_ms, write_report};
+    use std::time::Duration;
+
+    use eframe::egui;
+
+    use super::{
+        PerfReport, PerfScriptAction, maximum_ms, percentile_ms, script_action_for_key,
+        script_step, write_report,
+    };
 
     #[test]
     fn p95_and_max_use_sorted_cpu_frame_samples() {
@@ -297,12 +341,14 @@ mod tests {
             overview_ready_ms: Some(410.0),
             cpu_frame_samples_ms: vec![4.0, 5.0],
             input_latency_samples_ms: vec![6.0],
+            script_actions: vec!["navigate_providers".to_owned()],
         };
         let value = serde_json::to_value(report).unwrap();
         assert_eq!(value["first_ui_frame_ms"], 320.0);
         assert_eq!(value["overview_ready_ms"], 410.0);
         assert_eq!(value["cpu_frame_samples_ms"][1], 5.0);
         assert_eq!(value["input_latency_samples_ms"][0], 6.0);
+        assert_eq!(value["script_actions"][0], "navigate_providers");
     }
 
     #[test]
@@ -320,5 +366,26 @@ mod tests {
         let stored: PerfReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(stored.first_ui_frame_ms, Some(100.0));
         assert_eq!(stored.overview_ready_ms, Some(150.0));
+    }
+
+    #[test]
+    fn provider_perf_script_has_the_approved_order_and_timing() {
+        let expected = [
+            (500, egui::Key::F5, PerfScriptAction::NavigateProviders),
+            (1_000, egui::Key::F6, PerfScriptAction::SelectNextProvider),
+            (1_500, egui::Key::F7, PerfScriptAction::EditProviderName),
+            (2_000, egui::Key::F8, PerfScriptAction::DiscardProvider),
+            (2_500, egui::Key::F9, PerfScriptAction::ToggleProviderList),
+            (3_000, egui::Key::F10, PerfScriptAction::ToggleProviderList),
+            (3_500, egui::Key::F11, PerfScriptAction::NavigateOverview),
+        ];
+        for (index, (milliseconds, key, action)) in expected.into_iter().enumerate() {
+            assert_eq!(
+                script_step(index),
+                Some((Duration::from_millis(milliseconds), key))
+            );
+            assert_eq!(script_action_for_key(key), Some(action));
+        }
+        assert_eq!(script_step(expected.len()), None);
     }
 }

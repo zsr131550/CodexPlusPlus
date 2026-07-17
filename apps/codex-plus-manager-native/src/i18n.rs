@@ -17,8 +17,10 @@ pub enum ThemeMode {
 pub enum TextKey {
     AppName,
     Overview,
+    Providers,
     About,
     OverviewSubtitle,
+    ProvidersSubtitle,
     AboutSubtitle,
     Refresh,
     Refreshing,
@@ -58,11 +60,13 @@ pub enum TextKey {
 }
 
 impl TextKey {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 42] = [
         Self::AppName,
         Self::Overview,
+        Self::Providers,
         Self::About,
         Self::OverviewSubtitle,
+        Self::ProvidersSubtitle,
         Self::AboutSubtitle,
         Self::Refresh,
         Self::Refreshing,
@@ -107,7 +111,7 @@ struct CatalogEntry {
     en: &'static str,
 }
 
-const CATALOG: [CatalogEntry; 40] = [
+const CATALOG: [CatalogEntry; 42] = [
     CatalogEntry {
         zh: "Codex++",
         en: "Codex++",
@@ -117,12 +121,20 @@ const CATALOG: [CatalogEntry; 40] = [
         en: "Overview",
     },
     CatalogEntry {
+        zh: "供应商配置",
+        en: "Providers",
+    },
+    CatalogEntry {
         zh: "关于",
         en: "About",
     },
     CatalogEntry {
         zh: "检查本地安装与运行状态",
         en: "Inspect local installation and runtime",
+    },
+    CatalogEntry {
+        zh: "管理供应商、模型与聚合路由",
+        en: "Manage providers, models, and aggregate routing",
     },
     CatalogEntry {
         zh: "原生管理工具信息",
@@ -284,7 +296,7 @@ mod tests {
 
     #[test]
     fn every_milestone_one_key_has_both_locales() {
-        assert_eq!(TextKey::ALL.len(), 40);
+        assert_eq!(TextKey::ALL.len(), 42);
         for key in TextKey::ALL {
             assert!(
                 !text(Locale::ZhCn, key).trim().is_empty(),

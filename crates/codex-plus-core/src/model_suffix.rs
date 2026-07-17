@@ -25,7 +25,7 @@ pub fn parse_model_suffix(raw: &str) -> (String, Option<u64>) {
                 let inner = raw[open + 1..close].trim();
                 let slug = raw[..open].trim();
                 if !slug.is_empty() {
-                    if let Some(window) = parse_window_token(inner) {
+                    if let Some(window) = parse_model_window_token(inner) {
                         return (slug.to_string(), Some(window));
                     }
                 }
@@ -54,7 +54,7 @@ pub fn migrate_model_list_with_suffixes(model_list: &str) -> (String, HashMap<St
 }
 
 /// 解析括号内的窗口 token，如 "1M" / "200K" / "1000000"。非法或 0 返回 None。
-fn parse_window_token(token: &str) -> Option<u64> {
+pub fn parse_model_window_token(token: &str) -> Option<u64> {
     let token = token.trim();
     if token.is_empty() {
         return None;
@@ -69,7 +69,7 @@ fn parse_window_token(token: &str) -> Option<u64> {
         .trim()
         .parse::<u64>()
         .ok()
-        .map(|value| value * multiplier)
+        .and_then(|value| value.checked_mul(multiplier))
         .filter(|value| *value > 0)
 }
 
@@ -101,7 +101,7 @@ pub fn collect_catalog_entries(
         }
         let suffix_window = model_windows
             .get(&slug)
-            .and_then(|token| parse_window_token(token));
+            .and_then(|token| parse_model_window_token(token));
         list_entries.push(ModelCatalogEntry {
             display_name: slug.clone(),
             slug,
@@ -117,7 +117,7 @@ pub fn collect_catalog_entries(
         if !slug.is_empty() {
             let suffix_window = model_windows
                 .get(&slug)
-                .and_then(|token| parse_window_token(token));
+                .and_then(|token| parse_model_window_token(token));
             entries.push(ModelCatalogEntry {
                 display_name: slug.clone(),
                 slug: slug.clone(),

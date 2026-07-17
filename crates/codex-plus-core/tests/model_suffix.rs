@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use codex_plus_core::model_suffix::{
-    build_model_catalog_json, collect_catalog_entries, parse_model_suffix,
+    build_model_catalog_json, collect_catalog_entries, parse_model_suffix, parse_model_window_token,
 };
 
 #[test]
@@ -49,6 +49,18 @@ fn parse_suffix_keeps_original_slug_when_bracket_invalid() {
 #[test]
 fn parse_suffix_rejects_zero_and_negative() {
     assert_eq!(parse_model_suffix("foo[0K]"), ("foo[0K]".to_string(), None));
+}
+
+#[test]
+fn parse_window_tokens_are_public_and_checked() {
+    assert_eq!(parse_model_window_token("1M"), Some(1_000_000));
+    assert_eq!(parse_model_window_token("200k"), Some(200_000));
+    assert_eq!(parse_model_window_token("1000000"), Some(1_000_000));
+    assert_eq!(parse_model_window_token("0"), None);
+    assert_eq!(parse_model_window_token("-1"), None);
+    assert_eq!(parse_model_window_token("1.5M"), None);
+    assert_eq!(parse_model_window_token("not-a-window"), None);
+    assert_eq!(parse_model_window_token(&format!("{}M", u64::MAX)), None);
 }
 
 #[test]

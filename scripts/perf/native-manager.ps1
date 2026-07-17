@@ -62,6 +62,57 @@ function Stop-OwnedProcess {
     }
 }
 
+function New-ProviderSettingsFixture {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    $ProfileDefaults = @{
+        protocol = 'responses'
+        relayMode = 'pureApi'
+        testModel = 'perf-model'
+        configContents = ''
+        authContents = ''
+        useCommonConfig = $true
+        contextSelection = @{ mcpServers = @(); skills = @(); plugins = @() }
+        contextSelectionInitialized = $false
+        contextWindow = '200000'
+        autoCompactLimit = '160000'
+        modelInsertMode = 'patch'
+        modelList = "perf-model`nperf-model-fast"
+        modelWindows = '{"perf-model":"200K"}'
+        userAgent = ''
+    }
+    $First = [ordered]@{
+        id = 'perf-provider-a'
+        name = 'Performance provider A'
+        model = 'perf-model'
+        upstreamBaseUrl = 'https://api.example.test/v1'
+    }
+    $Second = [ordered]@{
+        id = 'perf-provider-b'
+        name = 'Performance provider B'
+        model = 'perf-model-fast'
+        upstreamBaseUrl = 'https://backup.example.test/v1'
+    }
+    foreach ($Key in $ProfileDefaults.Keys) {
+        $First[$Key] = $ProfileDefaults[$Key]
+        $Second[$Key] = $ProfileDefaults[$Key]
+    }
+    $Settings = [ordered]@{
+        relayProfilesEnabled = $true
+        activeRelayId = 'perf-provider-a'
+        relayProfiles = @($First, $Second)
+        aggregateRelayProfiles = @()
+        relayCommonConfigContents = ''
+        relayContextConfigContents = ''
+        relayTestModel = 'perf-model'
+    }
+    $Json = $Settings | ConvertTo-Json -Depth 8
+    [IO.File]::WriteAllText($Path, $Json, [Text.UTF8Encoding]::new($false))
+}
+
 function Invoke-NativeSample {
     param(
         [Parameter(Mandatory)]
@@ -76,13 +127,16 @@ function Invoke-NativeSample {
     $SampleDirectory = Join-Path $RunDirectory $Name
     $StateDirectory = Join-Path $SampleDirectory 'state'
     $ReportPath = Join-Path $SampleDirectory 'report.json'
+    $SettingsPath = Join-Path $SampleDirectory 'settings.json'
     New-Item -ItemType Directory -Path $SampleDirectory | Out-Null
+    New-ProviderSettingsFixture -Path $SettingsPath
 
     $env:CODEX_PLUS_NATIVE_STATE_DIR = $StateDirectory
     $env:CODEX_PLUS_NATIVE_PERF_REPORT = $ReportPath
     $env:CODEX_PLUS_NATIVE_PERF_EXIT_AFTER_MS = $ExitAfterMs.ToString(
         [Globalization.CultureInfo]::InvariantCulture
     )
+    $env:CODEX_PLUS_NATIVE_SETTINGS_PATH = $SettingsPath
 
     $Process = Start-Process `
         -FilePath $BinaryPath `
@@ -125,6 +179,7 @@ function Invoke-NativeSample {
             }
             CpuSamplesMs = @($Report.cpu_frame_samples_ms | ForEach-Object { [double] $_ })
             InputSamplesMs = @($Report.input_latency_samples_ms | ForEach-Object { [double] $_ })
+            ScriptActions = @($Report.script_actions | ForEach-Object { [string] $_ })
             PrivateMemoryBytes = $PrivateMemoryBytes
             ReportPath = $ReportPath
         }
@@ -168,7 +223,8 @@ $PreviousEnvironment = @{}
 foreach ($Name in @(
     'CODEX_PLUS_NATIVE_STATE_DIR',
     'CODEX_PLUS_NATIVE_PERF_REPORT',
-    'CODEX_PLUS_NATIVE_PERF_EXIT_AFTER_MS'
+    'CODEX_PLUS_NATIVE_PERF_EXIT_AFTER_MS',
+    'CODEX_PLUS_NATIVE_SETTINGS_PATH'
 )) {
     $PreviousEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
 }
@@ -197,8 +253,11 @@ try {
     if ($CpuSamples.Count -eq 0) {
         throw 'the 30-second sample did not contain CPU frame samples'
     }
-    if ($InputSamples.Count -ne 5) {
-        throw "expected 5 scripted input samples, got $($InputSamples.Count)"
+    if ($InputSamples.Count -ne 7) {
+        throw "expected 7 scripted input samples, got $($InputSamples.Count)"
+    }
+    if ($IdleSample.ScriptActions.Count -ne 7) {
+        throw "expected 7 scripted actions, got $($IdleSample.ScriptActions.Count)"
     }
     if ($null -eq $IdleSample.PrivateMemoryBytes) {
         throw 'the 30-second sample did not record private memory'

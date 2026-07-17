@@ -2,10 +2,15 @@ use std::sync::Arc;
 
 use codex_plus_manager_service::OverviewSnapshot;
 
+pub mod provider;
+
+use provider::ProviderViewState;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Route {
     #[default]
     Overview,
+    Providers,
     About,
 }
 
@@ -75,6 +80,7 @@ impl OverviewViewState {
 pub struct AppState {
     pub route: Route,
     pub overview: OverviewViewState,
+    pub provider: ProviderViewState,
 }
 
 #[cfg(test)]
