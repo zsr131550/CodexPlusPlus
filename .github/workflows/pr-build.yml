@@ -40,6 +40,12 @@ jobs:
         working-directory: apps/codex-plus-manager
         run: npm run vite:build
 
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Rust clippy for native manager crates
+        run: cargo clippy -p codex-plus-manager-service -p codex-plus-manager-native --all-targets --no-deps -- -D warnings
+
       - name: Rust tests
         run: cargo test --workspace
 
