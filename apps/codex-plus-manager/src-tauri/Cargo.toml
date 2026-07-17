@@ -18,6 +18,7 @@ anyhow.workspace = true
 async-trait = "0.1"
 codex-plus-core = { path = "../../../crates/codex-plus-core" }
 codex-plus-data = { path = "../../../crates/codex-plus-data" }
+codex-plus-manager-service = { path = "../../../crates/codex-plus-manager-service" }
 directories.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -9,9 +9,12 @@ use codex_plus_core::models::{DeleteResult, SessionRef};
 use codex_plus_core::relay_environment::RelayEnvironmentReport;
 use codex_plus_core::script_market::{self, MarketScript, ScriptMarketManifest};
 use codex_plus_core::settings::{BackendSettings, RelayProfile, SettingsStore};
-use codex_plus_core::status::{LaunchStatus, StatusStore};
+use codex_plus_core::status::LaunchStatus;
 use codex_plus_core::user_scripts::UserScriptManager;
 use codex_plus_core::zed_remote::{ZedOpenStrategy, ZedRemoteProject};
+use codex_plus_manager_service::{
+    OverviewSnapshot, OverviewSource, ResourcePresence, SystemOverviewSource, UpdateCheckState,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -380,46 +383,10 @@ where
 #[tauri::command]
 pub async fn load_overview() -> CommandResult<OverviewPayload> {
     let payload = tauri::async_runtime::spawn_blocking(load_overview_payload).await;
-    let Ok((codex_app_path, entrypoints, latest_launch)) = payload else {
-        return failed(
-            "概览后台任务失败。",
-            OverviewPayload {
-                codex_app: path_state(None),
-                codex_version: None,
-                silent_shortcut: path_state(None),
-                management_shortcut: path_state(None),
-                latest_launch: None,
-                current_version: codex_plus_core::version::VERSION.to_string(),
-                update_status: "not_checked".to_string(),
-                settings_path: codex_plus_core::paths::default_settings_path()
-                    .to_string_lossy()
-                    .to_string(),
-                logs_path: codex_plus_core::paths::default_diagnostic_log_path()
-                    .to_string_lossy()
-                    .to_string(),
-            },
-        );
-    };
-    ok(
-        "概览已加载。",
-        OverviewPayload {
-            codex_version: codex_app_path
-                .as_deref()
-                .and_then(codex_plus_core::app_paths::codex_app_version),
-            codex_app: path_state(codex_app_path),
-            silent_shortcut: shortcut_state(entrypoints.silent_shortcut),
-            management_shortcut: shortcut_state(entrypoints.management_shortcut),
-            latest_launch,
-            current_version: codex_plus_core::version::VERSION.to_string(),
-            update_status: "not_checked".to_string(),
-            settings_path: codex_plus_core::paths::default_settings_path()
-                .to_string_lossy()
-                .to_string(),
-            logs_path: codex_plus_core::paths::default_diagnostic_log_path()
-                .to_string_lossy()
-                .to_string(),
-        },
-    )
+    match payload {
+        Ok(Ok(payload)) => ok("概览已加载。", payload),
+        Ok(Err(_)) | Err(_) => failed("概览后台任务失败。", overview_failure_payload()),
+    }
 }
 
 #[tauri::command]
@@ -3099,27 +3066,10 @@ fn builtin_user_scripts_dir() -> PathBuf {
 }
 
 fn diagnostics_report() -> String {
-    let (codex_app_path, entrypoints, latest_launch) = load_overview_payload();
-    let overview = ok(
-        "概览已加载。",
-        OverviewPayload {
-            codex_version: codex_app_path
-                .as_deref()
-                .and_then(codex_plus_core::app_paths::codex_app_version),
-            codex_app: path_state(codex_app_path),
-            silent_shortcut: shortcut_state(entrypoints.silent_shortcut),
-            management_shortcut: shortcut_state(entrypoints.management_shortcut),
-            latest_launch,
-            current_version: codex_plus_core::version::VERSION.to_string(),
-            update_status: "not_checked".to_string(),
-            settings_path: codex_plus_core::paths::default_settings_path()
-                .to_string_lossy()
-                .to_string(),
-            logs_path: codex_plus_core::paths::default_diagnostic_log_path()
-                .to_string_lossy()
-                .to_string(),
-        },
-    );
+    let overview = match load_overview_payload() {
+        Ok(payload) => ok("概览已加载。", payload),
+        Err(_) => failed("概览后台任务失败。", overview_failure_payload()),
+    };
     let settings = SettingsStore::default().load().unwrap_or_default();
     let generated_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3142,20 +3092,85 @@ fn diagnostics_report() -> String {
     .unwrap_or_else(|error| format!("诊断报告序列化失败：{error}"))
 }
 
-fn load_overview_payload() -> (
-    Option<PathBuf>,
-    install::EntryPointState,
-    Option<LaunchStatus>,
-) {
-    let settings = SettingsStore::default().load().unwrap_or_default();
-    (
-        codex_plus_core::app_paths::resolve_codex_app_dir_with_saved(
-            None,
-            Some(settings.codex_app_path.as_str()),
-        ),
-        install::inspect_entrypoints(),
-        StatusStore::default().load_latest().unwrap_or(None),
-    )
+fn load_overview_payload() -> Result<OverviewPayload, codex_plus_manager_service::OverviewError> {
+    SystemOverviewSource::default()
+        .load_overview()
+        .map(overview_payload_from_snapshot)
+}
+
+fn overview_payload_from_snapshot(snapshot: OverviewSnapshot) -> OverviewPayload {
+    let codex_status = match snapshot.codex_app.presence {
+        ResourcePresence::Found => "found",
+        ResourcePresence::Missing => "missing",
+    };
+    let update_status = match snapshot.update_status {
+        UpdateCheckState::NotChecked => "not_checked",
+    };
+
+    OverviewPayload {
+        codex_app: PathState {
+            status: codex_status.to_owned(),
+            path: snapshot
+                .codex_app
+                .path
+                .map(|path| path.to_string_lossy().to_string()),
+        },
+        codex_version: snapshot.codex_version,
+        silent_shortcut: PathState {
+            status: if snapshot.silent_shortcut.installed {
+                "installed".to_owned()
+            } else {
+                "missing".to_owned()
+            },
+            path: snapshot
+                .silent_shortcut
+                .path
+                .map(|path| path.to_string_lossy().to_string()),
+        },
+        management_shortcut: PathState {
+            status: if snapshot.management_shortcut.installed {
+                "installed".to_owned()
+            } else {
+                "missing".to_owned()
+            },
+            path: snapshot
+                .management_shortcut
+                .path
+                .map(|path| path.to_string_lossy().to_string()),
+        },
+        latest_launch: snapshot.latest_launch,
+        current_version: snapshot.current_version,
+        update_status: update_status.to_owned(),
+        settings_path: snapshot.settings_path.to_string_lossy().to_string(),
+        logs_path: snapshot.logs_path.to_string_lossy().to_string(),
+    }
+}
+
+fn overview_failure_payload() -> OverviewPayload {
+    OverviewPayload {
+        codex_app: PathState {
+            status: "missing".to_owned(),
+            path: None,
+        },
+        codex_version: None,
+        silent_shortcut: PathState {
+            status: "missing".to_owned(),
+            path: None,
+        },
+        management_shortcut: PathState {
+            status: "missing".to_owned(),
+            path: None,
+        },
+        latest_launch: None,
+        current_version: codex_plus_core::version::VERSION.to_owned(),
+        update_status: "not_checked".to_owned(),
+        settings_path: codex_plus_core::paths::default_settings_path()
+            .to_string_lossy()
+            .to_string(),
+        logs_path: codex_plus_core::paths::default_diagnostic_log_path()
+            .to_string_lossy()
+            .to_string(),
+    }
 }
 
 fn install_background_failure(action: &str, error: impl std::fmt::Display) -> InstallActionResult {
@@ -3181,30 +3196,6 @@ fn read_tail(path: &Path, max_lines: usize) -> std::io::Result<String> {
     let mut lines = contents.lines().rev().take(max_lines).collect::<Vec<_>>();
     lines.reverse();
     Ok(lines.join("\n"))
-}
-
-fn path_state(path: Option<PathBuf>) -> PathState {
-    match path {
-        Some(path) => PathState {
-            status: "found".to_string(),
-            path: Some(path.to_string_lossy().to_string()),
-        },
-        None => PathState {
-            status: "missing".to_string(),
-            path: None,
-        },
-    }
-}
-
-fn shortcut_state(shortcut: install::ShortcutState) -> PathState {
-    PathState {
-        status: if shortcut.installed {
-            "installed".to_string()
-        } else {
-            "missing".to_string()
-        },
-        path: shortcut.path,
-    }
 }
 
 fn ok<T: Serialize>(message: &str, payload: T) -> CommandResult<T> {
@@ -3300,6 +3291,91 @@ mod tests {
             result.payload.silent_shortcut.status.as_str(),
             "installed" | "missing"
         ));
+    }
+
+    #[test]
+    fn overview_snapshot_preserves_tauri_json_contract() {
+        use codex_plus_manager_service::{
+            LocatedResource, OverviewSnapshot, ResourcePresence, ShortcutSnapshot, UpdateCheckState,
+        };
+
+        let payload = overview_payload_from_snapshot(OverviewSnapshot {
+            codex_app: LocatedResource {
+                presence: ResourcePresence::Found,
+                path: Some(PathBuf::from("C:/Codex")),
+            },
+            codex_version: Some("0.16.0".to_owned()),
+            silent_shortcut: ShortcutSnapshot {
+                installed: true,
+                path: Some(PathBuf::from("C:/Desktop/Codex++.lnk")),
+            },
+            management_shortcut: ShortcutSnapshot {
+                installed: false,
+                path: Some(PathBuf::from("C:/Desktop/Manager.lnk")),
+            },
+            latest_launch: None,
+            current_version: "1.2.36".to_owned(),
+            update_status: UpdateCheckState::NotChecked,
+            settings_path: PathBuf::from("C:/state/settings.json"),
+            logs_path: PathBuf::from("C:/state/diagnostic.log"),
+        });
+        let result = ok("概览已加载。", payload);
+
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::json!({
+                "status": "ok",
+                "message": "概览已加载。",
+                "codex_app": { "status": "found", "path": "C:/Codex" },
+                "codex_version": "0.16.0",
+                "silent_shortcut": {
+                    "status": "installed",
+                    "path": "C:/Desktop/Codex++.lnk"
+                },
+                "management_shortcut": {
+                    "status": "missing",
+                    "path": "C:/Desktop/Manager.lnk"
+                },
+                "latest_launch": null,
+                "current_version": "1.2.36",
+                "update_status": "not_checked",
+                "settings_path": "C:/state/settings.json",
+                "logs_path": "C:/state/diagnostic.log"
+            })
+        );
+    }
+
+    #[test]
+    fn overview_snapshot_maps_missing_codex_app_to_null_path() {
+        use codex_plus_manager_service::{
+            LocatedResource, OverviewSnapshot, ResourcePresence, ShortcutSnapshot, UpdateCheckState,
+        };
+
+        let payload = overview_payload_from_snapshot(OverviewSnapshot {
+            codex_app: LocatedResource {
+                presence: ResourcePresence::Missing,
+                path: None,
+            },
+            codex_version: None,
+            silent_shortcut: ShortcutSnapshot {
+                installed: false,
+                path: None,
+            },
+            management_shortcut: ShortcutSnapshot {
+                installed: false,
+                path: None,
+            },
+            latest_launch: None,
+            current_version: "1.2.36".to_owned(),
+            update_status: UpdateCheckState::NotChecked,
+            settings_path: PathBuf::from("settings.json"),
+            logs_path: PathBuf::from("diagnostic.log"),
+        });
+        let value = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(value["codex_app"]["status"], "missing");
+        assert_eq!(value["codex_app"]["path"], serde_json::Value::Null);
+        assert_eq!(value["codex_version"], serde_json::Value::Null);
     }
 
     #[test]

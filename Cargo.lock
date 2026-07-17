@@ -469,6 +469,7 @@ dependencies = [
  "async-trait",
  "codex-plus-core",
  "codex-plus-data",
+ "codex-plus-manager-service",
  "directories",
  "rusqlite",
  "serde",
