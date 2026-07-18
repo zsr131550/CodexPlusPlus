@@ -113,6 +113,35 @@ function New-ProviderSettingsFixture {
     [IO.File]::WriteAllText($Path, $Json, [Text.UTF8Encoding]::new($false))
 }
 
+function New-CodexHomeFixture {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    New-Item -ItemType Directory -Path $Path | Out-Null
+    $Config = @'
+model = "perf-model"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://api.example.test/v1"
+'@
+    [IO.File]::WriteAllText(
+        (Join-Path $Path 'config.toml'),
+        $Config,
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllText(
+        (Join-Path $Path 'auth.json'),
+        '{"OPENAI_API_KEY":"perf-placeholder"}',
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
 function Invoke-NativeSample {
     param(
         [Parameter(Mandatory)]
@@ -128,8 +157,10 @@ function Invoke-NativeSample {
     $StateDirectory = Join-Path $SampleDirectory 'state'
     $ReportPath = Join-Path $SampleDirectory 'report.json'
     $SettingsPath = Join-Path $SampleDirectory 'settings.json'
+    $CodexHome = Join-Path $SampleDirectory 'codex-home'
     New-Item -ItemType Directory -Path $SampleDirectory | Out-Null
     New-ProviderSettingsFixture -Path $SettingsPath
+    New-CodexHomeFixture -Path $CodexHome
 
     $env:CODEX_PLUS_NATIVE_STATE_DIR = $StateDirectory
     $env:CODEX_PLUS_NATIVE_PERF_REPORT = $ReportPath
@@ -137,6 +168,7 @@ function Invoke-NativeSample {
         [Globalization.CultureInfo]::InvariantCulture
     )
     $env:CODEX_PLUS_NATIVE_SETTINGS_PATH = $SettingsPath
+    $env:CODEX_PLUS_NATIVE_CODEX_HOME = $CodexHome
 
     $Process = Start-Process `
         -FilePath $BinaryPath `
@@ -224,7 +256,8 @@ foreach ($Name in @(
     'CODEX_PLUS_NATIVE_STATE_DIR',
     'CODEX_PLUS_NATIVE_PERF_REPORT',
     'CODEX_PLUS_NATIVE_PERF_EXIT_AFTER_MS',
-    'CODEX_PLUS_NATIVE_SETTINGS_PATH'
+    'CODEX_PLUS_NATIVE_SETTINGS_PATH',
+    'CODEX_PLUS_NATIVE_CODEX_HOME'
 )) {
     $PreviousEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
 }
@@ -253,11 +286,11 @@ try {
     if ($CpuSamples.Count -eq 0) {
         throw 'the 30-second sample did not contain CPU frame samples'
     }
-    if ($InputSamples.Count -ne 7) {
-        throw "expected 7 scripted input samples, got $($InputSamples.Count)"
+    if ($InputSamples.Count -ne 13) {
+        throw "expected 13 scripted input samples, got $($InputSamples.Count)"
     }
-    if ($IdleSample.ScriptActions.Count -ne 7) {
-        throw "expected 7 scripted actions, got $($IdleSample.ScriptActions.Count)"
+    if ($IdleSample.ScriptActions.Count -ne 13) {
+        throw "expected 13 scripted actions, got $($IdleSample.ScriptActions.Count)"
     }
     if ($null -eq $IdleSample.PrivateMemoryBytes) {
         throw 'the 30-second sample did not record private memory'
