@@ -50,7 +50,15 @@ $ExpectedScriptActions = @(
     'request_local_marketplace_repair',
     'confirm_local_marketplace_repair',
     'request_remote_marketplace_repair',
-    'confirm_remote_marketplace_repair'
+    'confirm_remote_marketplace_repair',
+    'navigate_sessions',
+    'refresh_sessions',
+    'set_session_query',
+    'select_all_filtered_sessions',
+    'open_delete_confirmation',
+    'cancel_delete_confirmation',
+    'run_provider_repair',
+    'cancel_provider_repair'
 )
 
 $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -209,6 +217,55 @@ base_url = "https://api.example.test/v1"
         '# Performance marketplace fixture',
         [Text.UTF8Encoding]::new($false)
     )
+
+    New-SessionDatabaseFixture -CodexHome $Path
+}
+
+function New-SessionDatabaseFixture {
+    param(
+        [Parameter(Mandatory)]
+        [string] $CodexHome
+    )
+
+    $SqliteDirectory = Join-Path $CodexHome 'sqlite'
+    $DatabasePath = Join-Path $SqliteDirectory 'codex-dev.db'
+    New-Item -ItemType Directory -Path $SqliteDirectory -Force | Out-Null
+
+    $Python = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $Python) {
+        throw 'python is required to create the isolated SQLite performance fixture'
+    }
+    $CreateFixture = @'
+import sqlite3
+import sys
+
+path = sys.argv[1]
+connection = sqlite3.connect(path)
+connection.execute(
+    """CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        rollout_path TEXT,
+        title TEXT,
+        cwd TEXT,
+        model_provider TEXT,
+        archived INTEGER,
+        updated_at_ms INTEGER
+    )"""
+)
+connection.executemany(
+    "INSERT INTO threads VALUES (?, '', ?, ?, ?, ?, ?)",
+    [
+        ('perf-session-a', 'Performance session A', 'C:/perf/workspace-a', 'custom', 0, 2000),
+        ('perf-session-b', 'Performance session B', 'C:/perf/workspace-b', 'custom', 1, 1000),
+    ],
+)
+connection.commit()
+connection.close()
+'@
+    $CreateFixture | & $Python.Source - $DatabasePath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $DatabasePath -PathType Leaf)) {
+        throw 'failed to create the isolated SQLite performance fixture'
+    }
 }
 
 function New-PendingImportFixture {

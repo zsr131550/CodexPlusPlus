@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-const SCRIPT_DURATION: Duration = Duration::from_secs(20);
+const SCRIPT_DURATION: Duration = Duration::from_secs(24);
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const FINAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -59,6 +59,14 @@ pub enum PerfScriptAction {
     RequestRemoteMarketplaceRepair,
     ConfirmRemoteMarketplaceRepair,
     RefreshMarketplace,
+    NavigateSessions,
+    RefreshSessions,
+    SetSessionQuery,
+    SelectAllFilteredSessions,
+    OpenDeleteConfirmation,
+    CancelDeleteConfirmation,
+    RunProviderRepair,
+    CancelProviderRepair,
 }
 
 enum PerfEvent {
@@ -223,7 +231,7 @@ fn valid_samples(samples: &[f64]) -> Vec<f64> {
 }
 
 fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> {
-    const KEYS: [egui::Key; 39] = [
+    const KEYS: [egui::Key; 47] = [
         egui::Key::F1,
         egui::Key::F2,
         egui::Key::F3,
@@ -263,8 +271,16 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> 
         egui::Key::F35,
         egui::Key::F35,
         egui::Key::F35,
+        egui::Key::F35,
+        egui::Key::F35,
+        egui::Key::F35,
+        egui::Key::F35,
+        egui::Key::F35,
+        egui::Key::F35,
+        egui::Key::F35,
+        egui::Key::F35,
     ];
-    const ACTIONS: [PerfScriptAction; 39] = [
+    const ACTIONS: [PerfScriptAction; 47] = [
         PerfScriptAction::NavigateProviders,
         PerfScriptAction::SelectNextProvider,
         PerfScriptAction::EditProviderName,
@@ -304,6 +320,14 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> 
         PerfScriptAction::ConfirmLocalMarketplaceRepair,
         PerfScriptAction::RequestRemoteMarketplaceRepair,
         PerfScriptAction::ConfirmRemoteMarketplaceRepair,
+        PerfScriptAction::NavigateSessions,
+        PerfScriptAction::RefreshSessions,
+        PerfScriptAction::SetSessionQuery,
+        PerfScriptAction::SelectAllFilteredSessions,
+        PerfScriptAction::OpenDeleteConfirmation,
+        PerfScriptAction::CancelDeleteConfirmation,
+        PerfScriptAction::RunProviderRepair,
+        PerfScriptAction::CancelProviderRepair,
     ];
     KEYS.get(index)
         .zip(ACTIONS.get(index))
@@ -353,6 +377,14 @@ impl PerfScriptAction {
             Self::RequestRemoteMarketplaceRepair => "request_remote_marketplace_repair",
             Self::ConfirmRemoteMarketplaceRepair => "confirm_remote_marketplace_repair",
             Self::RefreshMarketplace => "refresh_marketplace",
+            Self::NavigateSessions => "navigate_sessions",
+            Self::RefreshSessions => "refresh_sessions",
+            Self::SetSessionQuery => "set_session_query",
+            Self::SelectAllFilteredSessions => "select_all_filtered_sessions",
+            Self::OpenDeleteConfirmation => "open_delete_confirmation",
+            Self::CancelDeleteConfirmation => "cancel_delete_confirmation",
+            Self::RunProviderRepair => "run_provider_repair",
+            Self::CancelProviderRepair => "cancel_provider_repair",
         }
     }
 }
@@ -597,6 +629,35 @@ mod tests {
                 Some((Duration::from_millis(milliseconds), egui::Key::F35, action)),
             );
         }
-        assert_eq!(script_step(39), None);
+    }
+
+    #[test]
+    fn native_perf_script_appends_the_session_workflow() {
+        let expected = [
+            (20_000, PerfScriptAction::NavigateSessions),
+            (20_500, PerfScriptAction::RefreshSessions),
+            (21_000, PerfScriptAction::SetSessionQuery),
+            (21_500, PerfScriptAction::SelectAllFilteredSessions),
+            (22_000, PerfScriptAction::OpenDeleteConfirmation),
+            (22_500, PerfScriptAction::CancelDeleteConfirmation),
+            (23_000, PerfScriptAction::RunProviderRepair),
+            (23_500, PerfScriptAction::CancelProviderRepair),
+        ];
+
+        for (offset, (milliseconds, action)) in expected.into_iter().enumerate() {
+            assert_eq!(
+                script_step(39 + offset),
+                Some((Duration::from_millis(milliseconds), egui::Key::F35, action)),
+            );
+        }
+        assert_eq!(script_step(47), None);
+    }
+
+    #[test]
+    fn native_perf_script_streams_sqlite_fixture_without_command_line_quote_loss() {
+        let script = include_str!("../../../scripts/perf/native-manager.ps1");
+
+        assert!(script.contains("$CreateFixture | & $Python.Source - $DatabasePath"));
+        assert!(!script.contains("& $Python.Source -c $CreateFixture"));
     }
 }

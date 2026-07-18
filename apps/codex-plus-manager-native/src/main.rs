@@ -9,7 +9,8 @@ use codex_plus_manager_native::fonts;
 use codex_plus_manager_native::perf::PerfRecorder;
 use codex_plus_manager_service::{
     ContextToolsService, PluginMarketplaceService, ProviderImportService, ProviderService,
-    RelayEnvironmentService, SystemOverviewSource, SystemProviderEnvironment,
+    ProviderSyncService, RelayEnvironmentService, SessionService, SystemOverviewSource,
+    SystemProviderEnvironment,
 };
 use eframe::egui;
 
@@ -56,6 +57,8 @@ fn main() -> eframe::Result {
             let import_service = Arc::new(ProviderImportService::new(environment.clone()));
             let context_service = Arc::new(ContextToolsService::new(environment.clone()));
             let marketplace_service = Arc::new(PluginMarketplaceService::new(environment.clone()));
+            let session_service = Arc::new(SessionService::new(environment.clone()));
+            let provider_sync_service = Arc::new(ProviderSyncService::new(environment.clone()));
             let environment_service = Arc::new(RelayEnvironmentService::new(environment));
             Ok(Box::new(NativeManagerApp::new(
                 creation,
@@ -68,6 +71,8 @@ fn main() -> eframe::Result {
                     environment: environment_service,
                     context: context_service,
                     marketplace: marketplace_service,
+                    sessions: session_service,
+                    provider_sync: provider_sync_service,
                 },
                 perf,
             )))

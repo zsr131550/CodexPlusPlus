@@ -5,7 +5,7 @@ use codex_plus_manager_service::{
     ContextKind, ContextToolsSource, DiagnoseProviderProfile, FetchProviderModels, OverviewSource,
     PluginMarketplaceKind, PluginMarketplaceSource, ProviderActivationSource, ProviderErrorKind,
     ProviderImportSource, ProviderNetworkFailureKind, ProviderProfile, ProviderSource,
-    RelayEnvironmentSource, TestProviderProfile,
+    ProviderSyncSource, RelayEnvironmentSource, SessionSource, TestProviderProfile,
 };
 use eframe::egui;
 
@@ -19,6 +19,7 @@ use crate::runtime::marketplace::{MarketplaceDispatcher, MarketplaceResponse};
 use crate::runtime::provider::{
     ActivationResponse, ProviderActivationDispatcher, ProviderDispatcher, StoreResponse,
 };
+use crate::runtime::sessions::{SessionDispatcher, SessionResponse};
 use crate::runtime::{DispatchError, OverviewDispatcher};
 use crate::state::context::ContextFailureKind;
 use crate::state::environment::EnvironmentFailureKind;
@@ -29,6 +30,7 @@ use crate::state::provider::{
     LiveMutationKind, OperationPhase, ProviderEditorTab, ProviderLoadFailureKind,
     ProviderLoadPhase, ProviderSaveFailureKind, TransitionResult,
 };
+use crate::state::sessions::{ProviderSyncFailureKind, SessionFailureKind};
 use crate::state::{AppState, OverviewFailureKind, OverviewPhase, Route};
 use crate::theme;
 use crate::views::context::ContextAction;
@@ -36,7 +38,8 @@ use crate::views::environment::EnvironmentAction;
 use crate::views::import::ImportAction;
 use crate::views::marketplace::MarketplaceAction;
 use crate::views::provider::{ProviderAction, ProviderEdit};
-use crate::views::shell::{ShellAction, ShellViewModel, render_shell};
+use crate::views::sessions::SessionAction;
+use crate::views::shell::{ShellAction, ShellFeatureStates, ShellViewModel, render_shell};
 
 pub struct NativeManagerSources {
     pub overview: Arc<dyn OverviewSource>,
@@ -46,6 +49,8 @@ pub struct NativeManagerSources {
     pub environment: Arc<dyn RelayEnvironmentSource>,
     pub context: Arc<dyn ContextToolsSource>,
     pub marketplace: Arc<dyn PluginMarketplaceSource>,
+    pub sessions: Arc<dyn SessionSource>,
+    pub provider_sync: Arc<dyn ProviderSyncSource>,
 }
 
 pub struct NativeManagerApp {
@@ -58,6 +63,7 @@ pub struct NativeManagerApp {
     environment_dispatcher: EnvironmentDispatcher,
     context_dispatcher: ContextDispatcher,
     marketplace_dispatcher: MarketplaceDispatcher,
+    session_dispatcher: SessionDispatcher,
     last_updated: Option<String>,
     overview_worker_stopped: bool,
     provider_store_worker_stopped: bool,
@@ -66,6 +72,7 @@ pub struct NativeManagerApp {
     environment_worker_stopped: bool,
     context_worker_stopped: bool,
     marketplace_worker_stopped: bool,
+    session_worker_stopped: bool,
     window_focused: bool,
     pending_route: Option<Route>,
     pending_provider_reload: bool,
@@ -121,6 +128,12 @@ impl NativeManagerApp {
             sources.marketplace,
             Arc::new(move || marketplace_repaint_context.request_repaint()),
         );
+        let session_repaint_context = creation.egui_ctx.clone();
+        let session_dispatcher = SessionDispatcher::spawn(
+            sources.sessions,
+            sources.provider_sync,
+            Arc::new(move || session_repaint_context.request_repaint()),
+        );
         let mut app = Self {
             state: AppState::default(),
             persisted,
@@ -131,6 +144,7 @@ impl NativeManagerApp {
             environment_dispatcher,
             context_dispatcher,
             marketplace_dispatcher,
+            session_dispatcher,
             last_updated: None,
             overview_worker_stopped: false,
             provider_store_worker_stopped: false,
@@ -139,6 +153,7 @@ impl NativeManagerApp {
             environment_worker_stopped: false,
             context_worker_stopped: false,
             marketplace_worker_stopped: false,
+            session_worker_stopped: false,
             window_focused: true,
             pending_route: None,
             pending_provider_reload: false,
@@ -178,6 +193,7 @@ impl NativeManagerApp {
             ShellAction::Refresh => match self.state.route {
                 Route::Providers => self.request_provider_reload(),
                 Route::Environment => self.inspect_environment(),
+                Route::Sessions => self.refresh_sessions_route(),
                 Route::Context => {
                     self.load_context_workspace();
                     self.inspect_plugin_marketplaces();
@@ -186,6 +202,7 @@ impl NativeManagerApp {
             },
             ShellAction::Retry => match self.state.route {
                 Route::Environment => self.inspect_environment(),
+                Route::Sessions => self.refresh_sessions_route(),
                 Route::Context => {
                     self.load_context_workspace();
                     self.inspect_plugin_marketplaces();
@@ -200,6 +217,7 @@ impl NativeManagerApp {
             ShellAction::Provider(action) => self.apply_provider_action(action),
             ShellAction::Import(action) => self.apply_import_action(action),
             ShellAction::Environment(action) => self.apply_environment_action(action),
+            ShellAction::Sessions(action) => self.apply_session_action(action),
             ShellAction::Context(action) => self.apply_context_action(action),
             ShellAction::Marketplace(action) => self.apply_marketplace_action(action),
         }
@@ -222,6 +240,7 @@ impl NativeManagerApp {
             self.state.provider.leave_provider_route();
         }
         let entering_context = self.state.route != Route::Context && route == Route::Context;
+        let entering_sessions = self.state.route != Route::Sessions && route == Route::Sessions;
         self.state.route = route;
         if route == Route::Providers && self.state.provider.load_phase == ProviderLoadPhase::Idle {
             self.load_providers();
@@ -234,6 +253,9 @@ impl NativeManagerApp {
         if entering_context {
             self.load_context_workspace();
             self.inspect_plugin_marketplaces();
+        }
+        if entering_sessions {
+            self.refresh_sessions_route();
         }
     }
 
@@ -391,6 +413,127 @@ impl NativeManagerApp {
                 self.state.environment.cancel_cleanup_confirmation();
             }
             EnvironmentAction::ConfirmCleanup => self.cleanup_environment(),
+        }
+    }
+
+    fn apply_session_action(&mut self, action: SessionAction) {
+        match action {
+            SessionAction::Refresh => self.refresh_sessions_route(),
+            SessionAction::RetryWorkspace => self.load_session_workspace(),
+            SessionAction::SetQuery(query) => self.state.sessions.set_query(query),
+            SessionAction::SetFilter(filter) => self.state.sessions.set_filter(filter),
+            SessionAction::SetSelected { id, selected } => {
+                self.state.sessions.set_selected(&id, selected);
+            }
+            SessionAction::SelectAllFiltered => {
+                self.state.sessions.select_all_filtered();
+            }
+            SessionAction::ClearSelection => {
+                self.state.sessions.clear_selection();
+            }
+            SessionAction::SetPage(page) => {
+                self.state.sessions.set_page(page);
+            }
+            SessionAction::RequestDelete => {
+                self.state.sessions.request_delete();
+            }
+            SessionAction::CancelDelete => {
+                self.state.sessions.cancel_delete();
+            }
+            SessionAction::ConfirmDelete => self.delete_selected_sessions(),
+            SessionAction::RetryProviderWorkspace => self.load_session_provider_workspace(),
+            SessionAction::SetProviderTarget(target) => {
+                self.state.sessions.set_provider_target(target);
+            }
+            SessionAction::RunProviderRepair => {
+                self.state.sessions.request_provider_run_confirmation();
+            }
+            SessionAction::CancelProviderRepair => {
+                self.state.sessions.cancel_provider_run_confirmation();
+            }
+            SessionAction::ConfirmProviderRepair => self.run_session_provider_repair(),
+            SessionAction::SetAutoRepair(enabled) => self.set_session_auto_repair(enabled),
+        }
+    }
+
+    fn refresh_sessions_route(&mut self) {
+        self.load_session_workspace();
+        self.load_session_provider_workspace();
+    }
+
+    fn load_session_workspace(&mut self) {
+        if self.session_worker_stopped {
+            self.state.sessions.mark_worker_stopped();
+            return;
+        }
+        let request_id = self.state.sessions.begin_workspace_refresh();
+        if self
+            .session_dispatcher
+            .request_session_load(request_id)
+            .is_err()
+        {
+            self.session_worker_stopped = true;
+            self.state.sessions.mark_worker_stopped();
+        }
+    }
+
+    fn load_session_provider_workspace(&mut self) {
+        if self.session_worker_stopped {
+            self.state.sessions.mark_worker_stopped();
+            return;
+        }
+        let Some(request_id) = self.state.sessions.begin_provider_workspace_refresh() else {
+            return;
+        };
+        if self
+            .session_dispatcher
+            .request_provider_load(request_id)
+            .is_err()
+        {
+            self.session_worker_stopped = true;
+            self.state.sessions.mark_worker_stopped();
+        }
+    }
+
+    fn delete_selected_sessions(&mut self) {
+        let Some((request_id, request)) = self.state.sessions.confirm_delete() else {
+            return;
+        };
+        if self
+            .session_dispatcher
+            .request_delete(request_id, request)
+            .is_err()
+        {
+            self.session_worker_stopped = true;
+            self.state.sessions.mark_worker_stopped();
+        }
+    }
+
+    fn run_session_provider_repair(&mut self) {
+        let Some((request_id, request)) = self.state.sessions.confirm_provider_run() else {
+            return;
+        };
+        if self
+            .session_dispatcher
+            .request_provider_run(request_id, request)
+            .is_err()
+        {
+            self.session_worker_stopped = true;
+            self.state.sessions.mark_worker_stopped();
+        }
+    }
+
+    fn set_session_auto_repair(&mut self, enabled: bool) {
+        let Some((request_id, request)) = self.state.sessions.begin_set_auto_repair(enabled) else {
+            return;
+        };
+        if self
+            .session_dispatcher
+            .request_auto_repair(request_id, request)
+            .is_err()
+        {
+            self.session_worker_stopped = true;
+            self.state.sessions.mark_worker_stopped();
         }
     }
 
@@ -809,6 +952,9 @@ impl NativeManagerApp {
                 self.load_context_workspace();
                 self.inspect_plugin_marketplaces();
             }
+            if route == Route::Sessions {
+                self.refresh_sessions_route();
+            }
         }
         if std::mem::take(&mut self.pending_provider_reload) {
             self.load_providers();
@@ -1225,6 +1371,68 @@ impl NativeManagerApp {
         }
     }
 
+    fn reduce_session_responses(&mut self) {
+        loop {
+            match self.session_dispatcher.try_recv() {
+                Ok(Some(SessionResponse::SessionsLoaded { request_id, result })) => {
+                    let accepted = self.state.sessions.apply_workspace_response(
+                        request_id,
+                        result.map_err(|error| SessionFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.sessions.workspace_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(SessionResponse::SessionsDeleted { request_id, result })) => {
+                    let accepted = self.state.sessions.apply_delete_response(
+                        request_id,
+                        result.map_err(|error| SessionFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.sessions.delete_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(SessionResponse::ProviderSyncLoaded { request_id, result })) => {
+                    let accepted = self.state.sessions.apply_provider_workspace_response(
+                        request_id,
+                        result.map_err(|error| ProviderSyncFailureKind::Service(error.kind())),
+                    );
+                    if accepted
+                        && self.state.sessions.provider_workspace_phase == OperationPhase::Ready
+                    {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(SessionResponse::ProviderSyncRan { request_id, result })) => {
+                    let accepted = self.state.sessions.apply_provider_run_response(
+                        request_id,
+                        result.map_err(|error| ProviderSyncFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.sessions.provider_run_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(SessionResponse::AutoRepairSaved { request_id, result })) => {
+                    let accepted = self.state.sessions.apply_auto_repair_response(
+                        request_id,
+                        result.map_err(|error| ProviderSyncFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.sessions.auto_repair_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    if !self.session_worker_stopped {
+                        self.session_worker_stopped = true;
+                        self.state.sessions.mark_worker_stopped();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     fn reduce_context_responses(&mut self) {
         loop {
             match self.context_dispatcher.try_recv() {
@@ -1372,6 +1580,9 @@ impl NativeManagerApp {
             if self.state.route == Route::Context {
                 self.load_context_workspace();
                 self.inspect_plugin_marketplaces();
+            }
+            if self.state.route == Route::Sessions {
+                self.refresh_sessions_route();
             }
         }
         self.window_focused = focused;
@@ -1550,6 +1761,28 @@ impl NativeManagerApp {
             PerfScriptAction::RefreshMarketplace => {
                 Some(ShellAction::Marketplace(MarketplaceAction::Refresh))
             }
+            PerfScriptAction::NavigateSessions => Some(ShellAction::Navigate(Route::Sessions)),
+            PerfScriptAction::RefreshSessions => {
+                Some(ShellAction::Sessions(SessionAction::Refresh))
+            }
+            PerfScriptAction::SetSessionQuery => Some(ShellAction::Sessions(
+                SessionAction::SetQuery("performance".to_owned()),
+            )),
+            PerfScriptAction::SelectAllFilteredSessions => {
+                Some(ShellAction::Sessions(SessionAction::SelectAllFiltered))
+            }
+            PerfScriptAction::OpenDeleteConfirmation => {
+                Some(ShellAction::Sessions(SessionAction::RequestDelete))
+            }
+            PerfScriptAction::CancelDeleteConfirmation => {
+                Some(ShellAction::Sessions(SessionAction::CancelDelete))
+            }
+            PerfScriptAction::RunProviderRepair => {
+                Some(ShellAction::Sessions(SessionAction::RunProviderRepair))
+            }
+            PerfScriptAction::CancelProviderRepair => {
+                Some(ShellAction::Sessions(SessionAction::CancelProviderRepair))
+            }
         };
         if let Some(action) = shell_action {
             self.apply_action(ctx, action);
@@ -1564,6 +1797,7 @@ impl eframe::App for NativeManagerApp {
         self.reduce_activation_responses();
         self.reduce_import_responses();
         self.reduce_environment_responses();
+        self.reduce_session_responses();
         self.reduce_context_responses();
         self.reduce_marketplace_responses();
         self.refresh_pending_on_focus_regain(ctx);
@@ -1581,11 +1815,14 @@ impl eframe::App for NativeManagerApp {
         for action in render_shell(
             ui,
             &model,
-            Some(&self.state.provider),
-            Some(&self.state.provider_import),
-            Some(&self.state.environment),
-            Some(&self.state.context),
-            Some(&self.state.marketplace),
+            ShellFeatureStates {
+                provider: Some(&self.state.provider),
+                provider_import: Some(&self.state.provider_import),
+                environment: Some(&self.state.environment),
+                context: Some(&self.state.context),
+                marketplace: Some(&self.state.marketplace),
+                sessions: Some(&self.state.sessions),
+            },
         ) {
             self.apply_action(ui.ctx(), action);
         }
