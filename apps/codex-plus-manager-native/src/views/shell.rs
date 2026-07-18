@@ -7,12 +7,13 @@ use crate::i18n::{Locale, TextKey, ThemeMode, text};
 use crate::state::context::ContextViewState;
 use crate::state::environment::EnvironmentViewState;
 use crate::state::import::ImportViewState;
+use crate::state::marketplace::MarketplaceViewState;
 use crate::state::provider::OperationPhase;
 use crate::state::provider::{ProviderLoadPhase, ProviderViewState};
 use crate::state::{OverviewFailureKind, OverviewPhase, Route};
 use crate::{icons, theme};
 
-use super::{about, context, environment, import, overview, provider};
+use super::{about, context, environment, import, marketplace, overview, provider};
 
 pub const SIDEBAR_WIDTH: f32 = 176.0;
 pub const HEADER_HEIGHT: f32 = 58.0;
@@ -29,6 +30,7 @@ pub enum ShellAction {
     Import(import::ImportAction),
     Environment(environment::EnvironmentAction),
     Context(context::ContextAction),
+    Marketplace(marketplace::MarketplaceAction),
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +52,7 @@ pub fn render_shell(
     import_state: Option<&ImportViewState>,
     environment_state: Option<&EnvironmentViewState>,
     context_state: Option<&ContextViewState>,
+    marketplace_state: Option<&MarketplaceViewState>,
 ) -> Vec<ShellAction> {
     let mut actions = Vec::new();
 
@@ -121,16 +124,46 @@ pub fn render_shell(
                 }
             }
             Route::Context => {
+                let marketplace_height = if marketplace_state.is_some() {
+                    marketplace::MARKETPLACE_BAND_HEIGHT
+                } else {
+                    0.0
+                };
                 if let Some(state) = context_state {
                     let mut context_actions = Vec::new();
-                    context::render(
-                        ui,
-                        state,
-                        provider_state.is_some_and(ProviderViewState::is_dirty),
-                        model.locale,
-                        &mut context_actions,
+                    let context_height =
+                        (ui.available_height() - marketplace_height - 8.0).max(340.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), context_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            context::render(
+                                ui,
+                                state,
+                                provider_state.is_some_and(ProviderViewState::is_dirty),
+                                model.locale,
+                                &mut context_actions,
+                            );
+                        },
                     );
                     actions.extend(context_actions.into_iter().map(ShellAction::Context));
+                }
+                if let Some(state) = marketplace_state {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    let mut marketplace_actions = Vec::new();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), marketplace_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            marketplace::render(ui, state, model.locale, &mut marketplace_actions);
+                        },
+                    );
+                    actions.extend(
+                        marketplace_actions
+                            .into_iter()
+                            .map(ShellAction::Marketplace),
+                    );
                 }
             }
             Route::About => about::render(ui, model),

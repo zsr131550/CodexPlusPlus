@@ -95,7 +95,7 @@ pub fn render(
     render_kind_tabs(ui, state, locale, actions);
     ui.separator();
 
-    let available_for_rows = (ui.available_height() - 64.0).max(112.0);
+    let available_for_rows = (ui.available_height() - 124.0).max(112.0);
     ui.allocate_ui_with_layout(
         egui::vec2(ui.available_width(), available_for_rows),
         egui::Layout::top_down(egui::Align::Min),

@@ -6,6 +6,7 @@ use codex_plus_manager_service::{OverviewError, OverviewSnapshot, OverviewSource
 pub mod context;
 pub mod environment;
 pub mod import;
+pub mod marketplace;
 pub mod provider;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

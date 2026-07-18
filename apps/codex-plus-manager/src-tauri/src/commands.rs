@@ -16,12 +16,14 @@ use codex_plus_manager_service::{
     CompatContextDeleteRequest, CompatContextEntryRequest, ConfirmPendingImport,
     ContextToolsEnvironment, ContextToolsService, DiagnoseProviderProfile, DismissPendingImport,
     DoctorCheckStatus, DoctorDetailKind, DoctorOutcome, DoctorRecommendation, FetchProviderModels,
-    ImportCcsProviders, OverviewSnapshot, OverviewSource,
-    ProviderDoctorCheck as ServiceProviderDoctorCheck, ProviderDoctorCheckId, ProviderDoctorReport,
-    ProviderImportService, ProviderImportSource, ProviderModelsResult, ProviderNetworkError,
-    ProviderNetworkFailureKind, ProviderProfile as ServiceProviderProfile, ProviderService,
-    ProviderSource, ProviderTestOutcome, ProviderTestResult, RelayEnvironmentService,
-    RelayEnvironmentSource, RemoveEnvironmentConflicts, ResourcePresence, SystemOverviewSource,
+    ImportCcsProviders, OverviewSnapshot, OverviewSource, PluginMarketplaceCompatibilityWorkspace,
+    PluginMarketplaceEnvironment, PluginMarketplaceKind, PluginMarketplaceRepairOutcome,
+    PluginMarketplaceService, ProviderDoctorCheck as ServiceProviderDoctorCheck,
+    ProviderDoctorCheckId, ProviderDoctorReport, ProviderImportService, ProviderImportSource,
+    ProviderModelsResult, ProviderNetworkError, ProviderNetworkFailureKind,
+    ProviderProfile as ServiceProviderProfile, ProviderService, ProviderSource,
+    ProviderTestOutcome, ProviderTestResult, RelayEnvironmentService, RelayEnvironmentSource,
+    RemoveEnvironmentConflicts, RepairPluginMarketplace, ResourcePresence, SystemOverviewSource,
     SystemProviderEnvironment, TestProviderProfile, UpdateCheckState,
 };
 use serde::Serialize;
@@ -1379,21 +1381,31 @@ pub async fn repair_shortcuts() -> InstallActionResult {
 #[tauri::command]
 pub fn plugin_marketplace_status() -> CommandResult<PluginMarketplaceStatusPayload> {
     let home = codex_plus_core::codex_home::default_codex_home_dir();
-    let status = codex_plus_core::plugin_marketplace::openai_curated_marketplace_status(&home);
+    plugin_marketplace_status_with_service(system_plugin_marketplace_source(), &home)
+}
+
+fn plugin_marketplace_status_with_service<E: PluginMarketplaceEnvironment>(
+    service: &PluginMarketplaceService<E>,
+    fallback_home: &Path,
+) -> CommandResult<PluginMarketplaceStatusPayload> {
+    let snapshot = service.inspect_compatibility().ok();
+    let config_registered = snapshot
+        .as_ref()
+        .is_some_and(local_compatibility_config_registered);
+    let marketplace_root =
+        compatibility_marketplace_root(snapshot.as_ref(), PluginMarketplaceKind::Local);
+    let needs_repair = marketplace_root.is_none() || !config_registered;
     ok(
-        if status.needs_repair() {
+        if needs_repair {
             "插件市场需要初始化或注册。"
         } else {
             "插件市场已可用。"
         },
         PluginMarketplaceStatusPayload {
-            codex_home: home.to_string_lossy().to_string(),
-            marketplace_root: status
-                .marketplace_root
-                .as_ref()
-                .map(|path| path.to_string_lossy().to_string()),
-            config_registered: status.config_registered,
-            needs_repair: status.needs_repair(),
+            codex_home: compatibility_codex_home(snapshot.as_ref(), fallback_home),
+            marketplace_root,
+            config_registered,
+            needs_repair,
         },
     )
 }
@@ -1401,71 +1413,120 @@ pub fn plugin_marketplace_status() -> CommandResult<PluginMarketplaceStatusPaylo
 #[tauri::command]
 pub async fn repair_plugin_marketplace() -> CommandResult<PluginMarketplaceRepairPayload> {
     let home = codex_plus_core::codex_home::default_codex_home_dir();
-    match codex_plus_core::plugin_marketplace::initialize_openai_curated_marketplace_and_configure(
-        &home,
-    )
+    let worker_home = home.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repair_plugin_marketplace_with_service(system_plugin_marketplace_source(), &worker_home)
+    })
     .await
-    {
-        Ok(result) => ok(
-            if result.initialized {
-                "插件市场已从 openai/plugins 初始化并注册。"
-            } else if result.configured {
-                "已注册本地插件市场。"
-            } else {
-                "插件市场已可用，无需修复。"
-            },
-            PluginMarketplaceRepairPayload {
-                codex_home: home.to_string_lossy().to_string(),
-                marketplace_root:
-                    codex_plus_core::plugin_marketplace::openai_curated_marketplace_status(&home)
-                        .marketplace_root
-                        .as_ref()
-                        .map(|path| path.to_string_lossy().to_string()),
-                initialized: result.initialized,
-                configured: result.configured,
-                needs_repair: false,
-            },
-        ),
-        Err(error) => failed(
+    .unwrap_or_else(|error| {
+        failed(
             &format!("插件市场修复失败：{error}"),
             PluginMarketplaceRepairPayload {
                 codex_home: home.to_string_lossy().to_string(),
-                marketplace_root:
-                    codex_plus_core::plugin_marketplace::openai_curated_marketplace_status(&home)
-                        .marketplace_root
-                        .as_ref()
-                        .map(|path| path.to_string_lossy().to_string()),
+                marketplace_root: None,
                 initialized: false,
                 configured: false,
                 needs_repair: true,
             },
-        ),
+        )
+    })
+}
+
+fn repair_plugin_marketplace_with_service<E: PluginMarketplaceEnvironment>(
+    service: &PluginMarketplaceService<E>,
+    fallback_home: &Path,
+) -> CommandResult<PluginMarketplaceRepairPayload> {
+    let initial = match service.inspect_compatibility() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return failed(
+                &format!("插件市场修复失败：{}", compatibility_error_detail(&error)),
+                PluginMarketplaceRepairPayload {
+                    codex_home: fallback_home.to_string_lossy().to_string(),
+                    marketplace_root: None,
+                    initialized: false,
+                    configured: false,
+                    needs_repair: true,
+                },
+            );
+        }
+    };
+    let request = RepairPluginMarketplace {
+        expected_revision: initial.workspace.revision.clone(),
+        kind: PluginMarketplaceKind::Local,
+        confirmed_kind: PluginMarketplaceKind::Local,
+    };
+    match service.repair(request) {
+        Ok(result) => {
+            let fresh = service.inspect_compatibility().ok();
+            ok(
+                if result.initialized {
+                    "插件市场已从 openai/plugins 初始化并注册。"
+                } else if result.configured {
+                    "已注册本地插件市场。"
+                } else {
+                    "插件市场已可用，无需修复。"
+                },
+                PluginMarketplaceRepairPayload {
+                    codex_home: compatibility_codex_home(Some(&initial), fallback_home),
+                    marketplace_root: compatibility_marketplace_root(
+                        fresh.as_ref().or(Some(&initial)),
+                        PluginMarketplaceKind::Local,
+                    ),
+                    initialized: result.initialized,
+                    configured: result.configured,
+                    needs_repair: false,
+                },
+            )
+        }
+        Err(error) => {
+            let fresh = service.inspect_compatibility().ok();
+            failed(
+                &format!("插件市场修复失败：{}", compatibility_error_detail(&error)),
+                PluginMarketplaceRepairPayload {
+                    codex_home: compatibility_codex_home(Some(&initial), fallback_home),
+                    marketplace_root: compatibility_marketplace_root(
+                        fresh.as_ref().or(Some(&initial)),
+                        PluginMarketplaceKind::Local,
+                    ),
+                    initialized: false,
+                    configured: false,
+                    needs_repair: true,
+                },
+            )
+        }
     }
 }
 
 #[tauri::command]
 pub fn remote_plugin_marketplace_status() -> CommandResult<RemotePluginMarketplacePayload> {
     let home = codex_plus_core::codex_home::default_codex_home_dir();
-    let status =
-        codex_plus_core::plugin_marketplace::openai_curated_remote_marketplace_status(&home);
-    let (plugin_count, skill_count) =
-        remote_plugin_marketplace_counts(status.marketplace_root.as_deref());
+    remote_plugin_marketplace_status_with_service(system_plugin_marketplace_source(), &home)
+}
+
+fn remote_plugin_marketplace_status_with_service<E: PluginMarketplaceEnvironment>(
+    service: &PluginMarketplaceService<E>,
+    fallback_home: &Path,
+) -> CommandResult<RemotePluginMarketplacePayload> {
+    let snapshot = service.inspect_compatibility().ok();
+    let status = snapshot.as_ref().map(|snapshot| &snapshot.workspace.remote);
+    let needs_repair = status.is_none_or(|status| status.needs_repair);
     ok(
-        if status.needs_repair() {
+        if needs_repair {
             "官方远端插件缓存需要释放或注册。"
         } else {
             "官方远端插件缓存已可用。"
         },
         RemotePluginMarketplacePayload {
-            codex_home: home.to_string_lossy().to_string(),
-            marketplace_root: status
-                .marketplace_root
-                .as_ref()
-                .map(|path| path.to_string_lossy().to_string()),
-            config_registered: status.config_registered,
-            needs_repair: status.needs_repair(),
-            plugin_count,
-            skill_count,
+            codex_home: compatibility_codex_home(snapshot.as_ref(), fallback_home),
+            marketplace_root: compatibility_marketplace_root(
+                snapshot.as_ref(),
+                PluginMarketplaceKind::Remote,
+            ),
+            config_registered: status.is_some_and(|status| status.config_registered),
+            needs_repair,
+            plugin_count: status.map_or(0, |status| status.plugin_count),
+            skill_count: status.map_or(0, |status| status.skill_count),
         },
     )
 }
@@ -1473,98 +1534,123 @@ pub fn remote_plugin_marketplace_status() -> CommandResult<RemotePluginMarketpla
 #[tauri::command]
 pub fn repair_remote_plugin_marketplace() -> CommandResult<RemotePluginMarketplacePayload> {
     let home = codex_plus_core::codex_home::default_codex_home_dir();
-    match codex_plus_core::plugin_marketplace::ensure_openai_curated_remote_marketplace_available(
-        &home,
-    ) {
+    repair_remote_plugin_marketplace_with_service(system_plugin_marketplace_source(), &home)
+}
+
+fn repair_remote_plugin_marketplace_with_service<E: PluginMarketplaceEnvironment>(
+    service: &PluginMarketplaceService<E>,
+    fallback_home: &Path,
+) -> CommandResult<RemotePluginMarketplacePayload> {
+    let initial = match service.inspect_compatibility() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return failed(
+                &format!(
+                    "官方远端插件缓存修复失败：{}",
+                    compatibility_error_detail(&error)
+                ),
+                empty_remote_marketplace_payload(fallback_home),
+            );
+        }
+    };
+    let request = RepairPluginMarketplace {
+        expected_revision: initial.workspace.revision.clone(),
+        kind: PluginMarketplaceKind::Remote,
+        confirmed_kind: PluginMarketplaceKind::Remote,
+    };
+    match service.repair(request) {
         Ok(result) => {
-            let status =
-                codex_plus_core::plugin_marketplace::openai_curated_remote_marketplace_status(
-                    &home,
-                );
-            let (plugin_count, skill_count) =
-                remote_plugin_marketplace_counts(status.marketplace_root.as_deref());
+            let fresh = service.inspect_compatibility().ok();
+            let snapshot = fresh.as_ref().unwrap_or(&initial);
+            let status = &result.workspace.remote;
             ok(
-                if result.initialized {
+                if result.outcome == PluginMarketplaceRepairOutcome::Initialized {
                     "已释放并注册内置官方远端插件缓存。"
-                } else if result.configured {
+                } else if result.outcome == PluginMarketplaceRepairOutcome::Configured {
                     "已注册官方远端插件缓存。"
                 } else {
                     "官方远端插件缓存已可用，无需修复。"
                 },
                 RemotePluginMarketplacePayload {
-                    codex_home: home.to_string_lossy().to_string(),
-                    marketplace_root: status
-                        .marketplace_root
-                        .as_ref()
-                        .map(|path| path.to_string_lossy().to_string()),
+                    codex_home: compatibility_codex_home(Some(snapshot), fallback_home),
+                    marketplace_root: compatibility_marketplace_root(
+                        Some(snapshot),
+                        PluginMarketplaceKind::Remote,
+                    ),
                     config_registered: status.config_registered,
-                    needs_repair: status.needs_repair(),
-                    plugin_count,
-                    skill_count,
+                    needs_repair: status.needs_repair,
+                    plugin_count: status.plugin_count,
+                    skill_count: status.skill_count,
                 },
             )
         }
         Err(error) => {
-            let status =
-                codex_plus_core::plugin_marketplace::openai_curated_remote_marketplace_status(
-                    &home,
-                );
-            let (plugin_count, skill_count) =
-                remote_plugin_marketplace_counts(status.marketplace_root.as_deref());
+            let fresh = service.inspect_compatibility().ok();
+            let snapshot = fresh.as_ref().unwrap_or(&initial);
+            let status = &snapshot.workspace.remote;
             failed(
-                &format!("官方远端插件缓存修复失败：{error}"),
+                &format!(
+                    "官方远端插件缓存修复失败：{}",
+                    compatibility_error_detail(&error)
+                ),
                 RemotePluginMarketplacePayload {
-                    codex_home: home.to_string_lossy().to_string(),
-                    marketplace_root: status
-                        .marketplace_root
-                        .as_ref()
-                        .map(|path| path.to_string_lossy().to_string()),
+                    codex_home: compatibility_codex_home(Some(snapshot), fallback_home),
+                    marketplace_root: compatibility_marketplace_root(
+                        Some(snapshot),
+                        PluginMarketplaceKind::Remote,
+                    ),
                     config_registered: status.config_registered,
-                    needs_repair: status.needs_repair(),
-                    plugin_count,
-                    skill_count,
+                    needs_repair: status.needs_repair,
+                    plugin_count: status.plugin_count,
+                    skill_count: status.skill_count,
                 },
             )
         }
     }
 }
 
-fn remote_plugin_marketplace_counts(root: Option<&Path>) -> (usize, usize) {
-    let Some(root) = root else {
-        return (0, 0);
-    };
-    let marketplace_path = root
-        .join(".agents")
-        .join("plugins")
-        .join("marketplace.json");
-    let plugin_count = std::fs::read_to_string(&marketplace_path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|marketplace| {
-            marketplace
-                .get("plugins")
-                .and_then(Value::as_array)
-                .map(Vec::len)
-        })
-        .unwrap_or(0);
-    let skill_count = count_skill_files(&root.join("plugins")).unwrap_or(0);
-    (plugin_count, skill_count)
+fn local_compatibility_config_registered(
+    snapshot: &PluginMarketplaceCompatibilityWorkspace,
+) -> bool {
+    snapshot.workspace.local.config_registered
+        && (!snapshot.workspace.remote.available || snapshot.workspace.remote.config_registered)
 }
 
-fn count_skill_files(root: &Path) -> std::io::Result<usize> {
-    if !root.is_dir() {
-        return Ok(0);
+fn compatibility_codex_home(
+    snapshot: Option<&PluginMarketplaceCompatibilityWorkspace>,
+    fallback_home: &Path,
+) -> String {
+    snapshot
+        .map(PluginMarketplaceCompatibilityWorkspace::codex_home)
+        .unwrap_or(fallback_home)
+        .to_string_lossy()
+        .to_string()
+}
+
+fn compatibility_marketplace_root(
+    snapshot: Option<&PluginMarketplaceCompatibilityWorkspace>,
+    kind: PluginMarketplaceKind,
+) -> Option<String> {
+    snapshot
+        .and_then(|snapshot| snapshot.marketplace_root(kind))
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+fn compatibility_error_detail(error: &codex_plus_manager_service::PluginMarketplaceError) -> &str {
+    error
+        .compatibility_detail()
+        .unwrap_or_else(|| error.detail())
+}
+
+fn empty_remote_marketplace_payload(fallback_home: &Path) -> RemotePluginMarketplacePayload {
+    RemotePluginMarketplacePayload {
+        codex_home: fallback_home.to_string_lossy().to_string(),
+        marketplace_root: None,
+        config_registered: false,
+        needs_repair: true,
+        plugin_count: 0,
+        skill_count: 0,
     }
-    let mut total = 0;
-    for entry in std::fs::read_dir(root)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            total += count_skill_files(&path)?;
-        } else if path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
-            total += 1;
-        }
-    }
-    Ok(total)
 }
 
 #[tauri::command]
@@ -3157,6 +3243,12 @@ fn system_context_tools_source() -> &'static ContextToolsService<SystemProviderE
     SOURCE.get_or_init(|| ContextToolsService::new(system_provider_environment().clone()))
 }
 
+fn system_plugin_marketplace_source() -> &'static PluginMarketplaceService<SystemProviderEnvironment>
+{
+    static SOURCE: OnceLock<PluginMarketplaceService<SystemProviderEnvironment>> = OnceLock::new();
+    SOURCE.get_or_init(|| PluginMarketplaceService::new(system_provider_environment().clone()))
+}
+
 fn system_provider_environment() -> &'static SystemProviderEnvironment {
     static ENVIRONMENT: OnceLock<SystemProviderEnvironment> = OnceLock::new();
     ENVIRONMENT.get_or_init(SystemProviderEnvironment::default)
@@ -3423,11 +3515,149 @@ mod tests {
     use super::*;
 
     #[test]
+    fn plugin_marketplace_adapters_preserve_all_four_json_contracts() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        write_test_local_marketplace(&home);
+        let service = PluginMarketplaceService::new(SystemProviderEnvironment::for_paths(
+            temp.path().join("settings.json"),
+            home.clone(),
+        ));
+
+        let local_status = plugin_marketplace_status_with_service(&service, &home);
+        let local_status_json = serde_json::to_value(&local_status).unwrap();
+        assert_eq!(local_status.status, "ok");
+        assert!(!local_status.message.is_empty());
+        assert_eq!(
+            json_object_keys(&local_status_json),
+            vec![
+                "codexHome",
+                "configRegistered",
+                "marketplaceRoot",
+                "message",
+                "needsRepair",
+                "status",
+            ]
+        );
+        assert_eq!(
+            local_status_json["marketplaceRoot"],
+            home.join(".tmp").join("plugins").to_string_lossy().as_ref()
+        );
+        assert_eq!(local_status_json["configRegistered"], false);
+        assert_eq!(local_status_json["needsRepair"], true);
+
+        let local_repair = repair_plugin_marketplace_with_service(&service, &home);
+        let local_repair_json = serde_json::to_value(&local_repair).unwrap();
+        assert_eq!(local_repair.status, "ok");
+        assert_eq!(
+            json_object_keys(&local_repair_json),
+            vec![
+                "codexHome",
+                "configured",
+                "initialized",
+                "marketplaceRoot",
+                "message",
+                "needsRepair",
+                "status",
+            ]
+        );
+        assert_eq!(local_repair_json["initialized"], false);
+        assert_eq!(local_repair_json["configured"], true);
+        assert_eq!(local_repair_json["needsRepair"], false);
+
+        let remote_status = remote_plugin_marketplace_status_with_service(&service, &home);
+        let remote_status_json = serde_json::to_value(&remote_status).unwrap();
+        assert_eq!(remote_status.status, "ok");
+        assert_eq!(
+            json_object_keys(&remote_status_json),
+            vec![
+                "codexHome",
+                "configRegistered",
+                "marketplaceRoot",
+                "message",
+                "needsRepair",
+                "pluginCount",
+                "skillCount",
+                "status",
+            ]
+        );
+        assert!(remote_status_json["marketplaceRoot"].is_null());
+        assert_eq!(remote_status_json["pluginCount"], 0);
+        assert_eq!(remote_status_json["skillCount"], 0);
+
+        let remote_repair = repair_remote_plugin_marketplace_with_service(&service, &home);
+        let remote_repair_json = serde_json::to_value(&remote_repair).unwrap();
+        assert_eq!(remote_repair.status, "ok");
+        assert_eq!(
+            json_object_keys(&remote_repair_json),
+            vec![
+                "codexHome",
+                "configRegistered",
+                "marketplaceRoot",
+                "message",
+                "needsRepair",
+                "pluginCount",
+                "skillCount",
+                "status",
+            ]
+        );
+        assert!(!remote_repair_json["marketplaceRoot"].is_null());
+        assert_eq!(remote_repair_json["configRegistered"], true);
+        assert_eq!(remote_repair_json["needsRepair"], false);
+        assert!(remote_repair_json["pluginCount"].as_u64().unwrap() > 0);
+        assert!(remote_repair_json["skillCount"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn plugin_marketplace_repair_adapter_preserves_failure_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        write_test_local_marketplace(&home);
+        std::fs::write(home.join("config.toml"), "[invalid\n").unwrap();
+        let service = PluginMarketplaceService::new(SystemProviderEnvironment::for_paths(
+            temp.path().join("settings.json"),
+            home.clone(),
+        ));
+
+        let result = repair_plugin_marketplace_with_service(&service, &home);
+
+        assert_eq!(result.status, "failed");
+        assert!(result.message.contains("config.toml"));
+        assert_eq!(result.payload.codex_home, home.to_string_lossy());
+        assert!(result.payload.marketplace_root.is_some());
+        assert!(!result.payload.initialized);
+        assert!(!result.payload.configured);
+        assert!(result.payload.needs_repair);
+    }
+
+    #[test]
     fn backend_version_returns_structured_payload() {
         let result = backend_version();
 
         assert_eq!(result.status, "ok");
         assert!(!result.payload.version.is_empty());
+    }
+
+    fn json_object_keys(value: &Value) -> Vec<&str> {
+        let mut keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys
+    }
+
+    fn write_test_local_marketplace(home: &Path) {
+        let root = home.join(".tmp/plugins");
+        std::fs::create_dir_all(root.join(".agents/plugins")).unwrap();
+        std::fs::create_dir_all(root.join("plugins/gmail")).unwrap();
+        std::fs::write(
+            root.join(".agents/plugins/marketplace.json"),
+            r#"{"name":"openai-curated","plugins":[{"name":"gmail","path":"./plugins/gmail"}]}"#,
+        )
+        .unwrap();
     }
 
     #[test]

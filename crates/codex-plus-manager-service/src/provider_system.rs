@@ -7,7 +7,10 @@ use codex_plus_core::settings::{RelayProfile, RelayProtocol};
 use serde_json::Value;
 
 use crate::{
-    NetworkModelsResponse, NetworkTestResponse, ProviderActivationEnvironment, ProviderEnvironment,
+    NetworkModelsResponse, NetworkTestResponse, PluginMarketplaceCompatibilityWorkspace,
+    PluginMarketplaceEnvironment, PluginMarketplaceError, PluginMarketplaceErrorKind,
+    PluginMarketplaceKind, PluginMarketplaceRepair, PluginMarketplaceRepairOutcome,
+    PluginMarketplaceRevision, ProviderActivationEnvironment, ProviderEnvironment,
     ProviderEnvironmentNetworkError, ProviderNetworkEnvironment, ProviderNetworkFailureKind,
 };
 
@@ -243,6 +246,165 @@ impl crate::ContextToolsEnvironment for SystemProviderEnvironment {
             manifest,
         )
     }
+}
+
+impl PluginMarketplaceEnvironment for SystemProviderEnvironment {
+    type Preparation = codex_plus_core::plugin_marketplace::PreparedPluginMarketplace;
+
+    fn inspect_plugin_marketplaces(
+        &self,
+    ) -> Result<PluginMarketplaceCompatibilityWorkspace, PluginMarketplaceError> {
+        let _lock = codex_plus_core::relay_config::acquire_relay_live_read_lock(&self.codex_home)
+            .map_err(|error| {
+            marketplace_error(PluginMarketplaceErrorKind::InspectFailed, error)
+        })?;
+        self.inspect_plugin_marketplaces_locked()
+    }
+
+    fn prepare_plugin_marketplace(
+        &self,
+        kind: PluginMarketplaceKind,
+    ) -> Result<Self::Preparation, PluginMarketplaceError> {
+        let result = match kind {
+            PluginMarketplaceKind::Local => self.runtime.block_on(
+                codex_plus_core::plugin_marketplace::prepare_local_plugin_marketplace(
+                    &self.codex_home,
+                ),
+            ),
+            PluginMarketplaceKind::Remote => {
+                codex_plus_core::plugin_marketplace::prepare_remote_plugin_marketplace(
+                    &self.codex_home,
+                )
+            }
+        };
+        result.map_err(|error| marketplace_preparation_error(kind, error))
+    }
+
+    fn commit_plugin_marketplace(
+        &self,
+        expected_revision: PluginMarketplaceRevision,
+        kind: PluginMarketplaceKind,
+        prepared: Self::Preparation,
+    ) -> Result<PluginMarketplaceRepair, PluginMarketplaceError> {
+        if prepared.kind() != kind {
+            return Err(PluginMarketplaceError::new(
+                PluginMarketplaceErrorKind::Conflict,
+            ));
+        }
+        let _lock =
+            codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&self.codex_home)
+                .map_err(|error| {
+                    marketplace_error(PluginMarketplaceErrorKind::WriteFailed, error)
+                })?;
+        let current = self.inspect_plugin_marketplaces_locked()?;
+        if current.workspace.revision != expected_revision {
+            if !current.workspace.status(kind).needs_repair {
+                return Ok(PluginMarketplaceRepair {
+                    outcome: PluginMarketplaceRepairOutcome::AlreadyHealthy,
+                    initialized: false,
+                    configured: false,
+                    workspace: current.workspace,
+                });
+            }
+            return Err(PluginMarketplaceError::new(
+                PluginMarketplaceErrorKind::Conflict,
+            ));
+        }
+
+        let result = codex_plus_core::plugin_marketplace::commit_prepared_plugin_marketplace(
+            &self.codex_home,
+            prepared,
+        )
+        .map_err(marketplace_commit_error)?;
+        let fresh = self.inspect_plugin_marketplaces_locked()?;
+        if fresh.workspace.status(kind).needs_repair {
+            return Err(PluginMarketplaceError::new(
+                PluginMarketplaceErrorKind::WriteFailed,
+            ));
+        }
+        let outcome = if result.initialized {
+            PluginMarketplaceRepairOutcome::Initialized
+        } else if result.configured {
+            PluginMarketplaceRepairOutcome::Configured
+        } else {
+            PluginMarketplaceRepairOutcome::AlreadyHealthy
+        };
+        Ok(PluginMarketplaceRepair {
+            outcome,
+            initialized: result.initialized,
+            configured: result.configured,
+            workspace: fresh.workspace,
+        })
+    }
+}
+
+impl SystemProviderEnvironment {
+    fn inspect_plugin_marketplaces_locked(
+        &self,
+    ) -> Result<PluginMarketplaceCompatibilityWorkspace, PluginMarketplaceError> {
+        let inspection =
+            codex_plus_core::plugin_marketplace::inspect_plugin_marketplaces(&self.codex_home)
+                .map_err(|error| {
+                    marketplace_error(PluginMarketplaceErrorKind::InspectFailed, error)
+                })?;
+        Ok(
+            crate::plugin_marketplace::compatibility_workspace_from_core(
+                &self.codex_home,
+                inspection,
+            ),
+        )
+    }
+}
+
+fn marketplace_preparation_error(
+    kind: PluginMarketplaceKind,
+    error: anyhow::Error,
+) -> PluginMarketplaceError {
+    let detail = format!("{error:#}");
+    let lower = detail.to_ascii_lowercase();
+    let error_kind = if lower.contains("too large") {
+        PluginMarketplaceErrorKind::DownloadTooLarge
+    } else if lower.contains("zip")
+        || lower.contains("archive")
+        || lower.contains("escapes destination")
+        || lower.contains("marketplace is invalid")
+        || lower.contains("root mismatch")
+    {
+        PluginMarketplaceErrorKind::ArchiveInvalid
+    } else if kind == PluginMarketplaceKind::Local
+        && (lower.contains("download")
+            || lower.contains("http")
+            || lower.contains("network")
+            || lower.contains("timed out")
+            || lower.contains("timeout"))
+    {
+        PluginMarketplaceErrorKind::DownloadFailed
+    } else {
+        PluginMarketplaceErrorKind::WriteFailed
+    };
+    PluginMarketplaceError::with_compatibility_detail(error_kind, None, detail)
+}
+
+fn marketplace_commit_error(error: anyhow::Error) -> PluginMarketplaceError {
+    let detail = format!("{error:#}");
+    let lower = detail.to_ascii_lowercase();
+    let kind = if lower.contains("zip")
+        || lower.contains("archive")
+        || lower.contains("marketplace is invalid")
+        || lower.contains("root mismatch")
+    {
+        PluginMarketplaceErrorKind::ArchiveInvalid
+    } else {
+        PluginMarketplaceErrorKind::WriteFailed
+    };
+    PluginMarketplaceError::with_compatibility_detail(kind, None, detail)
+}
+
+fn marketplace_error(
+    kind: PluginMarketplaceErrorKind,
+    error: anyhow::Error,
+) -> PluginMarketplaceError {
+    PluginMarketplaceError::with_compatibility_detail(kind, None, format!("{error:#}"))
 }
 
 impl crate::ProviderImportEnvironment for SystemProviderEnvironment {

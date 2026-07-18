@@ -1,6 +1,7 @@
 mod context_tools;
 mod error;
 mod overview;
+mod plugin_marketplace;
 mod provider;
 mod provider_activation;
 mod provider_error;
@@ -24,6 +25,13 @@ pub use error::{OverviewError, OverviewErrorKind};
 pub use overview::{
     LocatedResource, OverviewEnvironment, OverviewService, OverviewSnapshot, OverviewSource,
     ResourcePresence, ShortcutSnapshot, UpdateCheckState,
+};
+pub use plugin_marketplace::{
+    PluginMarketplaceCompatibilityWorkspace, PluginMarketplaceEnvironment, PluginMarketplaceError,
+    PluginMarketplaceErrorKind, PluginMarketplaceKind, PluginMarketplaceRepair,
+    PluginMarketplaceRepairOutcome, PluginMarketplaceRevision, PluginMarketplaceService,
+    PluginMarketplaceSource, PluginMarketplaceStatus, PluginMarketplaceWorkspace,
+    RepairPluginMarketplace,
 };
 pub use provider::{
     ProviderActivationSummary, ProviderDocument, ProviderEnvironment, ProviderField, ProviderKind,

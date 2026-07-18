@@ -54,6 +54,11 @@ pub enum PerfScriptAction {
     PreviewContextSync,
     CancelContextSyncPreview,
     ConfirmContextSync,
+    RequestLocalMarketplaceRepair,
+    ConfirmLocalMarketplaceRepair,
+    RequestRemoteMarketplaceRepair,
+    ConfirmRemoteMarketplaceRepair,
+    RefreshMarketplace,
 }
 
 enum PerfEvent {
@@ -71,6 +76,7 @@ pub struct PerfRecorder {
     first_frame_recorded: bool,
     overview_ready_recorded: bool,
     pending_input_started: Option<Instant>,
+    pending_script_action: Option<(egui::Key, PerfScriptAction)>,
     next_script_step: usize,
     exit_after: Option<Duration>,
     close_requested: bool,
@@ -98,6 +104,7 @@ impl PerfRecorder {
             first_frame_recorded: false,
             overview_ready_recorded: false,
             pending_input_started: None,
+            pending_script_action: None,
             next_script_step: 0,
             exit_after,
             close_requested: false,
@@ -124,63 +131,28 @@ impl PerfRecorder {
     }
 
     pub fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
-        if let Some((due, key)) = script_step(self.next_script_step)
+        if let Some((due, key, action)) = script_step(self.next_script_step)
             && self.process_started.elapsed() >= due
         {
             let now = Instant::now();
             input.events.push(key_event(key, true));
             input.events.push(key_event(key, false));
             self.pending_input_started = Some(now);
-            if let Some(action) = script_action_for_key(key) {
-                self.send(PerfEvent::ScriptAction(action.name()));
-            }
+            self.pending_script_action = Some((key, action));
+            self.send(PerfEvent::ScriptAction(action.name()));
             self.next_script_step += 1;
             ctx.request_repaint();
         }
     }
 
-    pub fn scripted_action(&self, ui: &egui::Ui) -> Option<PerfScriptAction> {
-        ui.input(|input| {
-            [
-                egui::Key::F1,
-                egui::Key::F2,
-                egui::Key::F3,
-                egui::Key::F4,
-                egui::Key::F5,
-                egui::Key::F6,
-                egui::Key::F7,
-                egui::Key::F8,
-                egui::Key::F9,
-                egui::Key::F10,
-                egui::Key::F11,
-                egui::Key::F12,
-                egui::Key::F13,
-                egui::Key::F14,
-                egui::Key::F15,
-                egui::Key::F16,
-                egui::Key::F17,
-                egui::Key::F18,
-                egui::Key::F19,
-                egui::Key::F20,
-                egui::Key::F21,
-                egui::Key::F22,
-                egui::Key::F23,
-                egui::Key::F24,
-                egui::Key::F25,
-                egui::Key::F26,
-                egui::Key::F27,
-                egui::Key::F28,
-                egui::Key::F29,
-                egui::Key::F30,
-                egui::Key::F31,
-                egui::Key::F32,
-                egui::Key::F33,
-                egui::Key::F34,
-            ]
-            .into_iter()
-            .find(|key| input.key_pressed(*key))
-            .and_then(script_action_for_key)
-        })
+    pub fn scripted_action(&mut self, ui: &egui::Ui) -> Option<PerfScriptAction> {
+        let (key, action) = self.pending_script_action?;
+        if ui.input(|input| input.key_pressed(key)) {
+            self.pending_script_action = None;
+            Some(action)
+        } else {
+            None
+        }
     }
 
     pub fn record_ui_frame(&mut self, cpu_usage_seconds: Option<f32>) {
@@ -250,8 +222,8 @@ fn valid_samples(samples: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-fn script_step(index: usize) -> Option<(Duration, egui::Key)> {
-    const KEYS: [egui::Key; 34] = [
+fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> {
+    const KEYS: [egui::Key; 39] = [
         egui::Key::F1,
         egui::Key::F2,
         egui::Key::F3,
@@ -286,48 +258,59 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key)> {
         egui::Key::F32,
         egui::Key::F33,
         egui::Key::F34,
+        egui::Key::F35,
+        egui::Key::F35,
+        egui::Key::F35,
+        egui::Key::F35,
+        egui::Key::F35,
     ];
-    KEYS.get(index).map(|key| {
-        let milliseconds = u64::try_from(index + 1).expect("script index fits u64") * 500;
-        (Duration::from_millis(milliseconds), *key)
-    })
-}
-
-fn script_action_for_key(key: egui::Key) -> Option<PerfScriptAction> {
-    match key {
-        egui::Key::F1 => Some(PerfScriptAction::NavigateProviders),
-        egui::Key::F2 => Some(PerfScriptAction::SelectNextProvider),
-        egui::Key::F3 => Some(PerfScriptAction::EditProviderName),
-        egui::Key::F4 => Some(PerfScriptAction::DiscardProvider),
-        egui::Key::F5 => Some(PerfScriptAction::RefreshLive),
-        egui::Key::F6 => Some(PerfScriptAction::OpenLiveTab),
-        egui::Key::F7 | egui::Key::F9 => Some(PerfScriptAction::RequestClearLive),
-        egui::Key::F8 => Some(PerfScriptAction::CancelLiveConfirmation),
-        egui::Key::F10 => Some(PerfScriptAction::ConfirmLiveMutation),
-        egui::Key::F11 => Some(PerfScriptAction::ToggleProviderList),
-        egui::Key::F12 => Some(PerfScriptAction::NavigateEnvironment),
-        egui::Key::F13 => Some(PerfScriptAction::RefreshEnvironment),
-        egui::Key::F14 => Some(PerfScriptAction::SelectFirstEnvironmentConflict),
-        egui::Key::F15 => Some(PerfScriptAction::RequestEnvironmentCleanup),
-        egui::Key::F16 => Some(PerfScriptAction::CancelEnvironmentCleanup),
-        egui::Key::F17 => Some(PerfScriptAction::NavigateProviders),
-        egui::Key::F18 => Some(PerfScriptAction::OpenCcsImport),
-        egui::Key::F19 => Some(PerfScriptAction::CloseCcsImport),
-        egui::Key::F20 => Some(PerfScriptAction::NavigateOverview),
-        egui::Key::F21 => Some(PerfScriptAction::NavigateContext),
-        egui::Key::F22 => Some(PerfScriptAction::RefreshContext),
-        egui::Key::F23 => Some(PerfScriptAction::SelectNextContextKind),
-        egui::Key::F24 => Some(PerfScriptAction::CreateContextEntry),
-        egui::Key::F25 | egui::Key::F27 => Some(PerfScriptAction::CancelContextEditor),
-        egui::Key::F26 => Some(PerfScriptAction::OpenFirstContextEntry),
-        egui::Key::F28 => Some(PerfScriptAction::ToggleFirstContextEntry),
-        egui::Key::F29 => Some(PerfScriptAction::RequestDeleteFirstContextEntry),
-        egui::Key::F30 => Some(PerfScriptAction::CancelContextDelete),
-        egui::Key::F31 | egui::Key::F33 => Some(PerfScriptAction::PreviewContextSync),
-        egui::Key::F32 => Some(PerfScriptAction::CancelContextSyncPreview),
-        egui::Key::F34 => Some(PerfScriptAction::ConfirmContextSync),
-        _ => None,
-    }
+    const ACTIONS: [PerfScriptAction; 39] = [
+        PerfScriptAction::NavigateProviders,
+        PerfScriptAction::SelectNextProvider,
+        PerfScriptAction::EditProviderName,
+        PerfScriptAction::DiscardProvider,
+        PerfScriptAction::RefreshLive,
+        PerfScriptAction::OpenLiveTab,
+        PerfScriptAction::RequestClearLive,
+        PerfScriptAction::CancelLiveConfirmation,
+        PerfScriptAction::RequestClearLive,
+        PerfScriptAction::ConfirmLiveMutation,
+        PerfScriptAction::ToggleProviderList,
+        PerfScriptAction::NavigateEnvironment,
+        PerfScriptAction::RefreshEnvironment,
+        PerfScriptAction::SelectFirstEnvironmentConflict,
+        PerfScriptAction::RequestEnvironmentCleanup,
+        PerfScriptAction::CancelEnvironmentCleanup,
+        PerfScriptAction::NavigateProviders,
+        PerfScriptAction::OpenCcsImport,
+        PerfScriptAction::CloseCcsImport,
+        PerfScriptAction::NavigateOverview,
+        PerfScriptAction::NavigateContext,
+        PerfScriptAction::RefreshContext,
+        PerfScriptAction::SelectNextContextKind,
+        PerfScriptAction::CreateContextEntry,
+        PerfScriptAction::CancelContextEditor,
+        PerfScriptAction::OpenFirstContextEntry,
+        PerfScriptAction::CancelContextEditor,
+        PerfScriptAction::ToggleFirstContextEntry,
+        PerfScriptAction::RequestDeleteFirstContextEntry,
+        PerfScriptAction::CancelContextDelete,
+        PerfScriptAction::PreviewContextSync,
+        PerfScriptAction::CancelContextSyncPreview,
+        PerfScriptAction::PreviewContextSync,
+        PerfScriptAction::ConfirmContextSync,
+        PerfScriptAction::RefreshMarketplace,
+        PerfScriptAction::RequestLocalMarketplaceRepair,
+        PerfScriptAction::ConfirmLocalMarketplaceRepair,
+        PerfScriptAction::RequestRemoteMarketplaceRepair,
+        PerfScriptAction::ConfirmRemoteMarketplaceRepair,
+    ];
+    KEYS.get(index)
+        .zip(ACTIONS.get(index))
+        .map(|(key, action)| {
+            let milliseconds = u64::try_from(index + 1).expect("script index fits u64") * 500;
+            (Duration::from_millis(milliseconds), *key, *action)
+        })
 }
 
 impl PerfScriptAction {
@@ -365,6 +348,11 @@ impl PerfScriptAction {
             Self::PreviewContextSync => "preview_context_sync",
             Self::CancelContextSyncPreview => "cancel_context_sync_preview",
             Self::ConfirmContextSync => "confirm_context_sync",
+            Self::RequestLocalMarketplaceRepair => "request_local_marketplace_repair",
+            Self::ConfirmLocalMarketplaceRepair => "confirm_local_marketplace_repair",
+            Self::RequestRemoteMarketplaceRepair => "request_remote_marketplace_repair",
+            Self::ConfirmRemoteMarketplaceRepair => "confirm_remote_marketplace_repair",
+            Self::RefreshMarketplace => "refresh_marketplace",
         }
     }
 }
@@ -447,8 +435,7 @@ mod tests {
     use eframe::egui;
 
     use super::{
-        PerfReport, PerfScriptAction, maximum_ms, percentile_ms, script_action_for_key,
-        script_step, write_report,
+        PerfReport, PerfScriptAction, maximum_ms, percentile_ms, script_step, write_report,
     };
 
     #[test]
@@ -589,10 +576,27 @@ mod tests {
         for (index, (milliseconds, key, action)) in expected.into_iter().enumerate() {
             assert_eq!(
                 script_step(index),
-                Some((Duration::from_millis(milliseconds), key))
+                Some((Duration::from_millis(milliseconds), key, action))
             );
-            assert_eq!(script_action_for_key(key), Some(action));
         }
-        assert_eq!(script_step(expected.len()), None);
+    }
+
+    #[test]
+    fn native_perf_script_appends_the_complete_marketplace_workflow() {
+        let expected = [
+            (17_500, PerfScriptAction::RefreshMarketplace),
+            (18_000, PerfScriptAction::RequestLocalMarketplaceRepair),
+            (18_500, PerfScriptAction::ConfirmLocalMarketplaceRepair),
+            (19_000, PerfScriptAction::RequestRemoteMarketplaceRepair),
+            (19_500, PerfScriptAction::ConfirmRemoteMarketplaceRepair),
+        ];
+
+        for (offset, (milliseconds, action)) in expected.into_iter().enumerate() {
+            assert_eq!(
+                script_step(34 + offset),
+                Some((Duration::from_millis(milliseconds), egui::Key::F35, action)),
+            );
+        }
+        assert_eq!(script_step(39), None);
     }
 }

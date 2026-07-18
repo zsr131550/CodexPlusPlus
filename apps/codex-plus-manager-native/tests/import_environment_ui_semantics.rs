@@ -45,6 +45,7 @@ fn render(ui: &mut egui::Ui, state: &mut FeatureState) {
         Some(&state.provider_import),
         Some(&state.environment),
         None,
+        None,
     ) {
         match &action {
             ShellAction::Navigate(route) => state.model.route = *route,
@@ -57,7 +58,10 @@ fn render(ui: &mut egui::Ui, state: &mut FeatureState) {
             ShellAction::Environment(EnvironmentAction::CancelCleanup) => {
                 state.environment.cancel_cleanup_confirmation();
             }
-            ShellAction::Import(_) | ShellAction::Environment(_) | ShellAction::Context(_) => {}
+            ShellAction::Import(_)
+            | ShellAction::Environment(_)
+            | ShellAction::Context(_)
+            | ShellAction::Marketplace(_) => {}
             ShellAction::Refresh
             | ShellAction::Retry
             | ShellAction::SetLocale(_)

@@ -3,8 +3,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use codex_plus_manager_service::{
     ContextKind, ContextToolsSource, DiagnoseProviderProfile, FetchProviderModels, OverviewSource,
-    ProviderActivationSource, ProviderErrorKind, ProviderImportSource, ProviderNetworkFailureKind,
-    ProviderProfile, ProviderSource, RelayEnvironmentSource, TestProviderProfile,
+    PluginMarketplaceKind, PluginMarketplaceSource, ProviderActivationSource, ProviderErrorKind,
+    ProviderImportSource, ProviderNetworkFailureKind, ProviderProfile, ProviderSource,
+    RelayEnvironmentSource, TestProviderProfile,
 };
 use eframe::egui;
 
@@ -14,6 +15,7 @@ use crate::persistence::{self, PersistedUiState};
 use crate::runtime::context::{ContextDispatcher, ContextResponse};
 use crate::runtime::environment::{EnvironmentDispatcher, EnvironmentResponse};
 use crate::runtime::import::{ImportDispatcher, ImportResponse};
+use crate::runtime::marketplace::{MarketplaceDispatcher, MarketplaceResponse};
 use crate::runtime::provider::{
     ActivationResponse, ProviderActivationDispatcher, ProviderDispatcher, StoreResponse,
 };
@@ -21,6 +23,7 @@ use crate::runtime::{DispatchError, OverviewDispatcher};
 use crate::state::context::ContextFailureKind;
 use crate::state::environment::EnvironmentFailureKind;
 use crate::state::import::ImportFailureKind;
+use crate::state::marketplace::MarketplaceFailureKind;
 use crate::state::provider::{
     DeleteProfileError, GuardOutcome, GuardResolution, LiveLoadFailureKind, LiveMutationFailure,
     LiveMutationKind, OperationPhase, ProviderEditorTab, ProviderLoadFailureKind,
@@ -31,6 +34,7 @@ use crate::theme;
 use crate::views::context::ContextAction;
 use crate::views::environment::EnvironmentAction;
 use crate::views::import::ImportAction;
+use crate::views::marketplace::MarketplaceAction;
 use crate::views::provider::{ProviderAction, ProviderEdit};
 use crate::views::shell::{ShellAction, ShellViewModel, render_shell};
 
@@ -41,6 +45,7 @@ pub struct NativeManagerSources {
     pub provider_import: Arc<dyn ProviderImportSource>,
     pub environment: Arc<dyn RelayEnvironmentSource>,
     pub context: Arc<dyn ContextToolsSource>,
+    pub marketplace: Arc<dyn PluginMarketplaceSource>,
 }
 
 pub struct NativeManagerApp {
@@ -52,6 +57,7 @@ pub struct NativeManagerApp {
     import_dispatcher: ImportDispatcher,
     environment_dispatcher: EnvironmentDispatcher,
     context_dispatcher: ContextDispatcher,
+    marketplace_dispatcher: MarketplaceDispatcher,
     last_updated: Option<String>,
     overview_worker_stopped: bool,
     provider_store_worker_stopped: bool,
@@ -59,6 +65,7 @@ pub struct NativeManagerApp {
     import_worker_stopped: bool,
     environment_worker_stopped: bool,
     context_worker_stopped: bool,
+    marketplace_worker_stopped: bool,
     window_focused: bool,
     pending_route: Option<Route>,
     pending_provider_reload: bool,
@@ -109,6 +116,11 @@ impl NativeManagerApp {
             sources.context,
             Arc::new(move || context_repaint_context.request_repaint()),
         );
+        let marketplace_repaint_context = creation.egui_ctx.clone();
+        let marketplace_dispatcher = MarketplaceDispatcher::spawn(
+            sources.marketplace,
+            Arc::new(move || marketplace_repaint_context.request_repaint()),
+        );
         let mut app = Self {
             state: AppState::default(),
             persisted,
@@ -118,6 +130,7 @@ impl NativeManagerApp {
             import_dispatcher,
             environment_dispatcher,
             context_dispatcher,
+            marketplace_dispatcher,
             last_updated: None,
             overview_worker_stopped: false,
             provider_store_worker_stopped: false,
@@ -125,6 +138,7 @@ impl NativeManagerApp {
             import_worker_stopped: false,
             environment_worker_stopped: false,
             context_worker_stopped: false,
+            marketplace_worker_stopped: false,
             window_focused: true,
             pending_route: None,
             pending_provider_reload: false,
@@ -164,12 +178,18 @@ impl NativeManagerApp {
             ShellAction::Refresh => match self.state.route {
                 Route::Providers => self.request_provider_reload(),
                 Route::Environment => self.inspect_environment(),
-                Route::Context => self.load_context_workspace(),
+                Route::Context => {
+                    self.load_context_workspace();
+                    self.inspect_plugin_marketplaces();
+                }
                 Route::Overview | Route::About => self.refresh_overview(),
             },
             ShellAction::Retry => match self.state.route {
                 Route::Environment => self.inspect_environment(),
-                Route::Context => self.load_context_workspace(),
+                Route::Context => {
+                    self.load_context_workspace();
+                    self.inspect_plugin_marketplaces();
+                }
                 Route::Overview | Route::Providers | Route::About => self.refresh_overview(),
             },
             ShellAction::SetLocale(locale) => self.persisted.locale = locale,
@@ -181,6 +201,7 @@ impl NativeManagerApp {
             ShellAction::Import(action) => self.apply_import_action(action),
             ShellAction::Environment(action) => self.apply_environment_action(action),
             ShellAction::Context(action) => self.apply_context_action(action),
+            ShellAction::Marketplace(action) => self.apply_marketplace_action(action),
         }
         ctx.request_repaint();
     }
@@ -212,6 +233,7 @@ impl NativeManagerApp {
         }
         if entering_context {
             self.load_context_workspace();
+            self.inspect_plugin_marketplaces();
         }
     }
 
@@ -412,6 +434,54 @@ impl NativeManagerApp {
                 self.state.context.cancel_preview();
             }
             ContextAction::ConfirmSync => self.sync_context_to_live(),
+        }
+    }
+
+    fn apply_marketplace_action(&mut self, action: MarketplaceAction) {
+        match action {
+            MarketplaceAction::Refresh => self.inspect_plugin_marketplaces(),
+            MarketplaceAction::RequestRepair(kind) => {
+                self.state.marketplace.request_repair_confirmation(kind);
+            }
+            MarketplaceAction::CancelRepair => {
+                self.state.marketplace.cancel_repair_confirmation();
+            }
+            MarketplaceAction::ConfirmRepair => self.repair_plugin_marketplace(),
+        }
+    }
+
+    fn inspect_plugin_marketplaces(&mut self) {
+        let Some(request_id) = self.state.marketplace.begin_inspection() else {
+            return;
+        };
+        if self
+            .marketplace_dispatcher
+            .request_inspection(request_id)
+            .is_err()
+        {
+            self.marketplace_worker_stopped = true;
+            self.state
+                .marketplace
+                .apply_inspection_response(request_id, Err(MarketplaceFailureKind::WorkerStopped));
+        }
+    }
+
+    fn repair_plugin_marketplace(&mut self) {
+        let Some((request_id, request)) = self.state.marketplace.confirm_repair() else {
+            return;
+        };
+        let kind = request.kind;
+        if self
+            .marketplace_dispatcher
+            .request_repair(request_id, request)
+            .is_err()
+        {
+            self.marketplace_worker_stopped = true;
+            self.state.marketplace.apply_repair_response(
+                request_id,
+                kind,
+                Err(MarketplaceFailureKind::WorkerStopped),
+            );
         }
     }
 
@@ -737,6 +807,7 @@ impl NativeManagerApp {
             }
             if route == Route::Context {
                 self.load_context_workspace();
+                self.inspect_plugin_marketplaces();
             }
         }
         if std::mem::take(&mut self.pending_provider_reload) {
@@ -1208,6 +1279,59 @@ impl NativeManagerApp {
         }
     }
 
+    fn reduce_marketplace_responses(&mut self) {
+        loop {
+            match self.marketplace_dispatcher.try_recv() {
+                Ok(Some(MarketplaceResponse::Inspected { request_id, result })) => {
+                    let accepted = self.state.marketplace.apply_inspection_response(
+                        request_id,
+                        result.map_err(|error| MarketplaceFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.marketplace.inspection_phase == OperationPhase::Ready
+                    {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(MarketplaceResponse::Repaired {
+                    request_id,
+                    kind,
+                    result,
+                })) => {
+                    let accepted = self.state.marketplace.apply_repair_response(
+                        request_id,
+                        kind,
+                        result.map_err(|error| MarketplaceFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.marketplace.repair_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    if !self.marketplace_worker_stopped {
+                        self.marketplace_worker_stopped = true;
+                        if self.state.marketplace.inspection_phase == OperationPhase::Running {
+                            self.state.marketplace.apply_inspection_response(
+                                self.state.marketplace.current_inspection_request_id,
+                                Err(MarketplaceFailureKind::WorkerStopped),
+                            );
+                        }
+                        if self.state.marketplace.repair_phase == OperationPhase::Running
+                            && let Some(kind) = self.state.marketplace.active_repair_kind
+                        {
+                            self.state.marketplace.apply_repair_response(
+                                self.state.marketplace.current_repair_request_id,
+                                kind,
+                                Err(MarketplaceFailureKind::WorkerStopped),
+                            );
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     fn fail_running_context_operations(&mut self) {
         if self.state.context.workspace_phase == OperationPhase::Running {
             self.state.apply_context_workspace_response(
@@ -1247,6 +1371,7 @@ impl NativeManagerApp {
             self.load_pending_import();
             if self.state.route == Route::Context {
                 self.load_context_workspace();
+                self.inspect_plugin_marketplaces();
             }
         }
         self.window_focused = focused;
@@ -1410,6 +1535,21 @@ impl NativeManagerApp {
             PerfScriptAction::ConfirmContextSync => {
                 Some(ShellAction::Context(ContextAction::ConfirmSync))
             }
+            PerfScriptAction::RequestLocalMarketplaceRepair => Some(ShellAction::Marketplace(
+                MarketplaceAction::RequestRepair(PluginMarketplaceKind::Local),
+            )),
+            PerfScriptAction::ConfirmLocalMarketplaceRepair => {
+                Some(ShellAction::Marketplace(MarketplaceAction::ConfirmRepair))
+            }
+            PerfScriptAction::RequestRemoteMarketplaceRepair => Some(ShellAction::Marketplace(
+                MarketplaceAction::RequestRepair(PluginMarketplaceKind::Remote),
+            )),
+            PerfScriptAction::ConfirmRemoteMarketplaceRepair => {
+                Some(ShellAction::Marketplace(MarketplaceAction::ConfirmRepair))
+            }
+            PerfScriptAction::RefreshMarketplace => {
+                Some(ShellAction::Marketplace(MarketplaceAction::Refresh))
+            }
         };
         if let Some(action) = shell_action {
             self.apply_action(ctx, action);
@@ -1425,6 +1565,7 @@ impl eframe::App for NativeManagerApp {
         self.reduce_import_responses();
         self.reduce_environment_responses();
         self.reduce_context_responses();
+        self.reduce_marketplace_responses();
         self.refresh_pending_on_focus_regain(ctx);
         if let Some(perf) = &mut self.perf {
             perf.drive(ctx);
@@ -1432,7 +1573,7 @@ impl eframe::App for NativeManagerApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        let scripted_action = self.perf.as_ref().and_then(|perf| perf.scripted_action(ui));
+        let scripted_action = self.perf.as_mut().and_then(|perf| perf.scripted_action(ui));
         if let Some(action) = scripted_action {
             self.apply_perf_action(ui.ctx(), action);
         }
@@ -1444,6 +1585,7 @@ impl eframe::App for NativeManagerApp {
             Some(&self.state.provider_import),
             Some(&self.state.environment),
             Some(&self.state.context),
+            Some(&self.state.marketplace),
         ) {
             self.apply_action(ui.ctx(), action);
         }

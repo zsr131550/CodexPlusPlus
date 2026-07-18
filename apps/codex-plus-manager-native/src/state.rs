@@ -5,6 +5,7 @@ use codex_plus_manager_service::OverviewSnapshot;
 pub mod context;
 pub mod environment;
 pub mod import;
+pub mod marketplace;
 pub mod provider;
 
 use context::{ContextFailureKind, ContextViewState};
@@ -92,6 +93,7 @@ pub struct AppState {
     pub provider_import: ImportViewState,
     pub environment: EnvironmentViewState,
     pub context: ContextViewState,
+    pub marketplace: marketplace::MarketplaceViewState,
 }
 
 impl AppState {

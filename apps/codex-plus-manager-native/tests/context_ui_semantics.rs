@@ -180,7 +180,7 @@ fn tools_route_has_exact_bilingual_navigation_and_header_copy() {
             .build_ui(move |ui| {
                 egui_extras::install_image_loaders(ui.ctx());
                 theme::apply(ui.ctx(), ThemeMode::Dark);
-                let _ = render_shell(ui, &shell_model, None, None, None, None);
+                let _ = render_shell(ui, &shell_model, None, None, None, None, None);
                 shell_model.route = Route::Context;
             });
         for label in labels {

@@ -45,7 +45,12 @@ $ExpectedScriptActions = @(
     'preview_context_sync',
     'cancel_context_sync_preview',
     'preview_context_sync',
-    'confirm_context_sync'
+    'confirm_context_sync',
+    'refresh_marketplace',
+    'request_local_marketplace_repair',
+    'confirm_local_marketplace_repair',
+    'request_remote_marketplace_repair',
+    'confirm_remote_marketplace_repair'
 )
 
 $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -188,6 +193,22 @@ base_url = "https://api.example.test/v1"
         '{"OPENAI_API_KEY":"perf-placeholder"}',
         [Text.UTF8Encoding]::new($false)
     )
+
+    $MarketplaceRoot = Join-Path $Path '.tmp\plugins'
+    $MarketplaceMetadata = Join-Path $MarketplaceRoot '.agents\plugins'
+    $MarketplacePlugin = Join-Path $MarketplaceRoot 'plugins\gmail'
+    New-Item -ItemType Directory -Path $MarketplaceMetadata -Force | Out-Null
+    New-Item -ItemType Directory -Path $MarketplacePlugin -Force | Out-Null
+    [IO.File]::WriteAllText(
+        (Join-Path $MarketplaceMetadata 'marketplace.json'),
+        '{"name":"openai-curated","plugins":[{"name":"gmail","path":"./plugins/gmail"}]}',
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllText(
+        (Join-Path $MarketplacePlugin 'SKILL.md'),
+        '# Performance marketplace fixture',
+        [Text.UTF8Encoding]::new($false)
+    )
 }
 
 function New-PendingImportFixture {
@@ -294,6 +315,7 @@ function Invoke-NativeSample {
             PrivateMemoryBytes = $PrivateMemoryBytes
             ReportPath = $ReportPath
             SettingsPath = $SettingsPath
+            CodexHomePath = $CodexHome
             LiveConfigPath = Join-Path $CodexHome 'config.toml'
             ContextOwnershipPath = $ContextOwnershipPath
         }
@@ -342,6 +364,75 @@ function Assert-ContextWorkflowResult {
         if ((@($Entry.PSObject.Properties.Name | Sort-Object) -join ',') -ne 'bodySha256,identity') {
             throw 'the context ownership manifest contains unexpected entry fields'
         }
+    }
+}
+
+function Assert-MarketplaceWorkflowResult {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Sample
+    )
+
+    $Config = Get-Content -LiteralPath $Sample.LiveConfigPath -Raw
+    foreach ($Marketplace in @(
+        'openai-curated',
+        'openai-api-curated',
+        'openai-curated-remote'
+    )) {
+        $Escaped = [Regex]::Escape($Marketplace)
+        if ($Config -notmatch "(?m)^\[marketplaces\.$Escaped\]\s*$") {
+            throw "the real-window marketplace workflow did not register $Marketplace"
+        }
+    }
+    if ($Config -notmatch '(?m)^model\s*=\s*"perf-model"\s*$') {
+        throw 'the marketplace workflow did not preserve the existing model setting'
+    }
+    if ($Config -notmatch '(?m)^\[mcp_servers\.alpha\]\s*$') {
+        throw 'the marketplace workflow did not preserve the synced MCP table'
+    }
+    if ($Config -notmatch '(?m)^\[plugins\.lint\]\s*$') {
+        throw 'the marketplace workflow did not preserve the synced plugin table'
+    }
+
+    $LocalRoot = Join-Path $Sample.CodexHomePath '.tmp\plugins'
+    $RemoteRoot = Join-Path $Sample.CodexHomePath '.tmp\plugins-remote'
+    $LocalManifestPath = Join-Path $LocalRoot '.agents\plugins\marketplace.json'
+    $RemoteManifestPath = Join-Path $RemoteRoot '.agents\plugins\marketplace.json'
+    foreach ($ManifestPath in @($LocalManifestPath, $RemoteManifestPath)) {
+        if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+            throw "marketplace manifest was not persisted: $ManifestPath"
+        }
+    }
+
+    $LocalManifest = Get-Content -LiteralPath $LocalManifestPath -Raw | ConvertFrom-Json
+    $RemoteManifest = Get-Content -LiteralPath $RemoteManifestPath -Raw | ConvertFrom-Json
+    $LocalPluginCount = @($LocalManifest.plugins).Count
+    $RemotePluginCount = @($RemoteManifest.plugins).Count
+    $LocalSkillCount = @(Get-ChildItem `
+        -LiteralPath (Join-Path $LocalRoot 'plugins') `
+        -Filter 'SKILL.md' `
+        -File `
+        -Recurse).Count
+    $RemoteSkillCount = @(Get-ChildItem `
+        -LiteralPath (Join-Path $RemoteRoot 'plugins') `
+        -Filter 'SKILL.md' `
+        -File `
+        -Recurse).Count
+    if ($LocalPluginCount -ne 1 -or $LocalSkillCount -ne 1) {
+        throw "unexpected local marketplace counts: plugins=$LocalPluginCount skills=$LocalSkillCount"
+    }
+    if ($RemotePluginCount -ne 10 -or $RemoteSkillCount -ne 110) {
+        throw "unexpected remote marketplace counts: plugins=$RemotePluginCount skills=$RemoteSkillCount"
+    }
+
+    $Staging = @(Get-ChildItem `
+        -LiteralPath (Join-Path $Sample.CodexHomePath '.tmp') `
+        -Directory | Where-Object {
+            $_.Name -like 'plugins-download-*' -or
+            $_.Name -like 'plugins-remote-embedded-*'
+        })
+    if ($Staging.Count -ne 0) {
+        throw "marketplace staging directories were not cleaned: $($Staging.Name -join ',')"
     }
 }
 
@@ -426,6 +517,7 @@ try {
         throw 'scripted action sequence did not match the named performance scenario'
     }
     Assert-ContextWorkflowResult -Sample $IdleSample
+    Assert-MarketplaceWorkflowResult -Sample $IdleSample
     if ($null -eq $IdleSample.PrivateMemoryBytes) {
         throw 'the 30-second sample did not record private memory'
     }
