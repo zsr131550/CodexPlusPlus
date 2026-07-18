@@ -97,7 +97,7 @@ pub struct SessionReadIssue {
     pub kind: SessionReadIssueKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
@@ -107,6 +107,58 @@ pub struct SessionSummary {
     pub updated_at_ms: Option<i64>,
     pub source_db_paths: Vec<String>,
     pub revision: SessionRevision,
+    compatibility_rollout_path: String,
+    compatibility_db_path: String,
+}
+
+impl SessionSummary {
+    pub fn new(id: impl Into<String>, title: impl Into<String>, revision: SessionRevision) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            cwd: String::new(),
+            model_provider: String::new(),
+            archived: false,
+            updated_at_ms: None,
+            source_db_paths: Vec::new(),
+            revision,
+            compatibility_rollout_path: String::new(),
+            compatibility_db_path: String::new(),
+        }
+    }
+
+    pub fn compatibility_local_session(&self) -> LocalSession {
+        LocalSession {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            cwd: self.cwd.clone(),
+            model_provider: self.model_provider.clone(),
+            archived: self.archived,
+            updated_at_ms: self.updated_at_ms,
+            rollout_path: self.compatibility_rollout_path.clone(),
+            db_path: self.compatibility_db_path.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for SessionSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionSummary")
+            .field("id", &self.id)
+            .field("title", &self.title)
+            .field("cwd", &self.cwd)
+            .field("model_provider", &self.model_provider)
+            .field("archived", &self.archived)
+            .field("updated_at_ms", &self.updated_at_ms)
+            .field("source_db_paths", &self.source_db_paths)
+            .field("revision", &self.revision)
+            .field(
+                "has_compatibility_rollout_path",
+                &!self.compatibility_rollout_path.is_empty(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -350,23 +402,25 @@ fn session_summary(mut observed: Vec<ObservedSession>) -> Option<SessionSummary>
             .then_with(|| right.row.id.cmp(&left.row.id))
             .then_with(|| left.database_id.cmp(&right.database_id))
     });
-    let display = observed.first()?.row.clone();
+    let display = observed.first()?.clone();
     let source_db_paths = observed
         .iter()
         .map(|record| record.database_id.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let revision = revision_for_records(&display.id, &observed);
+    let revision = revision_for_records(&display.row.id, &observed);
     Some(SessionSummary {
-        id: display.id,
-        title: display.title,
-        cwd: display.cwd,
-        model_provider: display.model_provider,
-        archived: display.archived,
-        updated_at_ms: display.updated_at_ms,
+        id: display.row.id,
+        title: display.row.title,
+        cwd: display.row.cwd,
+        model_provider: display.row.model_provider,
+        archived: display.row.archived,
+        updated_at_ms: display.row.updated_at_ms,
         source_db_paths,
         revision,
+        compatibility_rollout_path: display.row.rollout_path,
+        compatibility_db_path: display.database_id,
     })
 }
 

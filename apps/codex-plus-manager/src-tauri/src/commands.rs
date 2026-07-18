@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use codex_plus_core::install::SILENT_BINARY;
-use codex_plus_core::models::{DeleteResult, SessionRef};
+use codex_plus_core::models::DeleteResult;
 use codex_plus_core::relay_environment::RelayEnvironmentReport;
 use codex_plus_core::script_market::{self, MarketScript, ScriptMarketManifest};
 use codex_plus_core::settings::{BackendSettings, RelayProfile, SettingsStore};
@@ -22,9 +22,11 @@ use codex_plus_manager_service::{
     ProviderDoctorCheckId, ProviderDoctorReport, ProviderImportService, ProviderImportSource,
     ProviderModelsResult, ProviderNetworkError, ProviderNetworkFailureKind,
     ProviderProfile as ServiceProviderProfile, ProviderService, ProviderSource,
-    ProviderTestOutcome, ProviderTestResult, RelayEnvironmentService, RelayEnvironmentSource,
-    RemoveEnvironmentConflicts, RepairPluginMarketplace, ResourcePresence, SystemOverviewSource,
-    SystemProviderEnvironment, TestProviderProfile, UpdateCheckState,
+    ProviderSyncService, ProviderSyncSource, ProviderTestOutcome, ProviderTestResult,
+    RelayEnvironmentService, RelayEnvironmentSource, RemoveEnvironmentConflicts,
+    RepairPluginMarketplace, ResourcePresence, RunProviderSync, SessionEnvironment, SessionService,
+    SessionSource, SystemOverviewSource, SystemProviderEnvironment, TestProviderProfile,
+    UpdateCheckState,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -653,49 +655,47 @@ pub fn dismiss_pending_provider_import() -> CommandResult<PendingProviderImportP
 
 #[tauri::command]
 pub fn list_local_sessions() -> CommandResult<LocalSessionsPayload> {
-    let home = codex_plus_core::codex_sqlite::default_codex_home_dir();
-    let db_paths = codex_plus_core::codex_sqlite::codex_session_db_paths_from_home(&home);
-    let mut sessions = Vec::new();
-    let mut errors = Vec::new();
-    for db_path in &db_paths {
-        let adapter = local_session_adapter(db_path);
-        match adapter.list_local_sessions() {
-            Ok(mut items) => sessions.append(&mut items),
-            Err(error) if db_path.exists() => {
-                errors.push(format!("{}: {error}", db_path.to_string_lossy()));
+    let service = SessionService::new(SystemProviderEnvironment::default());
+    list_local_sessions_with_service(&service)
+}
+
+fn list_local_sessions_with_service(
+    service: &dyn SessionSource,
+) -> CommandResult<LocalSessionsPayload> {
+    match service.load_workspace() {
+        Ok(workspace) => {
+            let payload = LocalSessionsPayload {
+                db_path: workspace.db_paths.first().cloned().unwrap_or_default(),
+                db_paths: workspace.db_paths.clone(),
+                sessions: workspace
+                    .sessions
+                    .iter()
+                    .map(|session| session.compatibility_local_session())
+                    .collect(),
+            };
+            if workspace.read_issues.is_empty() {
+                ok(
+                    &format!("已读取 {} 个本地会话。", payload.sessions.len()),
+                    payload,
+                )
+            } else {
+                failed(
+                    &format!(
+                        "读取部分本地会话失败：{} 个数据库不可读。",
+                        workspace.read_issues.len()
+                    ),
+                    payload,
+                )
             }
-            Err(_) => {}
         }
-    }
-    sessions.sort_by(|left, right| {
-        right
-            .updated_at_ms
-            .cmp(&left.updated_at_ms)
-            .then_with(|| right.id.cmp(&left.id))
-    });
-    let mut seen_session_ids = std::collections::HashSet::new();
-    sessions.retain(|session| seen_session_ids.insert(session.id.clone()));
-    let payload = LocalSessionsPayload {
-        db_path: db_paths
-            .first()
-            .map(|path| path.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        db_paths: db_paths
-            .iter()
-            .map(|path| path.to_string_lossy().to_string())
-            .collect(),
-        sessions,
-    };
-    if errors.is_empty() {
-        ok(
-            &format!("已读取 {} 个本地会话。", payload.sessions.len()),
-            payload,
-        )
-    } else {
-        failed(
-            &format!("读取部分本地会话失败：{}", errors.join("; ")),
-            payload,
-        )
+        Err(error) => failed(
+            &format!("读取本地会话失败：{}", error.detail()),
+            LocalSessionsPayload {
+                db_path: String::new(),
+                db_paths: Vec::new(),
+                sessions: Vec::new(),
+            },
+        ),
     }
 }
 
@@ -787,77 +787,125 @@ pub fn delete_local_session(request: DeleteLocalSessionRequest) -> CommandResult
             },
         );
     }
-    let session = SessionRef {
-        session_id: session_id.to_string(),
-        title: request.title,
-    };
-    let mut candidate_paths = Vec::new();
-    if let Some(path) = request.db_path.as_deref() {
-        let path = PathBuf::from(path);
-        if !candidate_paths.iter().any(|candidate| candidate == &path) {
-            candidate_paths.push(path);
-        }
-    }
-    for path in codex_plus_core::codex_sqlite::codex_session_db_paths_from_home(
-        &codex_plus_core::codex_sqlite::default_codex_home_dir(),
-    ) {
-        if !candidate_paths.iter().any(|candidate| candidate == &path) {
-            candidate_paths.push(path);
-        }
-    }
+    let environment = TauriSessionEnvironment::new(
+        SystemProviderEnvironment::default(),
+        request.db_path.map(PathBuf::from),
+    );
+    let service = SessionService::new(environment);
     log_manager_event(
         "manager.delete_local_session.start",
         json!({
             "session_id": session_id,
-            "title": session.title,
-            "requested_db_path": request.db_path,
-            "candidate_paths": candidate_paths
-                .iter()
-                .map(|path| path.to_string_lossy().to_string())
-                .collect::<Vec<_>>(),
         }),
     );
-    let result = codex_plus_data::delete_local_from_paths(
-        candidate_paths.clone(),
-        codex_plus_data::BackupStore::new(
-            codex_plus_core::paths::default_app_state_dir().join("backups"),
-        ),
-        &session,
-    );
+    let result = delete_local_session_with_service(&service, session_id);
     log_manager_event(
         "manager.delete_local_session.finish",
         json!({
             "session_id": session_id,
-            "final_status": format!("{:?}", result.status),
-            "final_message": result.message,
-            "candidate_paths": candidate_paths
-                .iter()
-                .map(|path| path.to_string_lossy().to_string())
-                .collect::<Vec<_>>(),
+            "final_status": format!("{:?}", result.payload.status),
         }),
     );
-    let status = if matches!(
-        result.status,
-        codex_plus_core::models::DeleteStatus::LocalDeleted
-    ) {
+    result
+}
+
+fn delete_local_session_with_service(
+    service: &dyn SessionSource,
+    session_id: &str,
+) -> CommandResult<DeleteResult> {
+    let workspace = match service.load_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return failed_delete_result(session_id, error.detail()),
+    };
+    let Some(session) = workspace
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+    else {
+        return failed_delete_result(session_id, "Thread not found in local storage");
+    };
+    let outcome = match service.delete_sessions(codex_plus_manager_service::DeleteSessions {
+        selections: vec![codex_plus_manager_service::DeleteSessionSelection {
+            id: session.id.clone(),
+            expected_revision: session.revision.clone(),
+        }],
+        confirmed_ids: vec![session.id.clone()],
+    }) {
+        Ok(outcome) => outcome,
+        Err(error) => return failed_delete_result(session_id, error.detail()),
+    };
+    let Some(result) = outcome
+        .outcomes
+        .first()
+        .map(|item| item.compatibility_delete_result())
+    else {
+        return failed_delete_result(session_id, "Session deletion produced no result");
+    };
+    let status = if result.status == codex_plus_core::models::DeleteStatus::LocalDeleted {
         "ok"
     } else {
         "failed"
     };
     CommandResult {
-        status: status.to_string(),
+        status: status.to_owned(),
         message: result.message.clone(),
         payload: result,
     }
 }
 
-fn local_session_adapter(db_path: &Path) -> codex_plus_data::SQLiteStorageAdapter {
-    codex_plus_data::SQLiteStorageAdapter::new(
-        db_path,
-        codex_plus_data::BackupStore::new(
-            codex_plus_core::paths::default_app_state_dir().join("backups"),
-        ),
+fn failed_delete_result(session_id: &str, message: &str) -> CommandResult<DeleteResult> {
+    failed(
+        message,
+        DeleteResult {
+            status: codex_plus_core::models::DeleteStatus::Failed,
+            session_id: session_id.to_owned(),
+            message: message.to_owned(),
+            undo_token: None,
+            backup_path: None,
+        },
     )
+}
+
+#[derive(Clone)]
+struct TauriSessionEnvironment {
+    system: SystemProviderEnvironment,
+    requested_db_path: Option<PathBuf>,
+}
+
+impl TauriSessionEnvironment {
+    fn new(system: SystemProviderEnvironment, requested_db_path: Option<PathBuf>) -> Self {
+        Self {
+            system,
+            requested_db_path,
+        }
+    }
+}
+
+impl SessionEnvironment for TauriSessionEnvironment {
+    fn session_db_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.requested_db_path.iter().cloned().collect::<Vec<_>>();
+        for path in SessionEnvironment::session_db_paths(&self.system) {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        paths
+    }
+
+    fn list_local_sessions(
+        &self,
+        db_path: &Path,
+    ) -> anyhow::Result<Vec<codex_plus_data::LocalSession>> {
+        SessionEnvironment::list_local_sessions(&self.system, db_path)
+    }
+
+    fn delete_local_from_paths(
+        &self,
+        db_paths: Vec<PathBuf>,
+        session: &codex_plus_core::models::SessionRef,
+    ) -> DeleteResult {
+        SessionEnvironment::delete_local_from_paths(&self.system, db_paths, session)
+    }
 }
 
 fn normalize_settings_before_save(mut settings: BackendSettings) -> BackendSettings {
@@ -1104,72 +1152,20 @@ fn ensure_text_newline(value: &str) -> String {
 
 #[tauri::command]
 pub async fn load_provider_sync_targets() -> CommandResult<Value> {
-    let settings = SettingsStore::default().load().unwrap_or_default();
+    let service = ProviderSyncService::new(SystemProviderEnvironment::default());
     let result =
-        tauri::async_runtime::spawn_blocking(|| codex_plus_data::load_provider_sync_targets(None))
-            .await
-            .map_err(|error| anyhow::anyhow!("provider target discovery task failed: {error}"));
+        tauri::async_runtime::spawn_blocking(move || service.load_provider_sync_workspace()).await;
     match result {
-        Ok(mut targets) => {
-            let manual = settings
-                .provider_sync_manual_providers
-                .iter()
-                .chain(settings.provider_sync_saved_providers.iter())
-                .filter_map(|value| {
-                    let trimmed = value.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                })
-                .collect::<Vec<_>>();
-            merge_manual_provider_sync_targets(&mut targets, &manual, &settings);
-            ok(
-                "Provider 同步目标已加载。",
-                serde_json::to_value(targets).unwrap_or_else(|_| json!({})),
-            )
-        }
+        Ok(Ok(workspace)) => ok(
+            "Provider 同步目标已加载。",
+            serde_json::to_value(workspace.targets).unwrap_or_else(|_| json!({})),
+        ),
+        Ok(Err(error)) => failed(
+            &format!("Provider 同步目标加载失败：{}", error.detail()),
+            json!({}),
+        ),
         Err(error) => failed(&format!("Provider 同步目标加载失败：{error}"), json!({})),
     }
-}
-
-fn merge_manual_provider_sync_targets(
-    targets: &mut codex_plus_data::ProviderSyncTargetList,
-    manual: &[String],
-    settings: &BackendSettings,
-) {
-    for id in manual {
-        if let Some(existing) = targets.targets.iter_mut().find(|target| target.id == *id) {
-            if !existing
-                .sources
-                .contains(&codex_plus_data::ProviderSyncTargetSource::Manual)
-            {
-                existing
-                    .sources
-                    .push(codex_plus_data::ProviderSyncTargetSource::Manual);
-                existing.sources.sort();
-            }
-            existing.is_manual = settings.provider_sync_manual_providers.contains(id);
-            existing.is_saved = settings.provider_sync_saved_providers.contains(id);
-        } else {
-            targets
-                .targets
-                .push(codex_plus_data::ProviderSyncTargetOption {
-                    id: id.clone(),
-                    sources: vec![codex_plus_data::ProviderSyncTargetSource::Manual],
-                    is_current_provider: *id == targets.current_provider,
-                    is_manual: settings.provider_sync_manual_providers.contains(id),
-                    is_saved: settings.provider_sync_saved_providers.contains(id),
-                });
-        }
-    }
-    targets.targets.sort_by(|left, right| {
-        right
-            .is_current_provider
-            .cmp(&left.is_current_provider)
-            .then_with(|| left.id.cmp(&right.id))
-    });
 }
 
 #[tauri::command]
@@ -1177,77 +1173,60 @@ pub async fn sync_providers_now(target_provider: Option<String>) -> CommandResul
     let target_provider = target_provider
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let target_for_settings = target_provider.clone();
+    let service = ProviderSyncService::new(SystemProviderEnvironment::default());
     let result = tauri::async_runtime::spawn_blocking(move || {
-        codex_plus_data::run_provider_sync_with_target(None, target_provider.as_deref())
+        sync_providers_now_with_service(&service, target_provider)
     })
-    .await
-    .map_err(|error| anyhow::anyhow!("provider sync task failed: {error}"));
+    .await;
     match result {
-        Ok(sync) => {
-            if is_success_sync_status(&sync.status) {
-                persist_provider_sync_selection(
-                    target_for_settings
-                        .as_deref()
-                        .unwrap_or(&sync.target_provider),
-                );
-            }
-            ok(
-                &format!(
-                    "供应商已同步一次：{} 个会话文件，{} 行索引，跳过 {} 个占用文件。",
-                    sync.changed_session_files,
-                    sync.sqlite_rows_updated,
-                    sync.skipped_locked_rollout_files.len()
-                ),
-                json!({
-                    "syncStatus": sync.status,
-                    "targetProvider": sync.target_provider,
-                    "changedSessionFiles": sync.changed_session_files,
-                    "skippedLockedRolloutFiles": sync.skipped_locked_rollout_files,
-                    "sqliteRowsUpdated": sync.sqlite_rows_updated,
-                    "sqliteProviderRowsUpdated": sync.sqlite_provider_rows_updated,
-                    "sqliteUserEventRowsUpdated": sync.sqlite_user_event_rows_updated,
-                    "sqliteCwdRowsUpdated": sync.sqlite_cwd_rows_updated,
-                    "updatedWorkspaceRoots": sync.updated_workspace_roots,
-                    "encryptedContentWarning": sync.encrypted_content_warning,
-                    "backupDir": sync.backup_dir,
-                    "syncMessage": sync.message,
-                }),
-            )
-        }
+        Ok(result) => result,
         Err(error) => failed(&format!("供应商同步失败：{error}"), json!({})),
     }
 }
 
-fn is_success_sync_status(status: &codex_plus_data::ProviderSyncStatus) -> bool {
-    matches!(status, codex_plus_data::ProviderSyncStatus::Synced)
+fn sync_providers_now_with_service(
+    service: &dyn ProviderSyncSource,
+    target_provider: Option<String>,
+) -> CommandResult<Value> {
+    let workspace = match service.load_provider_sync_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            return failed(&format!("供应商同步失败：{}", error.detail()), json!({}));
+        }
+    };
+    let target = target_provider.unwrap_or(workspace.targets.current_provider);
+    match service.run_provider_sync(RunProviderSync {
+        target_provider: target.clone(),
+        confirmed_target_provider: target,
+    }) {
+        Ok(outcome) => ok(
+            &format!(
+                "供应商已同步一次：{} 个会话文件，{} 行索引，跳过 {} 个占用文件。",
+                outcome.result.changed_session_files,
+                outcome.result.sqlite_rows_updated,
+                outcome.result.skipped_locked_rollout_files.len()
+            ),
+            provider_sync_result_payload(&outcome.result),
+        ),
+        Err(error) => failed(&format!("供应商同步失败：{}", error.detail()), json!({})),
+    }
 }
 
-fn persist_provider_sync_selection(provider: &str) {
-    let trimmed = provider.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let home = codex_plus_core::relay_config::default_codex_home_dir();
-    let Ok(_live_guard) = codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home)
-    else {
-        return;
-    };
-    let store = SettingsStore::default();
-    let mut settings = store.load().unwrap_or_default();
-    settings.provider_sync_last_selected_provider = trimmed.to_string();
-    if !settings
-        .provider_sync_saved_providers
-        .iter()
-        .any(|item| item == trimmed)
-    {
-        settings
-            .provider_sync_saved_providers
-            .push(trimmed.to_string());
-    }
-    settings.provider_sync_saved_providers =
-        normalize_provider_sync_provider_list(settings.provider_sync_saved_providers);
-    let _ = store.save(&settings);
+fn provider_sync_result_payload(sync: &codex_plus_data::ProviderSyncResult) -> Value {
+    json!({
+        "syncStatus": sync.status,
+        "targetProvider": sync.target_provider,
+        "changedSessionFiles": sync.changed_session_files,
+        "skippedLockedRolloutFiles": sync.skipped_locked_rollout_files,
+        "sqliteRowsUpdated": sync.sqlite_rows_updated,
+        "sqliteProviderRowsUpdated": sync.sqlite_provider_rows_updated,
+        "sqliteUserEventRowsUpdated": sync.sqlite_user_event_rows_updated,
+        "sqliteCwdRowsUpdated": sync.sqlite_cwd_rows_updated,
+        "updatedWorkspaceRoots": sync.updated_workspace_roots,
+        "encryptedContentWarning": sync.encrypted_content_warning,
+        "backupDir": sync.backup_dir,
+        "syncMessage": sync.message,
+    })
 }
 
 #[tauri::command]
@@ -3513,6 +3492,66 @@ fn default_log_lines() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_and_provider_sync_adapters_preserve_compatibility_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        let sqlite_dir = home.join("sqlite");
+        std::fs::create_dir_all(&sqlite_dir).unwrap();
+        create_minimal_thread_db(
+            &sqlite_dir.join("state_5.sqlite"),
+            "readable",
+            "Readable",
+            1,
+        );
+        let unsupported = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+        unsupported
+            .execute("CREATE TABLE unsupported (id TEXT PRIMARY KEY)", [])
+            .unwrap();
+        drop(unsupported);
+        let service = codex_plus_manager_service::SessionService::new(
+            SystemProviderEnvironment::for_paths(temp.path().join("settings.json"), home),
+        );
+
+        let listed = list_local_sessions_with_service(&service);
+        let list_json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(listed.status, "failed");
+        assert_eq!(listed.payload.sessions.len(), 1);
+        assert!(list_json.get("dbPath").is_some());
+        assert!(list_json.get("dbPaths").is_some());
+        assert!(list_json.get("sessions").is_some());
+
+        let delete_json = serde_json::to_value(DeleteResult {
+            status: codex_plus_core::models::DeleteStatus::LocalDeleted,
+            session_id: "readable".to_owned(),
+            message: "deleted".to_owned(),
+            undo_token: Some("opaque".to_owned()),
+            backup_path: Some("backup.json".to_owned()),
+        })
+        .unwrap();
+        assert!(delete_json.get("undo_token").is_some());
+        assert!(delete_json.get("backup_path").is_some());
+
+        let sync_json = provider_sync_result_payload(&codex_plus_data::ProviderSyncResult {
+            status: codex_plus_data::ProviderSyncStatus::Synced,
+            message: "synced".to_owned(),
+            target_provider: "openai".to_owned(),
+            backup_dir: None,
+            changed_session_files: 1,
+            skipped_locked_rollout_files: Vec::new(),
+            sqlite_rows_updated: 2,
+            sqlite_provider_rows_updated: 1,
+            sqlite_user_event_rows_updated: 1,
+            sqlite_cwd_rows_updated: 0,
+            updated_workspace_roots: 0,
+            encrypted_content_warning: None,
+        });
+        assert!(sync_json.get("changedSessionFiles").is_some());
+        assert!(sync_json.get("skippedLockedRolloutFiles").is_some());
+        assert!(sync_json.get("sqliteRowsUpdated").is_some());
+        assert!(sync_json.get("backupDir").is_some());
+    }
 
     #[test]
     fn plugin_marketplace_adapters_preserve_all_four_json_contracts() {
