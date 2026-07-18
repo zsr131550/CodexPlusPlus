@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-const SCRIPT_DURATION: Duration = Duration::from_secs(24);
+const SCRIPT_DURATION: Duration = Duration::from_secs(33);
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const FINAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -67,6 +67,21 @@ pub enum PerfScriptAction {
     CancelDeleteConfirmation,
     RunProviderRepair,
     CancelProviderRepair,
+    NavigateScripts,
+    RefreshLocalScripts,
+    RefreshScriptMarket,
+    OpenLocalScripts,
+    OpenScriptMarket,
+    RequestVerifiedScriptInstall,
+    CancelScriptInstall,
+    ConfirmVerifiedScriptInstall,
+    DisableAllScripts,
+    ToggleFirstUserScript,
+    RequestScriptConflict,
+    RetryScriptConflict,
+    RequestDeleteFirstUserScript,
+    CancelUserScriptDelete,
+    ConfirmUserScriptDelete,
 }
 
 enum PerfEvent {
@@ -231,7 +246,7 @@ fn valid_samples(samples: &[f64]) -> Vec<f64> {
 }
 
 fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> {
-    const KEYS: [egui::Key; 47] = [
+    const INITIAL_KEYS: [egui::Key; 35] = [
         egui::Key::F1,
         egui::Key::F2,
         egui::Key::F3,
@@ -267,20 +282,8 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> 
         egui::Key::F33,
         egui::Key::F34,
         egui::Key::F35,
-        egui::Key::F35,
-        egui::Key::F35,
-        egui::Key::F35,
-        egui::Key::F35,
-        egui::Key::F35,
-        egui::Key::F35,
-        egui::Key::F35,
-        egui::Key::F35,
-        egui::Key::F35,
-        egui::Key::F35,
-        egui::Key::F35,
-        egui::Key::F35,
     ];
-    const ACTIONS: [PerfScriptAction; 47] = [
+    const ACTIONS: [PerfScriptAction; 65] = [
         PerfScriptAction::NavigateProviders,
         PerfScriptAction::SelectNextProvider,
         PerfScriptAction::EditProviderName,
@@ -328,13 +331,30 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> 
         PerfScriptAction::CancelDeleteConfirmation,
         PerfScriptAction::RunProviderRepair,
         PerfScriptAction::CancelProviderRepair,
+        PerfScriptAction::NavigateScripts,
+        PerfScriptAction::RefreshLocalScripts,
+        PerfScriptAction::RefreshScriptMarket,
+        PerfScriptAction::OpenLocalScripts,
+        PerfScriptAction::OpenScriptMarket,
+        PerfScriptAction::RequestVerifiedScriptInstall,
+        PerfScriptAction::CancelScriptInstall,
+        PerfScriptAction::RequestVerifiedScriptInstall,
+        PerfScriptAction::ConfirmVerifiedScriptInstall,
+        PerfScriptAction::OpenLocalScripts,
+        PerfScriptAction::DisableAllScripts,
+        PerfScriptAction::ToggleFirstUserScript,
+        PerfScriptAction::RequestScriptConflict,
+        PerfScriptAction::RetryScriptConflict,
+        PerfScriptAction::RequestDeleteFirstUserScript,
+        PerfScriptAction::CancelUserScriptDelete,
+        PerfScriptAction::RequestDeleteFirstUserScript,
+        PerfScriptAction::ConfirmUserScriptDelete,
     ];
-    KEYS.get(index)
-        .zip(ACTIONS.get(index))
-        .map(|(key, action)| {
-            let milliseconds = u64::try_from(index + 1).expect("script index fits u64") * 500;
-            (Duration::from_millis(milliseconds), *key, *action)
-        })
+    ACTIONS.get(index).map(|action| {
+        let key = INITIAL_KEYS.get(index).copied().unwrap_or(egui::Key::F35);
+        let milliseconds = u64::try_from(index + 1).expect("script index fits u64") * 500;
+        (Duration::from_millis(milliseconds), key, *action)
+    })
 }
 
 impl PerfScriptAction {
@@ -385,6 +405,21 @@ impl PerfScriptAction {
             Self::CancelDeleteConfirmation => "cancel_delete_confirmation",
             Self::RunProviderRepair => "run_provider_repair",
             Self::CancelProviderRepair => "cancel_provider_repair",
+            Self::NavigateScripts => "navigate_scripts",
+            Self::RefreshLocalScripts => "refresh_local_scripts",
+            Self::RefreshScriptMarket => "refresh_script_market",
+            Self::OpenLocalScripts => "open_local_scripts",
+            Self::OpenScriptMarket => "open_script_market",
+            Self::RequestVerifiedScriptInstall => "request_verified_script_install",
+            Self::CancelScriptInstall => "cancel_script_install",
+            Self::ConfirmVerifiedScriptInstall => "confirm_verified_script_install",
+            Self::DisableAllScripts => "disable_all_scripts",
+            Self::ToggleFirstUserScript => "toggle_first_user_script",
+            Self::RequestScriptConflict => "request_script_conflict",
+            Self::RetryScriptConflict => "retry_script_conflict",
+            Self::RequestDeleteFirstUserScript => "request_delete_first_user_script",
+            Self::CancelUserScriptDelete => "cancel_user_script_delete",
+            Self::ConfirmUserScriptDelete => "confirm_user_script_delete",
         }
     }
 }
@@ -650,7 +685,38 @@ mod tests {
                 Some((Duration::from_millis(milliseconds), egui::Key::F35, action)),
             );
         }
-        assert_eq!(script_step(47), None);
+    }
+
+    #[test]
+    fn native_perf_script_appends_the_complete_user_script_workflow() {
+        let expected = [
+            (24_000, PerfScriptAction::NavigateScripts),
+            (24_500, PerfScriptAction::RefreshLocalScripts),
+            (25_000, PerfScriptAction::RefreshScriptMarket),
+            (25_500, PerfScriptAction::OpenLocalScripts),
+            (26_000, PerfScriptAction::OpenScriptMarket),
+            (26_500, PerfScriptAction::RequestVerifiedScriptInstall),
+            (27_000, PerfScriptAction::CancelScriptInstall),
+            (27_500, PerfScriptAction::RequestVerifiedScriptInstall),
+            (28_000, PerfScriptAction::ConfirmVerifiedScriptInstall),
+            (28_500, PerfScriptAction::OpenLocalScripts),
+            (29_000, PerfScriptAction::DisableAllScripts),
+            (29_500, PerfScriptAction::ToggleFirstUserScript),
+            (30_000, PerfScriptAction::RequestScriptConflict),
+            (30_500, PerfScriptAction::RetryScriptConflict),
+            (31_000, PerfScriptAction::RequestDeleteFirstUserScript),
+            (31_500, PerfScriptAction::CancelUserScriptDelete),
+            (32_000, PerfScriptAction::RequestDeleteFirstUserScript),
+            (32_500, PerfScriptAction::ConfirmUserScriptDelete),
+        ];
+
+        for (offset, (milliseconds, action)) in expected.into_iter().enumerate() {
+            assert_eq!(
+                script_step(47 + offset),
+                Some((Duration::from_millis(milliseconds), egui::Key::F35, action)),
+            );
+        }
+        assert_eq!(script_step(65), None);
     }
 
     #[test]
@@ -659,5 +725,22 @@ mod tests {
 
         assert!(script.contains("$CreateFixture | & $Python.Source - $DatabasePath"));
         assert!(!script.contains("& $Python.Source -c $CreateFixture"));
+    }
+
+    #[test]
+    fn native_perf_script_uses_an_isolated_loopback_user_script_fixture() {
+        let script = include_str!("../../../scripts/perf/native-manager.ps1");
+
+        for contract in [
+            "CODEX_PLUS_NATIVE_USER_SCRIPT_BUILTIN_DIR",
+            "CODEX_PLUS_NATIVE_USER_SCRIPT_USER_DIR",
+            "CODEX_PLUS_NATIVE_USER_SCRIPT_CONFIG_PATH",
+            "CODEX_PLUS_SCRIPT_MARKET_INDEX_URL",
+            "CODEX_PLUS_NATIVE_SCRIPT_MARKET_ALLOW_LOOPBACK",
+            "Start-ScriptMarketFixture",
+            "Assert-UserScriptWorkflowResult",
+        ] {
+            assert!(script.contains(contract), "missing {contract}");
+        }
     }
 }

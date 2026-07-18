@@ -22,6 +22,9 @@ use codex_plus_manager_native::state::provider::ProviderViewState;
 use codex_plus_manager_native::state::sessions::{
     ProviderSyncFailureKind, SessionFilter, SessionViewState,
 };
+use codex_plus_manager_native::state::user_scripts::{
+    ScriptsTab, UserScriptFailureKind, UserScriptViewState,
+};
 use codex_plus_manager_native::theme;
 use codex_plus_manager_native::views::shell::{ShellFeatureStates, ShellViewModel, render_shell};
 use codex_plus_manager_service::{
@@ -33,8 +36,10 @@ use codex_plus_manager_service::{
     ProviderActivationSummary, ProviderDocument, ProviderLiveRevision, ProviderRevision,
     ProviderSyncErrorKind, ProviderSyncRevision, ProviderSyncTargetList, ProviderSyncTargetOption,
     ProviderSyncTargetSource, ProviderSyncWorkspace, ProviderWorkspace, RelayEnvironmentWorkspace,
+    ScriptIntegrity, ScriptMarketRevision, ScriptMarketSummary, ScriptMarketWorkspace,
     SessionDeleteBatchOutcome, SessionDeleteOutcome, SessionRevision, SessionSummary,
-    SessionWorkspace,
+    SessionWorkspace, UserScriptBackupEvidence, UserScriptErrorKind, UserScriptMutationOutcome,
+    UserScriptOrigin, UserScriptRevision, UserScriptStatus, UserScriptSummary, UserScriptWorkspace,
 };
 use eframe::egui;
 use egui_kittest::{Harness, SnapshotOptions, SnapshotResults, kittest::Queryable};
@@ -49,6 +54,7 @@ struct SnapshotState {
     context: Option<ContextViewState>,
     marketplace: Option<MarketplaceViewState>,
     sessions: Option<SessionViewState>,
+    user_scripts: Option<UserScriptViewState>,
     cjk_font: Option<Vec<u8>>,
 }
 
@@ -79,6 +85,18 @@ enum SessionSnapshotScenario {
     SelectionConfirmation,
     PartialDeleteFailure,
     ProviderRepairFailure,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UserScriptSnapshotScenario {
+    Loading,
+    MarketList,
+    VerifiedConfirmation,
+    UnverifiedAcknowledgement,
+    IntegrityFailure,
+    LocalGlobalOff,
+    DeleteConfirmation,
+    BackedUpResult,
 }
 
 const CASES: &[(f32, f32, Locale, ThemeMode, &str)] = &[
@@ -317,6 +335,42 @@ const SESSION_SCENARIOS: &[(SessionSnapshotScenario, &str)] = &[
     ),
 ];
 
+const USER_SCRIPT_VIEWPORTS: &[(f32, f32, Locale, ThemeMode, &str)] = &[
+    (1180.0, 820.0, Locale::ZhCn, ThemeMode::Dark, "1180_zh_dark"),
+    (1180.0, 820.0, Locale::En, ThemeMode::Light, "1180_en_light"),
+    (960.0, 720.0, Locale::ZhCn, ThemeMode::Light, "960_zh_light"),
+    (960.0, 720.0, Locale::En, ThemeMode::Dark, "960_en_dark"),
+];
+
+const USER_SCRIPT_SCENARIOS: &[(UserScriptSnapshotScenario, &str)] = &[
+    (UserScriptSnapshotScenario::Loading, "loading"),
+    (UserScriptSnapshotScenario::MarketList, "market"),
+    (
+        UserScriptSnapshotScenario::VerifiedConfirmation,
+        "verified_confirmation",
+    ),
+    (
+        UserScriptSnapshotScenario::UnverifiedAcknowledgement,
+        "unverified_ack",
+    ),
+    (
+        UserScriptSnapshotScenario::IntegrityFailure,
+        "integrity_failure",
+    ),
+    (
+        UserScriptSnapshotScenario::LocalGlobalOff,
+        "local_global_off",
+    ),
+    (
+        UserScriptSnapshotScenario::DeleteConfirmation,
+        "delete_confirmation",
+    ),
+    (
+        UserScriptSnapshotScenario::BackedUpResult,
+        "backed_up_result",
+    ),
+];
+
 #[test]
 fn overview_wgpu_snapshot_matrix() {
     if std::env::var_os("CODEX_PLUS_UI_SNAPSHOTS").as_deref() != Some("1".as_ref()) {
@@ -387,6 +441,16 @@ fn sessions_wgpu_snapshot_matrix() {
     run_session_snapshot_matrix();
 }
 
+#[test]
+fn scripts_wgpu_snapshot_matrix() {
+    if std::env::var_os("CODEX_PLUS_UI_SNAPSHOTS").as_deref() != Some("1".as_ref()) {
+        return;
+    }
+    let _guard = snapshot_test_guard();
+
+    run_user_script_snapshot_matrix();
+}
+
 fn snapshot_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -431,6 +495,7 @@ fn run_snapshot_matrix(
                             context: state.context.as_ref(),
                             marketplace: state.marketplace.as_ref(),
                             sessions: state.sessions.as_ref(),
+                            user_scripts: state.user_scripts.as_ref(),
                         },
                     );
                 },
@@ -446,6 +511,7 @@ fn run_snapshot_matrix(
                     context: None,
                     marketplace: None,
                     sessions: None,
+                    user_scripts: None,
                     cjk_font: Some(font.clone()),
                 },
             );
@@ -508,6 +574,7 @@ fn run_context_snapshot_matrix() {
                             MarketplaceSnapshotScenario::Healthy,
                         )),
                         sessions: None,
+                        user_scripts: None,
                         cjk_font: Some(font.clone()),
                     },
                 );
@@ -580,6 +647,7 @@ fn run_marketplace_snapshot_matrix() {
                         context: Some(context_snapshot_state(ContextSnapshotScenario::SafeList)),
                         marketplace: Some(marketplace_snapshot_state(scenario)),
                         sessions: None,
+                        user_scripts: None,
                         cjk_font: Some(font.clone()),
                     },
                 );
@@ -652,6 +720,7 @@ fn run_session_snapshot_matrix() {
                         context: None,
                         marketplace: None,
                         sessions: Some(session_snapshot_state(scenario)),
+                        user_scripts: None,
                         cjk_font: Some(font.clone()),
                     },
                 );
@@ -670,6 +739,79 @@ fn run_session_snapshot_matrix() {
                 .collect::<std::collections::BTreeSet<_>>();
             assert!(distinct.len() > 8, "session snapshot rendered blank");
             harness.snapshot(format!("sessions_{scenario_name}_{viewport_name}"));
+            results.extend_harness(&mut harness);
+        }
+    }
+
+    results.unwrap();
+}
+
+fn run_user_script_snapshot_matrix() {
+    let font = fonts::load_cjk_font().expect("Windows CJK font is required for UI snapshots");
+    let snapshots = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    let mut results = SnapshotResults::new();
+
+    for &(scenario, scenario_name) in USER_SCRIPT_SCENARIOS {
+        for &(width, height, locale, mode, viewport_name) in USER_SCRIPT_VIEWPORTS {
+            let options = SnapshotOptions::new().output_path(&snapshots);
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(width, height))
+                .with_theme(match mode {
+                    ThemeMode::Dark => egui::Theme::Dark,
+                    ThemeMode::Light => egui::Theme::Light,
+                })
+                .with_os(egui::os::OperatingSystem::Windows)
+                .with_options(options)
+                .wgpu()
+                .build_ui_state(
+                    |ui, state: &mut SnapshotState| {
+                        if let Some(bytes) = state.cjk_font.take() {
+                            egui_extras::install_image_loaders(ui.ctx());
+                            fonts::install_cjk_font(ui.ctx(), bytes);
+                            theme::apply(ui.ctx(), state.model.theme);
+                        }
+                        let _ = render_shell(
+                            ui,
+                            &state.model,
+                            ShellFeatureStates {
+                                user_scripts: state.user_scripts.as_ref(),
+                                ..ShellFeatureStates::default()
+                            },
+                        );
+                    },
+                    SnapshotState {
+                        model: {
+                            let mut model = common::model(locale, mode);
+                            model.route = Route::Scripts;
+                            model
+                        },
+                        provider: None,
+                        provider_import: None,
+                        environment: None,
+                        context: None,
+                        marketplace: None,
+                        sessions: None,
+                        user_scripts: Some(user_script_snapshot_state(scenario)),
+                        cjk_font: Some(font.clone()),
+                    },
+                );
+
+            harness.remove_cursor();
+            if matches!(scenario, UserScriptSnapshotScenario::Loading) {
+                harness.run_steps(2);
+            } else {
+                harness.run();
+            }
+            assert_user_script_layout(&harness, scenario, locale, width, height);
+            let image = harness
+                .render()
+                .expect("user script snapshot should render");
+            let distinct = image
+                .pixels()
+                .map(|pixel| pixel.0)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(distinct.len() > 8, "user script snapshot rendered blank");
+            harness.snapshot(format!("scripts_{scenario_name}_{viewport_name}"));
             results.extend_harness(&mut harness);
         }
     }
@@ -786,6 +928,54 @@ fn assert_session_layout(
         SessionSnapshotScenario::ProviderRepairFailure => {
             text(locale, TextKey::ProviderRepairFailed)
         }
+    };
+    assert_inside(
+        harness.get_by_label(scenario_label).rect(),
+        width,
+        height,
+        scenario_label,
+    );
+}
+
+fn assert_user_script_layout(
+    harness: &Harness<'_, SnapshotState>,
+    scenario: UserScriptSnapshotScenario,
+    locale: Locale,
+    width: f32,
+    height: f32,
+) {
+    let header = format!(
+        "{} {}",
+        text(locale, TextKey::AppName),
+        text(locale, TextKey::Scripts)
+    );
+    for label in [
+        header.as_str(),
+        text(locale, TextKey::ScriptMarket),
+        text(locale, TextKey::LocalScripts),
+    ] {
+        assert_inside(harness.get_by_label(label).rect(), width, height, label);
+    }
+
+    let scenario_label = match scenario {
+        UserScriptSnapshotScenario::Loading => text(locale, TextKey::ScriptsSubtitle),
+        UserScriptSnapshotScenario::MarketList => {
+            "Long metadata script name that must truncate without moving controls"
+        }
+        UserScriptSnapshotScenario::VerifiedConfirmation => {
+            text(locale, TextKey::UpdateScriptQuestion)
+        }
+        UserScriptSnapshotScenario::UnverifiedAcknowledgement => {
+            text(locale, TextKey::AcknowledgeUnverified)
+        }
+        UserScriptSnapshotScenario::IntegrityFailure => {
+            text(locale, TextKey::ScriptIntegrityMismatch)
+        }
+        UserScriptSnapshotScenario::LocalGlobalOff => text(locale, TextKey::EnableAllScripts),
+        UserScriptSnapshotScenario::DeleteConfirmation => {
+            text(locale, TextKey::ConfirmScriptDeletion)
+        }
+        UserScriptSnapshotScenario::BackedUpResult => text(locale, TextKey::BackupCreated),
     };
     assert_inside(
         harness.get_by_label(scenario_label).rect(),
@@ -950,6 +1140,152 @@ fn session_snapshot_state(scenario: SessionSnapshotScenario) -> SessionViewState
         }
     }
     state
+}
+
+fn user_script_snapshot_state(scenario: UserScriptSnapshotScenario) -> UserScriptViewState {
+    let mut state = UserScriptViewState::default();
+    if matches!(scenario, UserScriptSnapshotScenario::Loading) {
+        state.begin_local_refresh();
+        state.begin_market_refresh();
+        return state;
+    }
+
+    let globally_enabled = !matches!(scenario, UserScriptSnapshotScenario::LocalGlobalOff);
+    let local_request = state.begin_local_refresh();
+    state.apply_local_response(
+        local_request,
+        Ok(Arc::new(user_script_workspace(globally_enabled, true))),
+    );
+    let integrity = if matches!(
+        scenario,
+        UserScriptSnapshotScenario::UnverifiedAcknowledgement
+    ) {
+        ScriptIntegrity::Unverified
+    } else {
+        ScriptIntegrity::Verified
+    };
+    let market_request = state.begin_market_refresh();
+    state.apply_market_response(
+        market_request,
+        Ok(Arc::new(script_market_workspace(integrity))),
+    );
+
+    match scenario {
+        UserScriptSnapshotScenario::Loading | UserScriptSnapshotScenario::MarketList => {}
+        UserScriptSnapshotScenario::VerifiedConfirmation
+        | UserScriptSnapshotScenario::UnverifiedAcknowledgement => {
+            assert!(state.request_install("demo"));
+        }
+        UserScriptSnapshotScenario::IntegrityFailure => {
+            assert!(state.request_install("demo"));
+            let (request_id, _) = state.confirm_install().unwrap();
+            state.apply_mutation_response(
+                request_id,
+                Err(UserScriptFailureKind::Service(
+                    UserScriptErrorKind::IntegrityMismatch,
+                )),
+            );
+        }
+        UserScriptSnapshotScenario::LocalGlobalOff => {
+            state.set_tab(ScriptsTab::Local);
+        }
+        UserScriptSnapshotScenario::DeleteConfirmation => {
+            state.set_tab(ScriptsTab::Local);
+            assert!(state.request_delete("user:custom.js"));
+        }
+        UserScriptSnapshotScenario::BackedUpResult => {
+            state.set_tab(ScriptsTab::Local);
+            assert!(state.request_delete("user:custom.js"));
+            let (request_id, _) = state.confirm_delete().unwrap();
+            state.apply_mutation_response(
+                request_id,
+                Ok(Arc::new(UserScriptMutationOutcome {
+                    workspace: user_script_workspace(true, false),
+                    backup: UserScriptBackupEvidence {
+                        id: "snapshot-backup".to_owned(),
+                        created: true,
+                    },
+                })),
+            );
+        }
+    }
+    state
+}
+
+fn user_script_workspace(globally_enabled: bool, include_custom: bool) -> UserScriptWorkspace {
+    let mut scripts = vec![
+        UserScriptSummary {
+            key: "builtin:base.js".to_owned(),
+            name: "Base renderer helper".to_owned(),
+            origin: UserScriptOrigin::Builtin,
+            enabled: true,
+            status: UserScriptStatus::NotLoaded,
+            market_id: None,
+            version: None,
+        },
+        UserScriptSummary {
+            key: "user:market-demo.js".to_owned(),
+            name: "Installed market script".to_owned(),
+            origin: UserScriptOrigin::User,
+            enabled: true,
+            status: UserScriptStatus::NotLoaded,
+            market_id: Some("demo".to_owned()),
+            version: Some("1".to_owned()),
+        },
+    ];
+    if include_custom {
+        scripts.insert(
+            1,
+            UserScriptSummary {
+                key: "user:custom.js".to_owned(),
+                name: "Custom workspace script".to_owned(),
+                origin: UserScriptOrigin::User,
+                enabled: false,
+                status: UserScriptStatus::Disabled,
+                market_id: None,
+                version: None,
+            },
+        );
+    }
+    UserScriptWorkspace {
+        revision: UserScriptRevision::from_digest([9; 32]),
+        globally_enabled,
+        scripts,
+    }
+}
+
+fn script_market_workspace(integrity: ScriptIntegrity) -> ScriptMarketWorkspace {
+    ScriptMarketWorkspace {
+        revision: ScriptMarketRevision::from_digest([8; 32]),
+        updated_at: Some("2026-07-18T00:00:00Z".to_owned()),
+        entries: vec![
+            ScriptMarketSummary {
+                id: "demo".to_owned(),
+                name: "Long metadata script name that must truncate without moving controls"
+                    .to_owned(),
+                description: "Keeps workspace metadata formatting consistent.".to_owned(),
+                version: "2".to_owned(),
+                author: "Snapshot fixture".to_owned(),
+                tags: vec!["workflow".to_owned(), "metadata".to_owned()],
+                source_host: "snapshot.invalid".to_owned(),
+                integrity,
+                installed_version: Some("1".to_owned()),
+                update_available: true,
+            },
+            ScriptMarketSummary {
+                id: "new-script".to_owned(),
+                name: "Available verified script".to_owned(),
+                description: "Adds a focused workspace utility.".to_owned(),
+                version: "1".to_owned(),
+                author: "Snapshot fixture".to_owned(),
+                tags: vec!["utility".to_owned()],
+                source_host: "snapshot.invalid".to_owned(),
+                integrity: ScriptIntegrity::Verified,
+                installed_version: None,
+                update_available: false,
+            },
+        ],
+    }
 }
 
 fn install_session_workspace(state: &mut SessionViewState, workspace: SessionWorkspace) {

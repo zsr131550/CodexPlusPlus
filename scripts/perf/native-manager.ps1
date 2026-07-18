@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $ColdRunCount = 5
 $ColdExitAfterMs = 3000
 $IdleSampleSeconds = 30
-$IdleExitAfterMs = 32000
+$IdleExitAfterMs = 35000
 $FirstFrameLimitMs = 1500.0
 $CpuP95LimitMs = 16.7
 $MaximumStallLimitMs = 50.0
@@ -58,7 +58,25 @@ $ExpectedScriptActions = @(
     'open_delete_confirmation',
     'cancel_delete_confirmation',
     'run_provider_repair',
-    'cancel_provider_repair'
+    'cancel_provider_repair',
+    'navigate_scripts',
+    'refresh_local_scripts',
+    'refresh_script_market',
+    'open_local_scripts',
+    'open_script_market',
+    'request_verified_script_install',
+    'cancel_script_install',
+    'request_verified_script_install',
+    'confirm_verified_script_install',
+    'open_local_scripts',
+    'disable_all_scripts',
+    'toggle_first_user_script',
+    'request_script_conflict',
+    'retry_script_conflict',
+    'request_delete_first_user_script',
+    'cancel_user_script_delete',
+    'request_delete_first_user_script',
+    'confirm_user_script_delete'
 )
 
 $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -287,6 +305,148 @@ function New-PendingImportFixture {
     [IO.File]::WriteAllText($Path, $Json, [Text.UTF8Encoding]::new($false))
 }
 
+function Start-ScriptMarketFixture {
+    param(
+        [Parameter(Mandatory)]
+        [string] $SampleDirectory
+    )
+
+    $FixtureRoot = Join-Path $SampleDirectory 'user-script-fixture'
+    $BuiltinDirectory = Join-Path $FixtureRoot 'builtin'
+    $UserDirectory = Join-Path $FixtureRoot 'user'
+    $MarketDirectory = Join-Path $FixtureRoot 'market'
+    $ConfigPath = Join-Path $FixtureRoot 'user_scripts.json'
+    New-Item -ItemType Directory -Path $BuiltinDirectory -Force | Out-Null
+    New-Item -ItemType Directory -Path $UserDirectory -Force | Out-Null
+    New-Item -ItemType Directory -Path $MarketDirectory -Force | Out-Null
+
+    $Encoding = [Text.UTF8Encoding]::new($false)
+    $BuiltinPath = Join-Path $BuiltinDirectory 'base.js'
+    $CustomPath = Join-Path $UserDirectory 'custom.js'
+    $UnrelatedPath = Join-Path $UserDirectory 'unrelated.js'
+    $MarketScriptPath = Join-Path $MarketDirectory 'perf-script.js'
+    [IO.File]::WriteAllText($BuiltinPath, 'builtin-performance-script', $Encoding)
+    [IO.File]::WriteAllText($CustomPath, 'custom-performance-script', $Encoding)
+    [IO.File]::WriteAllText($UnrelatedPath, 'unrelated-performance-script', $Encoding)
+    [IO.File]::WriteAllText($MarketScriptPath, 'verified-performance-market-script', $Encoding)
+
+    $Config = [ordered]@{
+        enabled = $true
+        scripts = [ordered]@{
+            'user:custom.js' = $false
+            'user:unrelated.js' = $true
+        }
+        market = [ordered]@{}
+        futureRoot = [ordered]@{
+            keep = $true
+            label = 'preserved'
+        }
+    }
+    [IO.File]::WriteAllText(
+        $ConfigPath,
+        ($Config | ConvertTo-Json -Depth 8),
+        $Encoding
+    )
+
+    $Listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    try {
+        $Listener.Start()
+        $Port = ([Net.IPEndPoint]$Listener.LocalEndpoint).Port
+    }
+    finally {
+        $Listener.Stop()
+    }
+
+    $PortText = $Port.ToString([Globalization.CultureInfo]::InvariantCulture)
+    $IndexUrl = "http://127.0.0.1:$PortText/index.json"
+    $ScriptUrl = "http://127.0.0.1:$PortText/perf-script.js"
+    $Digest = (Get-FileHash -LiteralPath $MarketScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $Manifest = [ordered]@{
+        version = 1
+        updated_at = '2026-07-18T00:00:00Z'
+        scripts = @(
+            [ordered]@{
+                id = 'perf-script'
+                name = 'Performance script'
+                description = 'Keeps fixture metadata consistent.'
+                version = '1'
+                author = 'Performance fixture'
+                tags = @('fixture')
+                homepage = 'https://example.invalid/perf-script'
+                script_url = $ScriptUrl
+                sha256 = $Digest
+            }
+        )
+    }
+    [IO.File]::WriteAllText(
+        (Join-Path $MarketDirectory 'index.json'),
+        ($Manifest | ConvertTo-Json -Depth 8),
+        $Encoding
+    )
+
+    $Python = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $Python) {
+        throw 'python is required to host the isolated user-script market fixture'
+    }
+    $AccessLogPath = Join-Path $FixtureRoot 'market-access.log'
+    $ServerOutputPath = Join-Path $FixtureRoot 'market-output.log'
+    $ServerProcess = $null
+    try {
+        $ServerProcess = Start-Process `
+            -FilePath $Python.Source `
+            -ArgumentList @('-m', 'http.server', $PortText, '--bind', '127.0.0.1') `
+            -WorkingDirectory $MarketDirectory `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $ServerOutputPath `
+            -RedirectStandardError $AccessLogPath `
+            -PassThru
+
+        $Deadline = [DateTime]::UtcNow.AddSeconds(5)
+        $Ready = $false
+        while ([DateTime]::UtcNow -lt $Deadline) {
+            if ($ServerProcess.HasExited) {
+                throw "user-script market fixture exited with code $($ServerProcess.ExitCode)"
+            }
+            try {
+                $Response = Invoke-WebRequest -Uri $IndexUrl -UseBasicParsing -TimeoutSec 1
+                if ($Response.StatusCode -eq 200) {
+                    $Ready = $true
+                    break
+                }
+            }
+            catch {
+                Start-Sleep -Milliseconds 50
+            }
+        }
+        if (-not $Ready) {
+            throw 'user-script market fixture did not become ready'
+        }
+
+        [pscustomobject]@{
+            Process = $ServerProcess
+            ProcessId = $ServerProcess.Id
+            FixtureRoot = $FixtureRoot
+            BuiltinDirectory = $BuiltinDirectory
+            UserDirectory = $UserDirectory
+            ConfigPath = $ConfigPath
+            IndexUrl = $IndexUrl
+            ScriptUrl = $ScriptUrl
+            MarketScriptPath = $MarketScriptPath
+            InstalledScriptPath = Join-Path $UserDirectory 'market-perf-script.js'
+            BuiltinPath = $BuiltinPath
+            CustomPath = $CustomPath
+            UnrelatedPath = $UnrelatedPath
+            AccessLogPath = $AccessLogPath
+        }
+    }
+    catch {
+        if ($null -ne $ServerProcess) {
+            Stop-OwnedProcess -Process $ServerProcess
+        }
+        throw
+    }
+}
+
 function Invoke-NativeSample {
     param(
         [Parameter(Mandatory)]
@@ -311,29 +471,37 @@ function Invoke-NativeSample {
     New-ProviderSettingsFixture -Path $SettingsPath
     New-CodexHomeFixture -Path $CodexHome
     New-PendingImportFixture -Path $PendingImportPath
-
-    $env:CODEX_PLUS_NATIVE_STATE_DIR = $StateDirectory
-    $env:CODEX_PLUS_NATIVE_PERF_REPORT = $ReportPath
-    $env:CODEX_PLUS_NATIVE_PERF_EXIT_AFTER_MS = $ExitAfterMs.ToString(
-        [Globalization.CultureInfo]::InvariantCulture
-    )
-    $env:CODEX_PLUS_NATIVE_SETTINGS_PATH = $SettingsPath
-    $env:CODEX_PLUS_NATIVE_CODEX_HOME = $CodexHome
-    $env:CODEX_PLUS_NATIVE_CCS_DB_PATH = $CcsDbPath
-    $env:CODEX_PLUS_NATIVE_PENDING_IMPORT_PATH = $PendingImportPath
-    $env:CODEX_PLUS_NATIVE_BACKUP_DIR = $BackupDirectory
-    $env:CODEX_PLUS_NATIVE_CONTEXT_OWNERSHIP_PATH = $ContextOwnershipPath
-    $env:CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY = '1'
-    $env:OPENAI_CODEX_PLUS_PERF_SENTINEL = 'present'
-
-    $Process = Start-Process `
-        -FilePath $BinaryPath `
-        -WorkingDirectory $RepositoryRoot `
-        -WindowStyle Hidden `
-        -PassThru
+    $MarketFixture = $null
+    $Process = $null
     $PrivateMemoryBytes = $null
 
     try {
+        $MarketFixture = Start-ScriptMarketFixture -SampleDirectory $SampleDirectory
+        $env:CODEX_PLUS_NATIVE_STATE_DIR = $StateDirectory
+        $env:CODEX_PLUS_NATIVE_PERF_REPORT = $ReportPath
+        $env:CODEX_PLUS_NATIVE_PERF_EXIT_AFTER_MS = $ExitAfterMs.ToString(
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $env:CODEX_PLUS_NATIVE_SETTINGS_PATH = $SettingsPath
+        $env:CODEX_PLUS_NATIVE_CODEX_HOME = $CodexHome
+        $env:CODEX_PLUS_NATIVE_CCS_DB_PATH = $CcsDbPath
+        $env:CODEX_PLUS_NATIVE_PENDING_IMPORT_PATH = $PendingImportPath
+        $env:CODEX_PLUS_NATIVE_BACKUP_DIR = $BackupDirectory
+        $env:CODEX_PLUS_NATIVE_CONTEXT_OWNERSHIP_PATH = $ContextOwnershipPath
+        $env:CODEX_PLUS_NATIVE_USER_SCRIPT_BUILTIN_DIR = $MarketFixture.BuiltinDirectory
+        $env:CODEX_PLUS_NATIVE_USER_SCRIPT_USER_DIR = $MarketFixture.UserDirectory
+        $env:CODEX_PLUS_NATIVE_USER_SCRIPT_CONFIG_PATH = $MarketFixture.ConfigPath
+        $env:CODEX_PLUS_SCRIPT_MARKET_INDEX_URL = $MarketFixture.IndexUrl
+        $env:CODEX_PLUS_NATIVE_SCRIPT_MARKET_ALLOW_LOOPBACK = '1'
+        $env:CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY = '1'
+        $env:OPENAI_CODEX_PLUS_PERF_SENTINEL = 'present'
+
+        $Process = Start-Process `
+            -FilePath $BinaryPath `
+            -WorkingDirectory $RepositoryRoot `
+            -WindowStyle Hidden `
+            -PassThru
+
         if ($MemorySampleAfterSeconds -gt 0) {
             Start-Sleep -Seconds $MemorySampleAfterSeconds
             $LiveProcess = Get-Process -Id $Process.Id -ErrorAction Stop
@@ -375,10 +543,30 @@ function Invoke-NativeSample {
             CodexHomePath = $CodexHome
             LiveConfigPath = Join-Path $CodexHome 'config.toml'
             ContextOwnershipPath = $ContextOwnershipPath
+            SampleDirectory = $SampleDirectory
+            BackupDirectory = $BackupDirectory
+            UserScriptFixtureRoot = $MarketFixture.FixtureRoot
+            UserScriptBuiltinDirectory = $MarketFixture.BuiltinDirectory
+            UserScriptUserDirectory = $MarketFixture.UserDirectory
+            UserScriptConfigPath = $MarketFixture.ConfigPath
+            UserScriptMarketIndexUrl = $MarketFixture.IndexUrl
+            UserScriptMarketScriptUrl = $MarketFixture.ScriptUrl
+            UserScriptMarketSourcePath = $MarketFixture.MarketScriptPath
+            UserScriptInstalledPath = $MarketFixture.InstalledScriptPath
+            UserScriptBuiltinPath = $MarketFixture.BuiltinPath
+            UserScriptCustomPath = $MarketFixture.CustomPath
+            UserScriptUnrelatedPath = $MarketFixture.UnrelatedPath
+            UserScriptMarketAccessLogPath = $MarketFixture.AccessLogPath
+            UserScriptMarketProcessId = $MarketFixture.ProcessId
         }
     }
     finally {
-        Stop-OwnedProcess -Process $Process
+        if ($null -ne $Process) {
+            Stop-OwnedProcess -Process $Process
+        }
+        if ($null -ne $MarketFixture) {
+            Stop-OwnedProcess -Process $MarketFixture.Process
+        }
     }
 }
 
@@ -493,6 +681,147 @@ function Assert-MarketplaceWorkflowResult {
     }
 }
 
+function Assert-UserScriptWorkflowResult {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Sample
+    )
+
+    $SampleRoot = [IO.Path]::GetFullPath($Sample.SampleDirectory).TrimEnd('\') + '\'
+    foreach ($FixturePath in @(
+        $Sample.UserScriptFixtureRoot,
+        $Sample.UserScriptBuiltinDirectory,
+        $Sample.UserScriptUserDirectory,
+        $Sample.UserScriptConfigPath,
+        $Sample.BackupDirectory
+    )) {
+        $Resolved = [IO.Path]::GetFullPath([string]$FixturePath)
+        if (-not $Resolved.StartsWith($SampleRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "user-script fixture escaped the isolated sample root: $Resolved"
+        }
+    }
+
+    $IndexUri = [Uri]$Sample.UserScriptMarketIndexUrl
+    if ($IndexUri.Scheme -ne 'http' -or $IndexUri.Host -ne '127.0.0.1') {
+        throw 'the user-script market did not use the isolated loopback endpoint'
+    }
+    if (Get-Process -Id $Sample.UserScriptMarketProcessId -ErrorAction SilentlyContinue) {
+        throw 'the owned user-script market fixture process was not terminated'
+    }
+
+    $Config = Get-Content -LiteralPath $Sample.UserScriptConfigPath -Raw | ConvertFrom-Json
+    if ($Config.enabled -ne $false) {
+        throw 'the user-script master switch did not remain disabled after the stale conflict'
+    }
+    if ($Config.futureRoot.keep -ne $true -or $Config.futureRoot.label -ne 'preserved') {
+        throw 'the user-script workflow did not preserve unknown root configuration'
+    }
+    if ($null -ne $Config.scripts.PSObject.Properties['user:custom.js']) {
+        throw 'the selected custom user script still has a configuration entry after deletion'
+    }
+    foreach ($Key in @('user:market-perf-script.js', 'user:unrelated.js')) {
+        $Choice = $Config.scripts.PSObject.Properties[$Key]
+        if ($null -eq $Choice -or $Choice.Value -ne $true) {
+            throw "the user-script workflow changed an unrelated choice: $Key"
+        }
+    }
+
+    $InstallProperty = $Config.market.PSObject.Properties['user:market-perf-script.js']
+    if ($null -eq $InstallProperty) {
+        throw 'the verified market install did not write metadata'
+    }
+    $Install = $InstallProperty.Value
+    if (
+        $Install.id -ne 'perf-script' -or
+        $Install.name -ne 'Performance script' -or
+        $Install.version -ne '1' -or
+        $Install.script_url -ne $Sample.UserScriptMarketScriptUrl -or
+        [string]::IsNullOrWhiteSpace([string]$Install.installed_at)
+    ) {
+        throw 'the verified market install metadata is incomplete or unexpected'
+    }
+
+    if (-not (Test-Path -LiteralPath $Sample.UserScriptInstalledPath -PathType Leaf)) {
+        throw 'the verified market script was not installed'
+    }
+    $InstalledBytes = [Convert]::ToBase64String(
+        [IO.File]::ReadAllBytes($Sample.UserScriptInstalledPath)
+    )
+    $MarketBytes = [Convert]::ToBase64String(
+        [IO.File]::ReadAllBytes($Sample.UserScriptMarketSourcePath)
+    )
+    if ($InstalledBytes -ne $MarketBytes) {
+        throw 'the verified market install bytes do not match the checked fixture bytes'
+    }
+    if (Test-Path -LiteralPath $Sample.UserScriptCustomPath) {
+        throw 'the selected custom user script was not deleted'
+    }
+    foreach ($PreservedPath in @($Sample.UserScriptBuiltinPath, $Sample.UserScriptUnrelatedPath)) {
+        if (-not (Test-Path -LiteralPath $PreservedPath -PathType Leaf)) {
+            throw "the user-script workflow removed an unrelated script: $PreservedPath"
+        }
+    }
+    $UserFiles = @(Get-ChildItem -LiteralPath $Sample.UserScriptUserDirectory -File |
+        Sort-Object Name | ForEach-Object { $_.Name })
+    if (($UserFiles -join ',') -ne 'market-perf-script.js,unrelated.js') {
+        throw "unexpected user-script files after deletion: $($UserFiles -join ',')"
+    }
+
+    $BackupRoot = Join-Path $Sample.BackupDirectory 'user-scripts'
+    if (-not (Test-Path -LiteralPath $BackupRoot -PathType Container)) {
+        throw 'the user-script deletion did not create a backup root'
+    }
+    $DeleteBackups = @()
+    foreach ($Directory in @(Get-ChildItem -LiteralPath $BackupRoot -Directory)) {
+        $MetadataPath = Join-Path $Directory.FullName 'metadata.json'
+        if (-not (Test-Path -LiteralPath $MetadataPath -PathType Leaf)) {
+            continue
+        }
+        $Metadata = Get-Content -LiteralPath $MetadataPath -Raw | ConvertFrom-Json
+        if ($Metadata.operation -eq 'delete' -and $Metadata.key -eq 'user:custom.js') {
+            $DeleteBackups += [pscustomobject]@{
+                Directory = $Directory.FullName
+                Metadata = $Metadata
+            }
+        }
+    }
+    if ($DeleteBackups.Count -ne 1) {
+        throw "expected one exact custom-script delete backup, got $($DeleteBackups.Count)"
+    }
+    $DeleteBackup = $DeleteBackups[0]
+    if (
+        $DeleteBackup.Metadata.schema -ne 1 -or
+        $DeleteBackup.Metadata.file_name -ne 'custom.js' -or
+        $DeleteBackup.Metadata.script_choice -ne $true -or
+        $null -ne $DeleteBackup.Metadata.market_entry
+    ) {
+        throw 'the custom-script delete backup metadata is incomplete or unexpected'
+    }
+    $BackupScriptPath = Join-Path $DeleteBackup.Directory 'script.js'
+    if (-not (Test-Path -LiteralPath $BackupScriptPath -PathType Leaf)) {
+        throw 'the custom-script delete backup did not contain recoverable bytes'
+    }
+    $BackupText = [Text.UTF8Encoding]::new($false).GetString(
+        [IO.File]::ReadAllBytes($BackupScriptPath)
+    )
+    if ($BackupText -ne 'custom-performance-script') {
+        throw 'the custom-script delete backup bytes are not recoverable'
+    }
+
+    $AccessLog = Get-Content -LiteralPath $Sample.UserScriptMarketAccessLogPath -Raw
+    $Requests = @([Regex]::Matches($AccessLog, '"GET ([^ ]+) HTTP/') | ForEach-Object {
+        $_.Groups[1].Value
+    })
+    if ($Requests.Count -eq 0) {
+        throw 'the isolated user-script market fixture did not receive any requests'
+    }
+    foreach ($RequestPath in $Requests) {
+        if ($RequestPath -notin @('/index.json', '/perf-script.js')) {
+            throw "unexpected user-script market request path: $RequestPath"
+        }
+    }
+}
+
 function Get-Percentile {
     param(
         [Parameter(Mandatory)]
@@ -534,6 +863,11 @@ foreach ($Name in @(
     'CODEX_PLUS_NATIVE_PENDING_IMPORT_PATH',
     'CODEX_PLUS_NATIVE_BACKUP_DIR',
     'CODEX_PLUS_NATIVE_CONTEXT_OWNERSHIP_PATH',
+    'CODEX_PLUS_NATIVE_USER_SCRIPT_BUILTIN_DIR',
+    'CODEX_PLUS_NATIVE_USER_SCRIPT_USER_DIR',
+    'CODEX_PLUS_NATIVE_USER_SCRIPT_CONFIG_PATH',
+    'CODEX_PLUS_SCRIPT_MARKET_INDEX_URL',
+    'CODEX_PLUS_NATIVE_SCRIPT_MARKET_ALLOW_LOOPBACK',
     'CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY',
     'OPENAI_CODEX_PLUS_PERF_SENTINEL'
 )) {
@@ -575,6 +909,7 @@ try {
     }
     Assert-ContextWorkflowResult -Sample $IdleSample
     Assert-MarketplaceWorkflowResult -Sample $IdleSample
+    Assert-UserScriptWorkflowResult -Sample $IdleSample
     if ($null -eq $IdleSample.PrivateMemoryBytes) {
         throw 'the 30-second sample did not record private memory'
     }
