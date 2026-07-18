@@ -6,9 +6,12 @@ use codex_plus_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, RelayMode, RelayProfile,
 };
 use codex_plus_manager_service::{
-    ProviderDoctorReport, ProviderDocument, ProviderModelsResult, ProviderNetworkFailureKind,
-    ProviderProfile, ProviderTestResult, ProviderWorkspace, SaveProviderWorkspace,
-    apply_provider_preset, provider_presets,
+    ApplyActiveProvider, BackfillActiveProvider, ClearLiveProvider, ProviderActivationErrorKind,
+    ProviderDoctorReport, ProviderDocument, ProviderLiveFileKind, ProviderLiveWorkspace,
+    ProviderModelsResult, ProviderMutationGuard, ProviderMutationOutcome,
+    ProviderNetworkFailureKind, ProviderProfile, ProviderRollbackOutcome, ProviderTestResult,
+    ProviderWorkspace, SaveLiveFile, SaveProviderWorkspace, SwitchProvider, apply_provider_preset,
+    provider_presets,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -61,9 +64,139 @@ pub enum GuardResolution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardOutcome {
     NeedsSave,
+    NeedsLiveSave(ProviderLiveFileKind),
     Applied,
     Stayed,
     NoPendingGuard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveLoadFailureKind {
+    Activation(ProviderActivationErrorKind),
+    WorkerStopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveMutationKind {
+    Switch { target_profile_id: String },
+    Reapply,
+    Backfill,
+    Clear,
+    SaveFile(ProviderLiveFileKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveMutationRequestResult {
+    ConfirmationRequired,
+    ConfirmationPending,
+    Running,
+    DirtyProvider,
+    DirtyLiveFile,
+    MissingWorkspace,
+    InvalidTarget,
+}
+
+pub enum LiveMutationCommand {
+    Switch(SwitchProvider),
+    Reapply(ApplyActiveProvider),
+    Backfill(BackfillActiveProvider),
+    Clear(ClearLiveProvider),
+    SaveFile(SaveLiveFile),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveMutationFailure {
+    pub kind: LiveMutationFailureKind,
+    pub rollback: ProviderRollbackOutcome,
+    pub backup_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveMutationFailureKind {
+    Activation(ProviderActivationErrorKind),
+    WorkerStopped,
+}
+
+impl LiveMutationFailure {
+    pub fn new(
+        kind: ProviderActivationErrorKind,
+        rollback: ProviderRollbackOutcome,
+        backup_path: Option<String>,
+    ) -> Self {
+        Self {
+            kind: LiveMutationFailureKind::Activation(kind),
+            rollback,
+            backup_path,
+        }
+    }
+
+    pub fn worker_stopped() -> Self {
+        Self {
+            kind: LiveMutationFailureKind::WorkerStopped,
+            rollback: ProviderRollbackOutcome::NotRequired,
+            backup_path: None,
+        }
+    }
+}
+
+pub struct LiveProviderState {
+    pub load_phase: ProviderLoadPhase,
+    pub current_load_request_id: u64,
+    pub load_error: Option<LiveLoadFailureKind>,
+    pub workspace: Option<Arc<ProviderLiveWorkspace>>,
+    pub mutation_phase: OperationPhase,
+    pub current_mutation_request_id: u64,
+    pub mutation_kind: Option<LiveMutationKind>,
+    pub failure: Option<LiveMutationFailure>,
+    pub backup_path: Option<String>,
+    pub rollback: ProviderRollbackOutcome,
+    confirmation: Option<LiveMutationKind>,
+    next_request_id: u64,
+    config_draft: String,
+    auth_draft: String,
+    config_editing: bool,
+    auth_editing: bool,
+    config_revealed: bool,
+    auth_revealed: bool,
+}
+
+impl Default for LiveProviderState {
+    fn default() -> Self {
+        Self {
+            load_phase: ProviderLoadPhase::Idle,
+            current_load_request_id: 0,
+            load_error: None,
+            workspace: None,
+            mutation_phase: OperationPhase::Idle,
+            current_mutation_request_id: 0,
+            mutation_kind: None,
+            failure: None,
+            backup_path: None,
+            rollback: ProviderRollbackOutcome::NotRequired,
+            confirmation: None,
+            next_request_id: 0,
+            config_draft: String::new(),
+            auth_draft: String::new(),
+            config_editing: false,
+            auth_editing: false,
+            config_revealed: false,
+            auth_revealed: false,
+        }
+    }
+}
+
+impl fmt::Debug for LiveProviderState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LiveProviderState")
+            .field("load_phase", &self.load_phase)
+            .field("mutation_phase", &self.mutation_phase)
+            .field("mutation_kind", &self.mutation_kind)
+            .field("has_workspace", &self.workspace.is_some())
+            .field("config_editing", &self.config_editing)
+            .field("auth_editing", &self.auth_editing)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +220,7 @@ pub enum ProviderEditorTab {
     General,
     Models,
     Config,
+    Live,
     Diagnostics,
     Routing,
 }
@@ -156,6 +290,12 @@ enum PendingGuard {
     Reload,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingGuardSave {
+    Provider,
+    Live(ProviderLiveFileKind),
+}
+
 pub struct ProviderViewState {
     pub load_phase: ProviderLoadPhase,
     pub current_load_request_id: u64,
@@ -170,12 +310,13 @@ pub struct ProviderViewState {
     pub test: NetworkOperationState<ProviderTestResult>,
     pub models: NetworkOperationState<ProviderModelsResult>,
     pub doctor: NetworkOperationState<ProviderDoctorReport>,
+    pub live: LiveProviderState,
     pub secret_revealed: bool,
     pub config_revealed: bool,
     pub auth_revealed: bool,
     pub delete_confirmation_required: bool,
     pending_guard: Option<PendingGuard>,
-    apply_guard_after_save: bool,
+    pending_guard_save: Option<PendingGuardSave>,
 }
 
 impl Default for ProviderViewState {
@@ -194,12 +335,13 @@ impl Default for ProviderViewState {
             test: NetworkOperationState::default(),
             models: NetworkOperationState::default(),
             doctor: NetworkOperationState::default(),
+            live: LiveProviderState::default(),
             secret_revealed: false,
             config_revealed: false,
             auth_revealed: false,
             delete_confirmation_required: false,
             pending_guard: None,
-            apply_guard_after_save: false,
+            pending_guard_save: None,
         }
     }
 }
@@ -259,7 +401,7 @@ impl ProviderViewState {
                 self.load_error = None;
                 self.edit_generation = 0;
                 self.pending_guard = None;
-                self.apply_guard_after_save = false;
+                self.pending_guard_save = None;
                 self.reset_secret_and_operations();
             }
             Err(error) => {
@@ -292,6 +434,14 @@ impl ProviderViewState {
             (Some(baseline), Some(draft)) => baseline.document != *draft,
             _ => false,
         }
+    }
+
+    pub fn has_dirty_live_file(&self) -> bool {
+        self.dirty_live_file_kind().is_some()
+    }
+
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.is_dirty() || self.has_dirty_live_file()
     }
 
     pub fn edit_selected(&mut self, edit: impl FnOnce(&mut ProviderProfile)) -> bool {
@@ -336,7 +486,7 @@ impl ProviderViewState {
         self.edit_generation = 0;
         self.save = SaveOperationState::default();
         self.pending_guard = None;
-        self.apply_guard_after_save = false;
+        self.pending_guard_save = None;
         self.reset_secret_and_operations();
     }
 
@@ -360,7 +510,7 @@ impl ProviderViewState {
     }
 
     pub fn request_reload(&mut self) -> TransitionResult {
-        if self.is_dirty() {
+        if self.is_dirty() || self.dirty_live_file_kind().is_some() {
             self.pending_guard = Some(PendingGuard::Reload);
             TransitionResult::GuardRequired
         } else {
@@ -375,18 +525,28 @@ impl ProviderViewState {
         match resolution {
             GuardResolution::Stay => {
                 self.pending_guard = None;
-                self.apply_guard_after_save = false;
+                self.pending_guard_save = None;
                 GuardOutcome::Stayed
             }
             GuardResolution::Discard => {
                 let target = self.pending_guard.take();
                 self.discard_draft();
+                self.reset_live_file_drafts();
                 self.apply_guard_target(target);
                 GuardOutcome::Applied
             }
             GuardResolution::Save => {
-                self.apply_guard_after_save = true;
-                GuardOutcome::NeedsSave
+                if self.is_dirty() {
+                    self.pending_guard_save = Some(PendingGuardSave::Provider);
+                    GuardOutcome::NeedsSave
+                } else if let Some(kind) = self.dirty_live_file_kind() {
+                    self.pending_guard_save = Some(PendingGuardSave::Live(kind));
+                    GuardOutcome::NeedsLiveSave(kind)
+                } else {
+                    let target = self.pending_guard.take();
+                    self.apply_guard_target(target);
+                    GuardOutcome::Applied
+                }
             }
         }
     }
@@ -435,19 +595,317 @@ impl ProviderViewState {
                 self.save.error = None;
                 self.edit_generation = 0;
                 self.reset_secret_and_operations();
-                if self.apply_guard_after_save {
+                self.sync_live_provider_workspace();
+                if self.pending_guard_save == Some(PendingGuardSave::Provider) {
                     let target = self.pending_guard.take();
-                    self.apply_guard_after_save = false;
+                    self.pending_guard_save = None;
                     self.apply_guard_target(target);
                 }
             }
             Err(error) => {
                 self.save.phase = OperationPhase::Error;
                 self.save.error = Some(error);
-                self.apply_guard_after_save = false;
+                self.pending_guard_save = None;
             }
         }
         true
+    }
+
+    pub fn begin_live_load(&mut self) -> Option<u64> {
+        if self.is_dirty()
+            || self.dirty_live_file_kind().is_some()
+            || self.live.mutation_phase == OperationPhase::Running
+        {
+            return None;
+        }
+        self.live.next_request_id = next_id(self.live.next_request_id, "provider live request");
+        self.live.current_load_request_id = self.live.next_request_id;
+        self.live.load_phase = if self.live.workspace.is_some() {
+            ProviderLoadPhase::Refreshing
+        } else {
+            ProviderLoadPhase::Loading
+        };
+        self.load_phase = if self.baseline.is_some() {
+            ProviderLoadPhase::Refreshing
+        } else {
+            ProviderLoadPhase::Loading
+        };
+        Some(self.live.current_load_request_id)
+    }
+
+    pub fn apply_live_load_response(
+        &mut self,
+        request_id: u64,
+        result: Result<Arc<ProviderLiveWorkspace>, LiveLoadFailureKind>,
+    ) -> bool {
+        if request_id != self.live.current_load_request_id {
+            return false;
+        }
+        match result {
+            Ok(workspace) => {
+                self.install_live_workspace(workspace);
+                self.pending_guard = None;
+                self.pending_guard_save = None;
+                self.live.load_phase = ProviderLoadPhase::Ready;
+                self.live.load_error = None;
+                self.load_phase = ProviderLoadPhase::Ready;
+                self.load_error = None;
+            }
+            Err(error) => {
+                self.live.load_phase = ProviderLoadPhase::Error;
+                self.live.load_error = Some(error);
+                self.load_phase = ProviderLoadPhase::Error;
+                if self.baseline.is_none() {
+                    self.load_error = Some(match error {
+                        LiveLoadFailureKind::Activation(_) => ProviderLoadFailureKind::LoadFailed,
+                        LiveLoadFailureKind::WorkerStopped => {
+                            ProviderLoadFailureKind::WorkerStopped
+                        }
+                    });
+                }
+            }
+        }
+        true
+    }
+
+    pub fn request_live_mutation(&mut self, kind: LiveMutationKind) -> LiveMutationRequestResult {
+        if self.live.mutation_phase == OperationPhase::Running {
+            return LiveMutationRequestResult::Running;
+        }
+        if self.live.confirmation.is_some() {
+            return LiveMutationRequestResult::ConfirmationPending;
+        }
+        let Some(workspace) = self.live.workspace.as_ref() else {
+            return LiveMutationRequestResult::MissingWorkspace;
+        };
+        if self.is_dirty() {
+            return LiveMutationRequestResult::DirtyProvider;
+        }
+        match &kind {
+            LiveMutationKind::SaveFile(file_kind) => {
+                if !self.live_file_dirty(*file_kind) {
+                    return LiveMutationRequestResult::InvalidTarget;
+                }
+            }
+            LiveMutationKind::Switch { target_profile_id } => {
+                if self.dirty_live_file_kind().is_some() {
+                    return LiveMutationRequestResult::DirtyLiveFile;
+                }
+                if workspace.provider.activation.active_profile_id.as_deref()
+                    == Some(target_profile_id.as_str())
+                    || !workspace
+                        .provider
+                        .document
+                        .profiles
+                        .iter()
+                        .any(|profile| profile.id() == target_profile_id)
+                {
+                    return LiveMutationRequestResult::InvalidTarget;
+                }
+            }
+            LiveMutationKind::Reapply | LiveMutationKind::Backfill | LiveMutationKind::Clear => {
+                if self.dirty_live_file_kind().is_some() {
+                    return LiveMutationRequestResult::DirtyLiveFile;
+                }
+            }
+        }
+        self.live.confirmation = Some(kind);
+        LiveMutationRequestResult::ConfirmationRequired
+    }
+
+    pub fn pending_live_confirmation(&self) -> Option<&LiveMutationKind> {
+        self.live.confirmation.as_ref()
+    }
+
+    pub fn cancel_live_confirmation(&mut self) {
+        self.live.confirmation = None;
+    }
+
+    pub fn confirm_live_mutation(&mut self) -> Option<(u64, LiveMutationCommand)> {
+        if self.live.mutation_phase == OperationPhase::Running || self.is_dirty() {
+            return None;
+        }
+        let kind = self.live.confirmation.take()?;
+        let workspace = self.live.workspace.as_ref()?;
+        let guard = ProviderMutationGuard {
+            expected_provider_revision: workspace.provider.revision.clone(),
+            expected_live_revision: workspace.revision.clone(),
+        };
+        let command = match &kind {
+            LiveMutationKind::Switch { target_profile_id } => {
+                LiveMutationCommand::Switch(SwitchProvider {
+                    guard,
+                    target_profile_id: target_profile_id.clone(),
+                })
+            }
+            LiveMutationKind::Reapply => {
+                LiveMutationCommand::Reapply(ApplyActiveProvider { guard })
+            }
+            LiveMutationKind::Backfill => {
+                LiveMutationCommand::Backfill(BackfillActiveProvider { guard })
+            }
+            LiveMutationKind::Clear => LiveMutationCommand::Clear(ClearLiveProvider { guard }),
+            LiveMutationKind::SaveFile(file_kind) => {
+                let contents = match file_kind {
+                    ProviderLiveFileKind::Config => self.live.config_draft.clone(),
+                    ProviderLiveFileKind::Auth => self.live.auth_draft.clone(),
+                };
+                LiveMutationCommand::SaveFile(SaveLiveFile {
+                    guard,
+                    kind: *file_kind,
+                    contents,
+                })
+            }
+        };
+        self.live.next_request_id = next_id(self.live.next_request_id, "provider live request");
+        self.live.current_mutation_request_id = self.live.next_request_id;
+        self.live.mutation_phase = OperationPhase::Running;
+        self.live.mutation_kind = Some(kind);
+        self.live.failure = None;
+        self.live.backup_path = None;
+        self.live.rollback = ProviderRollbackOutcome::NotRequired;
+        Some((self.live.current_mutation_request_id, command))
+    }
+
+    pub fn apply_live_mutation_response(
+        &mut self,
+        request_id: u64,
+        result: Result<Arc<ProviderMutationOutcome>, LiveMutationFailure>,
+    ) -> bool {
+        if request_id != self.live.current_mutation_request_id {
+            return false;
+        }
+        match result {
+            Ok(outcome) => {
+                let switched_target = match &self.live.mutation_kind {
+                    Some(LiveMutationKind::Switch { target_profile_id }) => {
+                        Some(target_profile_id.clone())
+                    }
+                    _ => None,
+                };
+                self.live.backup_path = outcome.backup_path.clone();
+                self.live.rollback = outcome.rollback;
+                self.live.failure = None;
+                self.live.mutation_phase = OperationPhase::Ready;
+                self.install_live_workspace(Arc::new(outcome.live.clone()));
+                if let Some(target_profile_id) = switched_target.filter(|target| {
+                    self.draft
+                        .as_ref()
+                        .is_some_and(|draft| document_contains_id(draft, target))
+                }) {
+                    self.apply_selection(target_profile_id);
+                }
+                if matches!(self.pending_guard_save, Some(PendingGuardSave::Live(_))) {
+                    let target = self.pending_guard.take();
+                    self.pending_guard_save = None;
+                    self.apply_guard_target(target);
+                }
+            }
+            Err(failure) => {
+                self.live.backup_path = failure.backup_path.clone();
+                self.live.rollback = failure.rollback;
+                self.live.failure = Some(failure);
+                self.live.mutation_phase = OperationPhase::Error;
+                self.pending_guard_save = None;
+            }
+        }
+        true
+    }
+
+    pub fn begin_live_file_edit(&mut self, kind: ProviderLiveFileKind) -> bool {
+        if self.live.workspace.is_none()
+            || self.live.mutation_phase == OperationPhase::Running
+            || self.live.config_editing
+            || self.live.auth_editing
+        {
+            return false;
+        }
+        self.reset_live_file_draft(kind);
+        match kind {
+            ProviderLiveFileKind::Config => self.live.config_editing = true,
+            ProviderLiveFileKind::Auth => self.live.auth_editing = true,
+        }
+        true
+    }
+
+    pub fn edit_live_file(&mut self, kind: ProviderLiveFileKind, contents: String) -> bool {
+        match kind {
+            ProviderLiveFileKind::Config if self.live.config_editing => {
+                self.live.config_draft = contents;
+                true
+            }
+            ProviderLiveFileKind::Auth if self.live.auth_editing => {
+                self.live.auth_draft = contents;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn cancel_live_file_edit(&mut self, kind: ProviderLiveFileKind) {
+        self.reset_live_file_draft(kind);
+        match kind {
+            ProviderLiveFileKind::Config => {
+                self.live.config_editing = false;
+                self.live.config_revealed = false;
+            }
+            ProviderLiveFileKind::Auth => {
+                self.live.auth_editing = false;
+                self.live.auth_revealed = false;
+            }
+        }
+        if self.pending_guard_save == Some(PendingGuardSave::Live(kind)) {
+            self.pending_guard_save = None;
+        }
+    }
+
+    pub fn live_file_draft(&self, kind: ProviderLiveFileKind) -> Option<&str> {
+        self.live.workspace.as_ref()?;
+        Some(match kind {
+            ProviderLiveFileKind::Config => self.live.config_draft.as_str(),
+            ProviderLiveFileKind::Auth => self.live.auth_draft.as_str(),
+        })
+    }
+
+    pub fn live_file_dirty(&self, kind: ProviderLiveFileKind) -> bool {
+        let Some(workspace) = self.live.workspace.as_ref() else {
+            return false;
+        };
+        match kind {
+            ProviderLiveFileKind::Config => {
+                self.live.config_editing
+                    && self.live.config_draft != workspace.files.config_contents
+            }
+            ProviderLiveFileKind::Auth => {
+                self.live.auth_editing && self.live.auth_draft != workspace.files.auth_contents
+            }
+        }
+    }
+
+    pub fn live_file_editing(&self, kind: ProviderLiveFileKind) -> bool {
+        match kind {
+            ProviderLiveFileKind::Config => self.live.config_editing,
+            ProviderLiveFileKind::Auth => self.live.auth_editing,
+        }
+    }
+
+    pub fn set_live_file_revealed(&mut self, kind: ProviderLiveFileKind, revealed: bool) {
+        match kind {
+            ProviderLiveFileKind::Config => self.live.config_revealed = revealed,
+            ProviderLiveFileKind::Auth => self.live.auth_revealed = revealed,
+        }
+    }
+
+    pub fn live_file_revealed(&self, kind: ProviderLiveFileKind) -> bool {
+        match kind {
+            ProviderLiveFileKind::Config => self.live.config_revealed,
+            ProviderLiveFileKind::Auth => self.live.auth_revealed,
+        }
+    }
+
+    pub fn leave_provider_route(&mut self) {
+        self.live.confirmation = None;
+        self.reset_live_file_drafts();
     }
 
     pub fn set_secret_revealed(&mut self, revealed: bool) {
@@ -920,6 +1378,65 @@ impl ProviderViewState {
         error: ProviderNetworkFailureKind,
     ) -> bool {
         self.apply_doctor_response(token, Err(error))
+    }
+
+    fn install_live_workspace(&mut self, workspace: Arc<ProviderLiveWorkspace>) {
+        let provider = Arc::new(workspace.provider.clone());
+        let selected = self.selected_profile_id.clone();
+        self.draft = Some(provider.document.clone());
+        self.selected_profile_id = selected
+            .filter(|id| document_contains_id(&provider.document, id))
+            .or_else(|| provider.activation.active_profile_id.clone())
+            .filter(|id| document_contains_id(&provider.document, id))
+            .or_else(|| {
+                provider
+                    .document
+                    .profiles
+                    .first()
+                    .map(|profile| profile.id().to_string())
+            });
+        self.baseline = Some(provider);
+        self.live.workspace = Some(workspace);
+        self.edit_generation = 0;
+        self.reset_secret_and_operations();
+        self.reset_live_file_drafts();
+    }
+
+    fn sync_live_provider_workspace(&mut self) {
+        let (Some(live), Some(provider)) = (&self.live.workspace, &self.baseline) else {
+            return;
+        };
+        let mut next = (**live).clone();
+        next.provider = (**provider).clone();
+        self.live.workspace = Some(Arc::new(next));
+    }
+
+    fn dirty_live_file_kind(&self) -> Option<ProviderLiveFileKind> {
+        [ProviderLiveFileKind::Config, ProviderLiveFileKind::Auth]
+            .into_iter()
+            .find(|kind| self.live_file_dirty(*kind))
+    }
+
+    fn reset_live_file_draft(&mut self, kind: ProviderLiveFileKind) {
+        let contents = self.live.workspace.as_ref().map(|workspace| match kind {
+            ProviderLiveFileKind::Config => workspace.files.config_contents.clone(),
+            ProviderLiveFileKind::Auth => workspace.files.auth_contents.clone(),
+        });
+        if let Some(contents) = contents {
+            match kind {
+                ProviderLiveFileKind::Config => self.live.config_draft = contents,
+                ProviderLiveFileKind::Auth => self.live.auth_draft = contents,
+            }
+        }
+    }
+
+    fn reset_live_file_drafts(&mut self) {
+        self.reset_live_file_draft(ProviderLiveFileKind::Config);
+        self.reset_live_file_draft(ProviderLiveFileKind::Auth);
+        self.live.config_editing = false;
+        self.live.auth_editing = false;
+        self.live.config_revealed = false;
+        self.live.auth_revealed = false;
     }
 
     fn unique_id(&self, prefix: &str) -> String {

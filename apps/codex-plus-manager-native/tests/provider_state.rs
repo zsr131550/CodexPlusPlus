@@ -1,17 +1,21 @@
 use std::sync::Arc;
 
 use codex_plus_core::relay_config::CodexContextEntries;
+use codex_plus_core::relay_config::RelayStatus;
 use codex_plus_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, RelayMode, RelayProfile,
 };
 use codex_plus_manager_native::state::provider::{
-    DeleteProfileError, GuardOutcome, GuardResolution, ListDirection, OperationPhase,
-    ProviderLoadFailureKind, ProviderLoadPhase, ProviderSaveFailureKind, ProviderViewState,
-    TransitionResult,
+    DeleteProfileError, GuardOutcome, GuardResolution, ListDirection, LiveLoadFailureKind,
+    LiveMutationCommand, LiveMutationFailure, LiveMutationKind, LiveMutationRequestResult,
+    OperationPhase, ProviderLoadFailureKind, ProviderLoadPhase, ProviderSaveFailureKind,
+    ProviderViewState, TransitionResult,
 };
 use codex_plus_manager_service::{
-    ProviderActivationSummary, ProviderDocument, ProviderKind, ProviderNetworkFailureKind,
-    ProviderProfile, ProviderRevision, ProviderTestOutcome, ProviderTestResult, ProviderWorkspace,
+    ProviderActivationErrorKind, ProviderActivationSummary, ProviderDocument, ProviderKind,
+    ProviderLiveFileKind, ProviderLiveFiles, ProviderLiveRevision, ProviderLiveWorkspace,
+    ProviderMutationOutcome, ProviderNetworkFailureKind, ProviderProfile, ProviderRevision,
+    ProviderRollbackOutcome, ProviderTestOutcome, ProviderTestResult, ProviderWorkspace,
 };
 
 fn ordinary(id: &str) -> ProviderProfile {
@@ -49,6 +53,37 @@ fn loaded_state() -> ProviderViewState {
     let mut state = ProviderViewState::default();
     let request = state.begin_load();
     assert!(state.apply_load_response(request, Ok(Arc::new(workspace('a', "a")))));
+    state
+}
+
+fn live_workspace(revision: char, active_id: &str) -> ProviderLiveWorkspace {
+    ProviderLiveWorkspace {
+        provider: workspace(revision, active_id),
+        status: RelayStatus {
+            authenticated: true,
+            auth_source: "fixture".to_string(),
+            account_label: None,
+            config_path: "C:/isolated/codex/config.toml".to_string(),
+            configured: true,
+            requires_openai_auth: true,
+            has_bearer_token: true,
+        },
+        files: ProviderLiveFiles {
+            config_path: "C:/isolated/codex/config.toml".to_string(),
+            auth_path: "C:/isolated/codex/auth.json".to_string(),
+            config_exists: true,
+            auth_exists: true,
+            config_contents: "model = \"model-a\"\n".to_string(),
+            auth_contents: r#"{"OPENAI_API_KEY":"state-secret-sentinel"}"#.to_string(),
+        },
+        revision: ProviderLiveRevision::parse(revision.to_string().repeat(64)).unwrap(),
+    }
+}
+
+fn live_loaded_state() -> ProviderViewState {
+    let mut state = ProviderViewState::default();
+    let request_id = state.begin_live_load().unwrap();
+    assert!(state.apply_live_load_response(request_id, Ok(Arc::new(live_workspace('a', "a"))),));
     state
 }
 
@@ -385,4 +420,172 @@ fn discovered_models_and_aggregate_routing_mutations_are_deterministic() {
         7
     );
     assert!(state.set_aggregate_member("b", false));
+}
+
+#[test]
+fn live_load_is_monotonic_rejects_stale_results_and_replaces_provider_atomically() {
+    let mut state = ProviderViewState::default();
+    let first = state.begin_live_load().unwrap();
+    let second = state.begin_live_load().unwrap();
+    assert!(second > first);
+
+    assert!(!state.apply_live_load_response(first, Ok(Arc::new(live_workspace('a', "a"))),));
+    assert!(state.live.workspace.is_none());
+    assert!(state.apply_live_load_response(second, Ok(Arc::new(live_workspace('b', "b"))),));
+
+    assert_eq!(
+        state.baseline.as_ref().unwrap().revision.as_str(),
+        "b".repeat(64)
+    );
+    assert_eq!(state.selected_profile_id.as_deref(), Some("b"));
+    assert_eq!(
+        state
+            .live
+            .workspace
+            .as_ref()
+            .unwrap()
+            .provider
+            .activation
+            .active_profile_id
+            .as_deref(),
+        Some("b")
+    );
+}
+
+#[test]
+fn live_mutation_confirmation_prevents_duplicates_and_success_updates_active_badges() {
+    let mut state = live_loaded_state();
+    assert_eq!(
+        state.request_live_mutation(LiveMutationKind::Switch {
+            target_profile_id: "b".to_string(),
+        }),
+        LiveMutationRequestResult::ConfirmationRequired
+    );
+    assert_eq!(
+        state.request_live_mutation(LiveMutationKind::Clear),
+        LiveMutationRequestResult::ConfirmationPending
+    );
+
+    let (request_id, command) = state.confirm_live_mutation().unwrap();
+    match command {
+        LiveMutationCommand::Switch(request) => {
+            assert_eq!(request.target_profile_id, "b");
+            assert_eq!(
+                request.guard.expected_provider_revision.as_str(),
+                "a".repeat(64)
+            );
+            assert_eq!(
+                request.guard.expected_live_revision.as_str(),
+                "a".repeat(64)
+            );
+        }
+        _ => panic!("expected switch command"),
+    }
+    assert!(state.confirm_live_mutation().is_none());
+    assert_eq!(
+        state.request_live_mutation(LiveMutationKind::Clear),
+        LiveMutationRequestResult::Running
+    );
+
+    let outcome = ProviderMutationOutcome {
+        live: live_workspace('b', "b"),
+        backup_path: Some("C:/isolated/backups/switch".to_string()),
+        rollback: ProviderRollbackOutcome::NotRequired,
+    };
+    assert!(state.apply_live_mutation_response(request_id, Ok(Arc::new(outcome))));
+    assert_eq!(state.live.mutation_phase, OperationPhase::Ready);
+    assert_eq!(state.selected_profile_id.as_deref(), Some("b"));
+    assert!(state.selected_is_active());
+    assert_eq!(
+        state.live.backup_path.as_deref(),
+        Some("C:/isolated/backups/switch")
+    );
+}
+
+#[test]
+fn failed_live_save_preserves_provider_live_and_raw_drafts_with_typed_evidence() {
+    let mut state = live_loaded_state();
+    assert!(state.begin_live_file_edit(ProviderLiveFileKind::Config));
+    assert!(state.edit_live_file(
+        ProviderLiveFileKind::Config,
+        "model = \"edited-but-unsaved\"\n".to_string(),
+    ));
+    let baseline = Arc::clone(state.baseline.as_ref().unwrap());
+    let live = Arc::clone(state.live.workspace.as_ref().unwrap());
+    let draft = state.draft().unwrap().clone();
+    let selected = state.selected_profile_id.clone();
+
+    assert_eq!(
+        state.request_live_mutation(LiveMutationKind::SaveFile(ProviderLiveFileKind::Config,)),
+        LiveMutationRequestResult::ConfirmationRequired
+    );
+    let (request_id, command) = state.confirm_live_mutation().unwrap();
+    assert!(matches!(command, LiveMutationCommand::SaveFile(_)));
+    let failure = LiveMutationFailure::new(
+        ProviderActivationErrorKind::LiveConflict,
+        ProviderRollbackOutcome::Verified,
+        Some("C:/isolated/backups/conflict".to_string()),
+    );
+    assert!(state.apply_live_mutation_response(request_id, Err(failure.clone())));
+
+    assert!(Arc::ptr_eq(state.baseline.as_ref().unwrap(), &baseline));
+    assert!(Arc::ptr_eq(state.live.workspace.as_ref().unwrap(), &live));
+    assert_eq!(state.draft().unwrap(), &draft);
+    assert_eq!(state.selected_profile_id, selected);
+    assert_eq!(
+        state.live_file_draft(ProviderLiveFileKind::Config),
+        Some("model = \"edited-but-unsaved\"\n")
+    );
+    assert!(state.live_file_dirty(ProviderLiveFileKind::Config));
+    assert_eq!(state.live.failure.as_ref(), Some(&failure));
+}
+
+#[test]
+fn raw_live_edits_are_independent_and_extend_the_existing_route_guard() {
+    let mut state = live_loaded_state();
+    assert!(state.begin_live_file_edit(ProviderLiveFileKind::Config));
+    assert!(!state.begin_live_file_edit(ProviderLiveFileKind::Auth));
+    assert!(state.edit_live_file(
+        ProviderLiveFileKind::Config,
+        "model = \"guarded\"\n".to_string(),
+    ));
+    assert_eq!(state.request_reload(), TransitionResult::GuardRequired);
+    assert_eq!(
+        state.resolve_guard(GuardResolution::Save),
+        GuardOutcome::NeedsLiveSave(ProviderLiveFileKind::Config)
+    );
+
+    state.cancel_live_file_edit(ProviderLiveFileKind::Config);
+    assert!(!state.live_file_dirty(ProviderLiveFileKind::Config));
+    assert_eq!(
+        state.live_file_draft(ProviderLiveFileKind::Config),
+        Some("model = \"model-a\"\n")
+    );
+    assert!(state.begin_live_file_edit(ProviderLiveFileKind::Auth));
+    state.set_live_file_revealed(ProviderLiveFileKind::Auth, true);
+    assert!(state.live_file_revealed(ProviderLiveFileKind::Auth));
+    state.leave_provider_route();
+    assert!(!state.live_file_revealed(ProviderLiveFileKind::Auth));
+    assert!(!state.live_file_editing(ProviderLiveFileKind::Auth));
+}
+
+#[test]
+fn live_refresh_failure_keeps_last_good_state_and_reports_a_typed_kind() {
+    let mut state = live_loaded_state();
+    let before = Arc::clone(state.live.workspace.as_ref().unwrap());
+    let request_id = state.begin_live_load().unwrap();
+
+    assert!(state.apply_live_load_response(
+        request_id,
+        Err(LiveLoadFailureKind::Activation(
+            ProviderActivationErrorKind::LockFailed,
+        )),
+    ));
+    assert!(Arc::ptr_eq(state.live.workspace.as_ref().unwrap(), &before));
+    assert_eq!(
+        state.live.load_error,
+        Some(LiveLoadFailureKind::Activation(
+            ProviderActivationErrorKind::LockFailed,
+        ))
+    );
 }

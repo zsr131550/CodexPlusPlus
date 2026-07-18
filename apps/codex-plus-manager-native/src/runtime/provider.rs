@@ -2,13 +2,14 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use codex_plus_manager_service::{
-    DiagnoseProviderProfile, FetchProviderModels, ProviderDoctorReport, ProviderError,
-    ProviderModelsResult, ProviderNetworkError, ProviderSource, ProviderTestResult,
-    ProviderWorkspace, SaveProviderWorkspace, TestProviderProfile,
+    DiagnoseProviderProfile, FetchProviderModels, ProviderActivationError,
+    ProviderActivationSource, ProviderDoctorReport, ProviderError, ProviderLiveWorkspace,
+    ProviderModelsResult, ProviderMutationOutcome, ProviderNetworkError, ProviderSource,
+    ProviderTestResult, ProviderWorkspace, SaveProviderWorkspace, TestProviderProfile,
 };
 
 use super::{DispatchError, try_receive};
-use crate::state::provider::OperationToken;
+use crate::state::provider::{LiveMutationCommand, OperationToken};
 
 enum StoreRequest {
     Load {
@@ -38,6 +39,41 @@ impl StoreResponse {
             Self::Load { request_id, .. } | Self::Save { request_id, .. } => *request_id,
         }
     }
+}
+
+enum ActivationRequest {
+    Load {
+        request_id: u64,
+    },
+    Mutation {
+        request_id: u64,
+        command: LiveMutationCommand,
+    },
+}
+
+#[derive(Debug)]
+pub enum ActivationResponse {
+    Load {
+        request_id: u64,
+        result: Result<Arc<ProviderLiveWorkspace>, ProviderActivationError>,
+    },
+    Mutation {
+        request_id: u64,
+        result: Result<Arc<ProviderMutationOutcome>, ProviderActivationError>,
+    },
+}
+
+impl ActivationResponse {
+    pub fn request_id(&self) -> u64 {
+        match self {
+            Self::Load { request_id, .. } | Self::Mutation { request_id, .. } => *request_id,
+        }
+    }
+}
+
+pub struct ProviderActivationDispatcher {
+    requests: mpsc::Sender<ActivationRequest>,
+    responses: mpsc::Receiver<ActivationResponse>,
 }
 
 struct TestRequest {
@@ -296,6 +332,113 @@ impl ProviderDispatcher {
     }
 }
 
+impl ProviderActivationDispatcher {
+    pub fn spawn(
+        source: Arc<dyn ProviderActivationSource>,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        let (request_tx, request_rx) = mpsc::channel();
+        let (response_tx, response_rx) = mpsc::channel();
+        thread::Builder::new()
+            .name("native-provider-activation".to_string())
+            .spawn(move || {
+                let mut pending = None;
+                loop {
+                    let request = match pending.take() {
+                        Some(request) => request,
+                        None => match request_rx.recv() {
+                            Ok(request) => request,
+                            Err(_) => break,
+                        },
+                    };
+                    let response = match request {
+                        ActivationRequest::Load { mut request_id } => {
+                            while let Ok(next) = request_rx.try_recv() {
+                                match next {
+                                    ActivationRequest::Load {
+                                        request_id: next_id,
+                                    } => request_id = request_id.max(next_id),
+                                    mutation @ ActivationRequest::Mutation { .. } => {
+                                        pending = Some(mutation);
+                                        break;
+                                    }
+                                }
+                            }
+                            let result = source.load_live_workspace().map(Arc::new);
+                            if let Err(error) = &result {
+                                log_activation_failure("refresh", error);
+                            }
+                            ActivationResponse::Load { request_id, result }
+                        }
+                        ActivationRequest::Mutation {
+                            request_id,
+                            command,
+                        } => {
+                            let (operation, result) = execute_activation(&*source, command);
+                            if let Err(error) = &result {
+                                log_activation_failure(operation, error);
+                            }
+                            ActivationResponse::Mutation {
+                                request_id,
+                                result: result.map(Arc::new),
+                            }
+                        }
+                    };
+                    if response_tx.send(response).is_err() {
+                        break;
+                    }
+                    wake();
+                }
+            })
+            .expect("spawn native provider activation worker");
+        Self {
+            requests: request_tx,
+            responses: response_rx,
+        }
+    }
+
+    pub fn request_load(&self, request_id: u64) -> Result<(), DispatchError> {
+        self.requests
+            .send(ActivationRequest::Load { request_id })
+            .map_err(|_| DispatchError::WorkerStopped)
+    }
+
+    pub fn request_mutation(
+        &self,
+        request_id: u64,
+        command: LiveMutationCommand,
+    ) -> Result<(), DispatchError> {
+        self.requests
+            .send(ActivationRequest::Mutation {
+                request_id,
+                command,
+            })
+            .map_err(|_| DispatchError::WorkerStopped)
+    }
+
+    pub fn try_recv(&self) -> Result<Option<ActivationResponse>, DispatchError> {
+        try_receive(&self.responses)
+    }
+}
+
+fn execute_activation(
+    source: &dyn ProviderActivationSource,
+    command: LiveMutationCommand,
+) -> (
+    &'static str,
+    Result<ProviderMutationOutcome, ProviderActivationError>,
+) {
+    match command {
+        LiveMutationCommand::Switch(request) => ("switch", source.switch_provider(request)),
+        LiveMutationCommand::Reapply(request) => ("reapply", source.apply_active_provider(request)),
+        LiveMutationCommand::Backfill(request) => {
+            ("backfill", source.backfill_active_provider(request))
+        }
+        LiveMutationCommand::Clear(request) => ("clear", source.clear_live_provider(request)),
+        LiveMutationCommand::SaveFile(request) => ("save_file", source.save_live_file(request)),
+    }
+}
+
 fn log_store_failure(operation: &str, error: &ProviderError) {
     let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
         "native_manager.provider_store_failed",
@@ -314,6 +457,18 @@ fn log_network_failure(operation: &str, error: &ProviderNetworkError) {
             "kind": format!("{:?}", error.kind()),
             "httpStatus": error.http_status(),
             "endpoint": error.endpoint().map(|endpoint| endpoint.as_str()),
+        }),
+    );
+}
+
+fn log_activation_failure(operation: &str, error: &ProviderActivationError) {
+    let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
+        "native_manager.provider_activation_failed",
+        serde_json::json!({
+            "operation": operation,
+            "kind": format!("{:?}", error.kind()),
+            "rollback": format!("{:?}", error.rollback()),
+            "hasBackup": error.backup_path().is_some(),
         }),
     );
 }

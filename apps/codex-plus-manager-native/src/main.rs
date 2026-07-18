@@ -50,13 +50,15 @@ fn main() -> eframe::Result {
         APP_TITLE,
         native_options,
         Box::new(move |creation| {
+            let provider_service = Arc::new(ProviderService::new(
+                SystemProviderEnvironment::for_native_process(),
+            ));
             Ok(Box::new(NativeManagerApp::new(
                 creation,
                 cjk_font,
                 Arc::new(SystemOverviewSource::default()),
-                Arc::new(ProviderService::new(
-                    SystemProviderEnvironment::for_native_process(),
-                )),
+                provider_service.clone(),
+                provider_service,
                 perf,
             )))
         }),

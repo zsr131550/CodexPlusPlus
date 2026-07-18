@@ -3,19 +3,30 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use codex_plus_core::relay_config::CodexContextEntries;
+use codex_plus_core::relay_config::{CodexContextEntries, RelayStatus};
 use codex_plus_core::settings::{RelayMode, RelayProfile};
-use codex_plus_manager_native::runtime::provider::{ProviderDispatcher, StoreResponse};
-use codex_plus_manager_native::state::provider::OperationToken;
+use codex_plus_manager_native::runtime::provider::{
+    ActivationResponse, ProviderActivationDispatcher, ProviderDispatcher, StoreResponse,
+};
+use codex_plus_manager_native::state::provider::{LiveMutationCommand, OperationToken};
 use codex_plus_manager_service::{
-    DiagnoseProviderProfile, DoctorOutcome, DoctorRecommendation, FetchProviderModels,
-    ProviderActivationSummary, ProviderDoctorReport, ProviderDocument, ProviderError, ProviderKind,
-    ProviderModelsResult, ProviderNetworkError, ProviderNetworkFailureKind, ProviderProfile,
-    ProviderRevision, ProviderSource, ProviderTestOutcome, ProviderTestResult, ProviderWorkspace,
-    SafeEndpoint, SaveProviderWorkspace, TestProviderProfile,
+    ApplyActiveProvider, ClearLiveProvider, DiagnoseProviderProfile, DoctorOutcome,
+    DoctorRecommendation, FetchProviderModels, ProviderActivationError,
+    ProviderActivationErrorKind, ProviderActivationSource, ProviderActivationSummary,
+    ProviderDoctorReport, ProviderDocument, ProviderError, ProviderKind, ProviderLiveFiles,
+    ProviderLiveRevision, ProviderLiveWorkspace, ProviderModelsResult, ProviderMutationGuard,
+    ProviderMutationOutcome, ProviderNetworkError, ProviderNetworkFailureKind, ProviderProfile,
+    ProviderRevision, ProviderRollbackOutcome, ProviderSource, ProviderTestOutcome,
+    ProviderTestResult, ProviderWorkspace, SafeEndpoint, SaveProviderWorkspace,
+    TestProviderProfile,
 };
 
 const SECRET: &str = "dispatcher-secret-sentinel";
+
+fn diagnostic_test_lock() -> &'static Mutex<()> {
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn ordinary_profile() -> ProviderProfile {
     ProviderProfile::Ordinary(RelayProfile {
@@ -341,6 +352,76 @@ fn dropping_dispatcher_closes_all_idle_lanes_and_releases_source() {
         .expect("all provider workers should release the source");
 }
 
+struct ExitActivationSource {
+    exited: Option<mpsc::Sender<()>>,
+}
+
+impl Drop for ExitActivationSource {
+    fn drop(&mut self) {
+        if let Some(exited) = self.exited.take() {
+            let _ = exited.send(());
+        }
+    }
+}
+
+impl ProviderActivationSource for ExitActivationSource {
+    fn load_live_workspace(&self) -> Result<ProviderLiveWorkspace, ProviderActivationError> {
+        Ok(live_workspace())
+    }
+
+    fn switch_provider(
+        &self,
+        _request: codex_plus_manager_service::SwitchProvider,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        unreachable!()
+    }
+
+    fn apply_active_provider(
+        &self,
+        _request: ApplyActiveProvider,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        unreachable!()
+    }
+
+    fn clear_live_provider(
+        &self,
+        _request: ClearLiveProvider,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        unreachable!()
+    }
+
+    fn backfill_active_provider(
+        &self,
+        _request: codex_plus_manager_service::BackfillActiveProvider,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        unreachable!()
+    }
+
+    fn save_live_file(
+        &self,
+        _request: codex_plus_manager_service::SaveLiveFile,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        unreachable!()
+    }
+}
+
+#[test]
+fn dropping_activation_dispatcher_releases_source_after_worker_exit() {
+    let (exited_tx, exited_rx) = mpsc::channel();
+    let dispatcher = ProviderActivationDispatcher::spawn(
+        Arc::new(ExitActivationSource {
+            exited: Some(exited_tx),
+        }),
+        Arc::new(|| {}),
+    );
+
+    drop(dispatcher);
+
+    exited_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("activation worker should release its source on shutdown");
+}
+
 struct FailingSource;
 
 impl ProviderSource for FailingSource {
@@ -381,6 +462,7 @@ impl ProviderSource for FailingSource {
 
 #[test]
 fn worker_diagnostics_include_only_stable_sanitized_metadata() {
+    let _guard = diagnostic_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let log_path = temp.path().join("diagnostic.log");
     codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
@@ -407,5 +489,266 @@ fn worker_diagnostics_include_only_stable_sanitized_metadata() {
 
     assert!(log.contains("native_manager.provider_operation_failed"));
     assert!(log.contains("Timeout"));
+    assert!(!log.contains(SECRET));
+}
+
+fn live_workspace() -> ProviderLiveWorkspace {
+    ProviderLiveWorkspace {
+        provider: workspace('a'),
+        status: RelayStatus {
+            authenticated: true,
+            auth_source: "fixture".to_string(),
+            account_label: None,
+            config_path: "C:/isolated/config.toml".to_string(),
+            configured: true,
+            requires_openai_auth: true,
+            has_bearer_token: true,
+        },
+        files: ProviderLiveFiles {
+            config_path: "C:/isolated/config.toml".to_string(),
+            auth_path: "C:/isolated/auth.json".to_string(),
+            config_exists: true,
+            auth_exists: true,
+            config_contents: "model = \"model-a\"\n".to_string(),
+            auth_contents: format!(r#"{{"OPENAI_API_KEY":"{SECRET}"}}"#),
+        },
+        revision: ProviderLiveRevision::parse("a".repeat(64)).unwrap(),
+    }
+}
+
+fn live_guard() -> ProviderMutationGuard {
+    ProviderMutationGuard {
+        expected_provider_revision: ProviderRevision::parse("a".repeat(64)).unwrap(),
+        expected_live_revision: ProviderLiveRevision::parse("a".repeat(64)).unwrap(),
+    }
+}
+
+fn receive_activation(dispatcher: &ProviderActivationDispatcher) -> ActivationResponse {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(response) = dispatcher.try_recv().unwrap() {
+            return response;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for activation response"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+struct BlockingActivationSource {
+    calls: Arc<Mutex<Vec<String>>>,
+    first_load_started: mpsc::Sender<()>,
+    first_load_release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl BlockingActivationSource {
+    fn record(&self, operation: &str) {
+        let thread_name = thread::current().name().unwrap_or("unnamed").to_string();
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("{operation}@{thread_name}"));
+    }
+
+    fn outcome(&self, operation: &str) -> ProviderMutationOutcome {
+        self.record(operation);
+        ProviderMutationOutcome {
+            live: live_workspace(),
+            backup_path: Some("C:/isolated/backups/live".to_string()),
+            rollback: ProviderRollbackOutcome::NotRequired,
+        }
+    }
+}
+
+impl ProviderActivationSource for BlockingActivationSource {
+    fn load_live_workspace(&self) -> Result<ProviderLiveWorkspace, ProviderActivationError> {
+        self.record("load");
+        let is_first = self
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.starts_with("load@"))
+            .count()
+            == 1;
+        if is_first {
+            self.first_load_started.send(()).unwrap();
+            self.first_load_release.lock().unwrap().recv().unwrap();
+        }
+        Ok(live_workspace())
+    }
+
+    fn switch_provider(
+        &self,
+        _request: codex_plus_manager_service::SwitchProvider,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        Ok(self.outcome("switch"))
+    }
+
+    fn apply_active_provider(
+        &self,
+        _request: ApplyActiveProvider,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        Ok(self.outcome("reapply"))
+    }
+
+    fn clear_live_provider(
+        &self,
+        _request: ClearLiveProvider,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        Ok(self.outcome("clear"))
+    }
+
+    fn backfill_active_provider(
+        &self,
+        _request: codex_plus_manager_service::BackfillActiveProvider,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        Ok(self.outcome("backfill"))
+    }
+
+    fn save_live_file(
+        &self,
+        _request: codex_plus_manager_service::SaveLiveFile,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        Ok(self.outcome("save_file"))
+    }
+}
+
+#[test]
+fn activation_lane_coalesces_only_adjacent_refreshes_and_never_crosses_a_mutation() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let wake_count = Arc::new(AtomicUsize::new(0));
+    let wake_for_callback = Arc::clone(&wake_count);
+    let dispatcher = ProviderActivationDispatcher::spawn(
+        Arc::new(BlockingActivationSource {
+            calls: Arc::clone(&calls),
+            first_load_started: started_tx,
+            first_load_release: Mutex::new(release_rx),
+        }),
+        Arc::new(move || {
+            wake_for_callback.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+
+    dispatcher.request_load(1).unwrap();
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    dispatcher.request_load(2).unwrap();
+    dispatcher.request_load(3).unwrap();
+    dispatcher
+        .request_mutation(
+            4,
+            LiveMutationCommand::Clear(ClearLiveProvider {
+                guard: live_guard(),
+            }),
+        )
+        .unwrap();
+    dispatcher.request_load(5).unwrap();
+    release_tx.send(()).unwrap();
+
+    let responses = (0..4)
+        .map(|_| receive_activation(&dispatcher))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        responses
+            .iter()
+            .map(ActivationResponse::request_id)
+            .collect::<Vec<_>>(),
+        [1, 3, 4, 5]
+    );
+    assert_eq!(
+        &*calls.lock().unwrap(),
+        &[
+            "load@native-provider-activation",
+            "load@native-provider-activation",
+            "clear@native-provider-activation",
+            "load@native-provider-activation",
+        ]
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while wake_count.load(Ordering::SeqCst) < 4 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(wake_count.load(Ordering::SeqCst), 4);
+}
+
+struct FailingActivationSource;
+
+impl ProviderActivationSource for FailingActivationSource {
+    fn load_live_workspace(&self) -> Result<ProviderLiveWorkspace, ProviderActivationError> {
+        Ok(live_workspace())
+    }
+
+    fn switch_provider(
+        &self,
+        _request: codex_plus_manager_service::SwitchProvider,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        unreachable!()
+    }
+
+    fn apply_active_provider(
+        &self,
+        _request: ApplyActiveProvider,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        unreachable!()
+    }
+
+    fn clear_live_provider(
+        &self,
+        _request: ClearLiveProvider,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        Err(ProviderActivationError::for_failure(
+            ProviderActivationErrorKind::RollbackFailed,
+            ProviderRollbackOutcome::Failed,
+            Some(format!("C:/isolated/{SECRET}/backup")),
+        ))
+    }
+
+    fn backfill_active_provider(
+        &self,
+        _request: codex_plus_manager_service::BackfillActiveProvider,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        unreachable!()
+    }
+
+    fn save_live_file(
+        &self,
+        _request: codex_plus_manager_service::SaveLiveFile,
+    ) -> Result<ProviderMutationOutcome, ProviderActivationError> {
+        unreachable!()
+    }
+}
+
+#[test]
+fn activation_worker_logs_only_stable_failure_and_rollback_kinds() {
+    let _guard = diagnostic_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let log_path = temp.path().join("diagnostic.log");
+    codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+    let dispatcher =
+        ProviderActivationDispatcher::spawn(Arc::new(FailingActivationSource), Arc::new(|| {}));
+    dispatcher
+        .request_mutation(
+            9,
+            LiveMutationCommand::Clear(ClearLiveProvider {
+                guard: live_guard(),
+            }),
+        )
+        .unwrap();
+    let response = receive_activation(&dispatcher);
+    assert_eq!(response.request_id(), 9);
+    assert!(matches!(
+        response,
+        ActivationResponse::Mutation { result: Err(_), .. }
+    ));
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
+
+    assert!(log.contains("native_manager.provider_activation_failed"));
+    assert!(log.contains("RollbackFailed"));
+    assert!(log.contains("Failed"));
     assert!(!log.contains(SECRET));
 }

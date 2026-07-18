@@ -1,20 +1,22 @@
 use std::sync::Arc;
 
-use codex_plus_core::relay_config::CodexContextEntries;
+use codex_plus_core::relay_config::{CodexContextEntries, RelayStatus};
 use codex_plus_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, RelayMode, RelayProfile,
 };
 use codex_plus_manager_native::i18n::{Locale, ThemeMode};
 use codex_plus_manager_native::state::Route;
 use codex_plus_manager_native::state::provider::{
+    LiveMutationFailure, LiveMutationKind, OperationPhase, ProviderEditorTab,
     ProviderLoadFailureKind, ProviderSaveFailureKind, ProviderViewState, TransitionResult,
 };
 use codex_plus_manager_native::theme;
-use codex_plus_manager_native::views::provider::ProviderAction;
+use codex_plus_manager_native::views::provider::{ProviderAction, ProviderEdit};
 use codex_plus_manager_native::views::shell::{ShellAction, ShellViewModel, render_shell};
 use codex_plus_manager_service::{
-    ProviderActivationSummary, ProviderDocument, ProviderKind, ProviderProfile, ProviderRevision,
-    ProviderWorkspace,
+    ProviderActivationErrorKind, ProviderActivationSummary, ProviderDocument, ProviderKind,
+    ProviderLiveFileKind, ProviderLiveFiles, ProviderLiveRevision, ProviderLiveWorkspace,
+    ProviderProfile, ProviderRevision, ProviderRollbackOutcome, ProviderWorkspace,
 };
 use eframe::egui;
 use egui_kittest::{Harness, kittest::Queryable};
@@ -89,8 +91,32 @@ fn workspace() -> ProviderWorkspace {
 
 fn loaded_provider() -> ProviderViewState {
     let mut state = ProviderViewState::default();
-    let request_id = state.begin_load();
-    assert!(state.apply_load_response(request_id, Ok(Arc::new(workspace()))));
+    let provider = workspace();
+    let request_id = state.begin_live_load().unwrap();
+    assert!(state.apply_live_load_response(
+        request_id,
+        Ok(Arc::new(ProviderLiveWorkspace {
+            provider,
+            status: RelayStatus {
+                authenticated: true,
+                auth_source: "fixture".to_string(),
+                account_label: None,
+                config_path: "C:/isolated/codex/config.toml".to_string(),
+                configured: true,
+                requires_openai_auth: true,
+                has_bearer_token: true,
+            },
+            files: ProviderLiveFiles {
+                config_path: "C:/isolated/codex/config.toml".to_string(),
+                auth_path: "C:/isolated/codex/auth.json".to_string(),
+                config_exists: true,
+                auth_exists: true,
+                config_contents: format!("token = \"{SECRET}\"\n"),
+                auth_contents: format!(r#"{{"OPENAI_API_KEY":"{SECRET}"}}"#),
+            },
+            revision: ProviderLiveRevision::parse("b".repeat(64)).unwrap(),
+        })),
+    ));
     state
 }
 
@@ -128,7 +154,16 @@ fn harness(
     route: Route,
     provider: ProviderViewState,
 ) -> Harness<'static, ProviderHarnessState> {
-    let mut model = common::model(Locale::En, ThemeMode::Dark);
+    harness_with_locale(size, route, provider, Locale::En)
+}
+
+fn harness_with_locale(
+    size: [f32; 2],
+    route: Route,
+    provider: ProviderViewState,
+    locale: Locale,
+) -> Harness<'static, ProviderHarnessState> {
+    let mut model = common::model(locale, ThemeMode::Dark);
     model.route = route;
     Harness::builder()
         .with_size(egui::vec2(size[0], size[1]))
@@ -210,6 +245,30 @@ fn active_delete_is_disabled_and_default_semantics_never_expose_secrets() {
 }
 
 #[test]
+fn provider_action_debug_never_exposes_secret_payloads() {
+    let actions = [
+        ProviderAction::Edit(ProviderEdit::ApiKey(SECRET.to_owned())),
+        ProviderAction::Edit(ProviderEdit::AuthContents(SECRET.to_owned())),
+        ProviderAction::EditLiveFile {
+            kind: ProviderLiveFileKind::Auth,
+            contents: SECRET.to_owned(),
+        },
+        ProviderAction::Select(SECRET.to_owned()),
+        ProviderAction::SetAggregateMember {
+            profile_id: SECRET.to_owned(),
+            enabled: true,
+        },
+    ];
+
+    for action in actions {
+        assert!(
+            !format!("{action:?}").contains(SECRET),
+            "secret leaked from ProviderAction debug output"
+        );
+    }
+}
+
+#[test]
 fn aggregate_selection_switches_to_routing_controls() {
     let mut harness = harness([1180.0, 820.0], Route::Providers, loaded_provider());
 
@@ -263,4 +322,184 @@ fn save_conflict_is_visible_without_discarding_the_draft() {
         harness.state().provider.selected_profile().unwrap().name(),
         "Edited provider"
     );
+}
+
+#[test]
+fn live_status_actions_are_stable_at_supported_sizes_and_switch_with_selection() {
+    for size in [[1180.0, 820.0], [960.0, 720.0]] {
+        let mut harness = harness(size, Route::Providers, loaded_provider());
+        for label in [
+            "Live status",
+            "Configured",
+            "Authenticated",
+            "Refresh live status",
+            "Reapply active provider",
+            "Backfill active provider",
+            "Clear live configuration",
+            "Live",
+        ] {
+            let rect = harness.get_by_label(label).rect();
+            assert!(rect.is_positive(), "missing {label} at {size:?}");
+            assert!(
+                rect.max.x <= size[0] && rect.max.y <= size[1],
+                "clipped {label}"
+            );
+        }
+
+        harness.get_by_label("Secondary provider").click();
+        harness.run();
+        assert!(
+            harness
+                .get_by_label("Activate provider")
+                .rect()
+                .is_positive()
+        );
+    }
+}
+
+#[test]
+fn live_tab_masks_raw_files_and_exposes_explicit_edit_controls() {
+    let mut provider = loaded_provider();
+    provider.editor_tab = ProviderEditorTab::Live;
+    let harness = harness([1180.0, 820.0], Route::Providers, provider);
+
+    for label in [
+        "C:/isolated/codex/config.toml",
+        "C:/isolated/codex/auth.json",
+        "Live config hidden",
+        "Live auth hidden",
+        "Reveal live config",
+        "Reveal live auth",
+        "Edit live config",
+        "Edit live auth",
+    ] {
+        assert!(
+            harness.get_by_label(label).rect().is_positive(),
+            "missing {label}"
+        );
+    }
+    assert!(
+        harness
+            .query_by(|node| {
+                node.label().is_some_and(|label| label.contains(SECRET))
+                    || node.value().is_some_and(|value| value.contains(SECRET))
+                    || node
+                        .description()
+                        .is_some_and(|description| description.contains(SECRET))
+            })
+            .is_none()
+    );
+}
+
+#[test]
+fn raw_file_edit_and_live_confirmation_have_named_nonduplicating_controls() {
+    let mut provider = loaded_provider();
+    provider.editor_tab = ProviderEditorTab::Live;
+    assert!(provider.begin_live_file_edit(ProviderLiveFileKind::Config));
+    assert!(provider.edit_live_file(
+        ProviderLiveFileKind::Config,
+        "model = \"edited\"\n".to_string(),
+    ));
+    let edit_harness = harness([1180.0, 820.0], Route::Providers, provider);
+    assert!(
+        edit_harness
+            .get_by_label("Save live config")
+            .rect()
+            .is_positive()
+    );
+    assert!(
+        edit_harness
+            .get_by_label("Cancel live config")
+            .rect()
+            .is_positive()
+    );
+
+    let mut provider = loaded_provider();
+    assert_eq!(
+        provider.request_live_mutation(LiveMutationKind::Clear),
+        codex_plus_manager_native::state::provider::LiveMutationRequestResult::ConfirmationRequired
+    );
+    let harness = harness([960.0, 720.0], Route::Providers, provider);
+    for label in [
+        "Confirm live change",
+        "Cancel live change",
+        "Confirm live change now",
+    ] {
+        assert!(
+            harness.get_by_label(label).rect().is_positive(),
+            "missing {label}"
+        );
+    }
+}
+
+#[test]
+fn running_and_failed_mutations_render_typed_evidence_without_raw_errors() {
+    let mut running = loaded_provider();
+    assert_eq!(
+        running.request_live_mutation(LiveMutationKind::Reapply),
+        codex_plus_manager_native::state::provider::LiveMutationRequestResult::ConfirmationRequired
+    );
+    let (request_id, _) = running.confirm_live_mutation().unwrap();
+    let running_harness = harness([1180.0, 820.0], Route::Providers, running);
+    assert_eq!(
+        running_harness.state().provider.live.mutation_phase,
+        OperationPhase::Running
+    );
+    assert!(
+        running_harness
+            .query_by(|node| {
+                node.label().as_deref() == Some("Refresh live status") && node.is_disabled()
+            })
+            .is_some()
+    );
+
+    let mut failed = loaded_provider();
+    assert_eq!(
+        failed.request_live_mutation(LiveMutationKind::Reapply),
+        codex_plus_manager_native::state::provider::LiveMutationRequestResult::ConfirmationRequired
+    );
+    let (failed_id, _) = failed.confirm_live_mutation().unwrap();
+    assert!(failed_id >= request_id);
+    assert!(failed.apply_live_mutation_response(
+        failed_id,
+        Err(LiveMutationFailure::new(
+            ProviderActivationErrorKind::MutationFailed,
+            ProviderRollbackOutcome::Verified,
+            Some("C:/isolated/backups/verified".to_string()),
+        )),
+    ));
+    let harness = harness([1180.0, 820.0], Route::Providers, failed);
+    for label in [
+        "Live mutation failed",
+        "Rollback verified",
+        "C:/isolated/backups/verified",
+    ] {
+        assert!(
+            harness.get_by_label(label).rect().is_positive(),
+            "missing {label}"
+        );
+    }
+}
+
+#[test]
+fn live_controls_are_bilingual() {
+    let harness = harness_with_locale(
+        [960.0, 720.0],
+        Route::Providers,
+        loaded_provider(),
+        Locale::ZhCn,
+    );
+    for label in [
+        "实时状态",
+        "已配置",
+        "已认证",
+        "刷新实时状态",
+        "重新应用当前供应商",
+        "实时文件",
+    ] {
+        assert!(
+            harness.get_by_label(label).rect().is_positive(),
+            "missing {label}"
+        );
+    }
 }

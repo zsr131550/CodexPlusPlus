@@ -2,18 +2,22 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use codex_plus_manager_service::{
-    DiagnoseProviderProfile, FetchProviderModels, OverviewSource, ProviderErrorKind,
-    ProviderNetworkFailureKind, ProviderProfile, ProviderSource, TestProviderProfile,
+    DiagnoseProviderProfile, FetchProviderModels, OverviewSource, ProviderActivationSource,
+    ProviderErrorKind, ProviderNetworkFailureKind, ProviderProfile, ProviderSource,
+    TestProviderProfile,
 };
 use eframe::egui;
 
 use crate::fonts;
 use crate::perf::{PerfRecorder, PerfScriptAction};
 use crate::persistence::{self, PersistedUiState};
-use crate::runtime::provider::{ProviderDispatcher, StoreResponse};
+use crate::runtime::provider::{
+    ActivationResponse, ProviderActivationDispatcher, ProviderDispatcher, StoreResponse,
+};
 use crate::runtime::{DispatchError, OverviewDispatcher};
 use crate::state::provider::{
-    DeleteProfileError, GuardOutcome, GuardResolution, OperationPhase, ProviderLoadFailureKind,
+    DeleteProfileError, GuardOutcome, GuardResolution, LiveLoadFailureKind, LiveMutationFailure,
+    LiveMutationKind, OperationPhase, ProviderEditorTab, ProviderLoadFailureKind,
     ProviderLoadPhase, ProviderSaveFailureKind, TransitionResult,
 };
 use crate::state::{AppState, OverviewFailureKind, OverviewPhase, Route};
@@ -26,9 +30,11 @@ pub struct NativeManagerApp {
     persisted: PersistedUiState,
     overview_dispatcher: OverviewDispatcher,
     provider_dispatcher: ProviderDispatcher,
+    activation_dispatcher: ProviderActivationDispatcher,
     last_updated: Option<String>,
     overview_worker_stopped: bool,
     provider_store_worker_stopped: bool,
+    activation_worker_stopped: bool,
     pending_route: Option<Route>,
     pending_provider_reload: bool,
     perf: Option<PerfRecorder>,
@@ -40,6 +46,7 @@ impl NativeManagerApp {
         cjk_font: Option<Vec<u8>>,
         source: Arc<dyn OverviewSource>,
         provider_source: Arc<dyn ProviderSource>,
+        activation_source: Arc<dyn ProviderActivationSource>,
         perf: Option<PerfRecorder>,
     ) -> Self {
         egui_extras::install_image_loaders(&creation.egui_ctx);
@@ -57,14 +64,21 @@ impl NativeManagerApp {
             provider_source,
             Arc::new(move || provider_repaint_context.request_repaint()),
         );
+        let activation_repaint_context = creation.egui_ctx.clone();
+        let activation_dispatcher = ProviderActivationDispatcher::spawn(
+            activation_source,
+            Arc::new(move || activation_repaint_context.request_repaint()),
+        );
         let mut app = Self {
             state: AppState::default(),
             persisted,
             overview_dispatcher,
             provider_dispatcher,
+            activation_dispatcher,
             last_updated: None,
             overview_worker_stopped: false,
             provider_store_worker_stopped: false,
+            activation_worker_stopped: false,
             pending_route: None,
             pending_provider_reload: false,
             perf,
@@ -85,12 +99,14 @@ impl NativeManagerApp {
     }
 
     fn load_providers(&mut self) {
-        let request_id = self.state.provider.begin_load();
-        if self.provider_dispatcher.request_load(request_id).is_err() {
-            self.provider_store_worker_stopped = true;
+        let Some(request_id) = self.state.provider.begin_live_load() else {
+            return;
+        };
+        if self.activation_dispatcher.request_load(request_id).is_err() {
+            self.activation_worker_stopped = true;
             self.state
                 .provider
-                .apply_load_response(request_id, Err(ProviderLoadFailureKind::WorkerStopped));
+                .apply_live_load_response(request_id, Err(LiveLoadFailureKind::WorkerStopped));
         }
     }
 
@@ -115,7 +131,7 @@ impl NativeManagerApp {
     fn navigate(&mut self, route: Route) {
         if self.state.route == Route::Providers
             && route != Route::Providers
-            && self.state.provider.is_dirty()
+            && self.state.provider.has_unsaved_changes()
         {
             self.pending_route = Some(route);
             self.pending_provider_reload = false;
@@ -123,6 +139,9 @@ impl NativeManagerApp {
             return;
         }
         self.pending_route = None;
+        if self.state.route == Route::Providers && route != Route::Providers {
+            self.state.provider.leave_provider_route();
+        }
         self.state.route = route;
         if route == Route::Providers && self.state.provider.load_phase == ProviderLoadPhase::Idle {
             self.load_providers();
@@ -233,6 +252,26 @@ impl NativeManagerApp {
             ProviderAction::Test => self.test_provider(),
             ProviderAction::FetchModels => self.fetch_provider_models(),
             ProviderAction::Doctor => self.diagnose_provider(),
+            ProviderAction::RefreshLive => self.request_provider_reload(),
+            ProviderAction::RequestLiveMutation(kind) => {
+                let _ = self.state.provider.request_live_mutation(kind);
+            }
+            ProviderAction::ConfirmLiveMutation => self.dispatch_confirmed_live_mutation(),
+            ProviderAction::CancelLiveMutation => {
+                self.state.provider.cancel_live_confirmation();
+            }
+            ProviderAction::BeginLiveFileEdit(kind) => {
+                self.state.provider.begin_live_file_edit(kind);
+            }
+            ProviderAction::EditLiveFile { kind, contents } => {
+                self.state.provider.edit_live_file(kind, contents);
+            }
+            ProviderAction::CancelLiveFileEdit(kind) => {
+                self.state.provider.cancel_live_file_edit(kind);
+            }
+            ProviderAction::SetLiveFileRevealed { kind, revealed } => {
+                self.state.provider.set_live_file_revealed(kind, revealed);
+            }
             ProviderAction::ResolveGuard(resolution) => self.resolve_provider_guard(resolution),
         }
     }
@@ -253,9 +292,32 @@ impl NativeManagerApp {
         }
     }
 
+    fn dispatch_confirmed_live_mutation(&mut self) {
+        let Some((request_id, command)) = self.state.provider.confirm_live_mutation() else {
+            return;
+        };
+        if self
+            .activation_dispatcher
+            .request_mutation(request_id, command)
+            .is_err()
+        {
+            self.activation_worker_stopped = true;
+            self.state.provider.apply_live_mutation_response(
+                request_id,
+                Err(LiveMutationFailure::worker_stopped()),
+            );
+        }
+    }
+
     fn resolve_provider_guard(&mut self, resolution: GuardResolution) {
         match self.state.provider.resolve_guard(resolution) {
             GuardOutcome::NeedsSave => self.save_providers(),
+            GuardOutcome::NeedsLiveSave(kind) => {
+                let _ = self
+                    .state
+                    .provider
+                    .request_live_mutation(LiveMutationKind::SaveFile(kind));
+            }
             GuardOutcome::Applied => self.complete_pending_provider_transition(),
             GuardOutcome::Stayed => {
                 self.pending_route = None;
@@ -267,6 +329,9 @@ impl NativeManagerApp {
 
     fn complete_pending_provider_transition(&mut self) {
         if let Some(route) = self.pending_route.take() {
+            if self.state.route == Route::Providers && route != Route::Providers {
+                self.state.provider.leave_provider_route();
+            }
             self.state.route = route;
         }
         if std::mem::take(&mut self.pending_provider_reload) {
@@ -485,6 +550,61 @@ impl NativeManagerApp {
         }
     }
 
+    fn reduce_activation_responses(&mut self) {
+        loop {
+            match self.activation_dispatcher.try_recv() {
+                Ok(Some(ActivationResponse::Load { request_id, result })) => {
+                    let accepted = self.state.provider.apply_live_load_response(
+                        request_id,
+                        result.map_err(|error| LiveLoadFailureKind::Activation(error.kind())),
+                    );
+                    if accepted && self.state.provider.live.load_phase == ProviderLoadPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(ActivationResponse::Mutation { request_id, result })) => {
+                    let succeeded = result.is_ok();
+                    let accepted = self.state.provider.apply_live_mutation_response(
+                        request_id,
+                        result.map_err(|error| {
+                            LiveMutationFailure::new(
+                                error.kind(),
+                                error.rollback(),
+                                error.backup_path().map(str::to_owned),
+                            )
+                        }),
+                    );
+                    if accepted && succeeded {
+                        self.last_updated = Some(current_utc_time());
+                        self.complete_pending_provider_transition();
+                    }
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    if !self.activation_worker_stopped {
+                        self.activation_worker_stopped = true;
+                        if matches!(
+                            self.state.provider.live.load_phase,
+                            ProviderLoadPhase::Loading | ProviderLoadPhase::Refreshing
+                        ) {
+                            self.state.provider.apply_live_load_response(
+                                self.state.provider.live.current_load_request_id,
+                                Err(LiveLoadFailureKind::WorkerStopped),
+                            );
+                        }
+                        if self.state.provider.live.mutation_phase == OperationPhase::Running {
+                            self.state.provider.apply_live_mutation_response(
+                                self.state.provider.live.current_mutation_request_id,
+                                Err(LiveMutationFailure::worker_stopped()),
+                            );
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     fn view_model(&self) -> ShellViewModel {
         ShellViewModel {
             route: self.state.route,
@@ -523,6 +643,21 @@ impl NativeManagerApp {
             PerfScriptAction::DiscardProvider => {
                 Some(ShellAction::Provider(ProviderAction::Discard))
             }
+            PerfScriptAction::RefreshLive => {
+                Some(ShellAction::Provider(ProviderAction::RefreshLive))
+            }
+            PerfScriptAction::OpenLiveTab => Some(ShellAction::Provider(ProviderAction::SetTab(
+                ProviderEditorTab::Live,
+            ))),
+            PerfScriptAction::RequestClearLive => Some(ShellAction::Provider(
+                ProviderAction::RequestLiveMutation(LiveMutationKind::Clear),
+            )),
+            PerfScriptAction::CancelLiveConfirmation => {
+                Some(ShellAction::Provider(ProviderAction::CancelLiveMutation))
+            }
+            PerfScriptAction::ConfirmLiveMutation => {
+                Some(ShellAction::Provider(ProviderAction::ConfirmLiveMutation))
+            }
             PerfScriptAction::ToggleProviderList => {
                 Some(ShellAction::Provider(ProviderAction::ToggleList))
             }
@@ -537,6 +672,7 @@ impl eframe::App for NativeManagerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.reduce_overview_responses();
         self.reduce_provider_responses();
+        self.reduce_activation_responses();
         if let Some(perf) = &mut self.perf {
             perf.drive(ctx);
         }

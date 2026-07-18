@@ -1,19 +1,22 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use codex_plus_core::settings::{
     AggregateRelayStrategy, RelayMode, RelayModelInsertMode, RelayProtocol,
 };
-use codex_plus_manager_service::{ProviderKind, ProviderProfile, provider_presets};
+use codex_plus_manager_service::{
+    ProviderKind, ProviderLiveFileKind, ProviderProfile, ProviderRollbackOutcome, provider_presets,
+};
 use eframe::egui;
 
 use crate::i18n::Locale;
 use crate::state::provider::{
-    GuardResolution, ListDirection, OperationPhase, ProviderEditorTab, ProviderLoadPhase,
-    ProviderSaveFailureKind, ProviderViewState,
+    GuardResolution, ListDirection, LiveMutationFailureKind, LiveMutationKind, OperationPhase,
+    ProviderEditorTab, ProviderLoadPhase, ProviderSaveFailureKind, ProviderViewState,
 };
 use crate::{icons, theme};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ProviderEdit {
     Name(String),
     Mode(RelayMode),
@@ -37,7 +40,30 @@ pub enum ProviderEdit {
     AggregateStrategy(AggregateRelayStrategy),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for ProviderEdit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Name(_) => "Name",
+            Self::Mode(_) => "Mode",
+            Self::Protocol(_) => "Protocol",
+            Self::BaseUrl(_) => "BaseUrl",
+            Self::ApiKey(_) => "ApiKey",
+            Self::Model(_) => "Model",
+            Self::TestModel(_) => "TestModel",
+            Self::UseCommonConfig(_) => "UseCommonConfig",
+            Self::ContextWindow(_) => "ContextWindow",
+            Self::AutoCompactLimit(_) => "AutoCompactLimit",
+            Self::InsertMode(_) => "InsertMode",
+            Self::UserAgent(_) => "UserAgent",
+            Self::ConfigContents(_) => "ConfigContents",
+            Self::AuthContents(_) => "AuthContents",
+            Self::ModelRow { .. } => "ModelRow",
+            Self::AggregateStrategy(_) => "AggregateStrategy",
+        })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub enum ProviderAction {
     RetryLoad,
     ToggleList,
@@ -47,15 +73,23 @@ pub enum ProviderAction {
     AddAggregate,
     Duplicate,
     Move(ListDirection),
-    Delete { confirmed: bool },
+    Delete {
+        confirmed: bool,
+    },
     CancelDelete,
     Edit(ProviderEdit),
     ApplyPreset(String),
     AddModel,
     RemoveModel(usize),
     MergeModels,
-    SetAggregateMember { profile_id: String, enabled: bool },
-    SetAggregateWeight { profile_id: String, weight: u32 },
+    SetAggregateMember {
+        profile_id: String,
+        enabled: bool,
+    },
+    SetAggregateWeight {
+        profile_id: String,
+        weight: u32,
+    },
     SetSecretRevealed(bool),
     SetConfigRevealed(bool),
     SetAuthRevealed(bool),
@@ -64,7 +98,62 @@ pub enum ProviderAction {
     Test,
     FetchModels,
     Doctor,
+    RefreshLive,
+    RequestLiveMutation(LiveMutationKind),
+    ConfirmLiveMutation,
+    CancelLiveMutation,
+    BeginLiveFileEdit(ProviderLiveFileKind),
+    EditLiveFile {
+        kind: ProviderLiveFileKind,
+        contents: String,
+    },
+    CancelLiveFileEdit(ProviderLiveFileKind),
+    SetLiveFileRevealed {
+        kind: ProviderLiveFileKind,
+        revealed: bool,
+    },
     ResolveGuard(GuardResolution),
+}
+
+impl fmt::Debug for ProviderAction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::RetryLoad => "RetryLoad",
+            Self::ToggleList => "ToggleList",
+            Self::Select(_) => "Select",
+            Self::SetTab(_) => "SetTab",
+            Self::AddOrdinary => "AddOrdinary",
+            Self::AddAggregate => "AddAggregate",
+            Self::Duplicate => "Duplicate",
+            Self::Move(_) => "Move",
+            Self::Delete { .. } => "Delete",
+            Self::CancelDelete => "CancelDelete",
+            Self::Edit(_) => "Edit",
+            Self::ApplyPreset(_) => "ApplyPreset",
+            Self::AddModel => "AddModel",
+            Self::RemoveModel(_) => "RemoveModel",
+            Self::MergeModels => "MergeModels",
+            Self::SetAggregateMember { .. } => "SetAggregateMember",
+            Self::SetAggregateWeight { .. } => "SetAggregateWeight",
+            Self::SetSecretRevealed(_) => "SetSecretRevealed",
+            Self::SetConfigRevealed(_) => "SetConfigRevealed",
+            Self::SetAuthRevealed(_) => "SetAuthRevealed",
+            Self::Save => "Save",
+            Self::Discard => "Discard",
+            Self::Test => "Test",
+            Self::FetchModels => "FetchModels",
+            Self::Doctor => "Doctor",
+            Self::RefreshLive => "RefreshLive",
+            Self::RequestLiveMutation(_) => "RequestLiveMutation",
+            Self::ConfirmLiveMutation => "ConfirmLiveMutation",
+            Self::CancelLiveMutation => "CancelLiveMutation",
+            Self::BeginLiveFileEdit(_) => "BeginLiveFileEdit",
+            Self::EditLiveFile { .. } => "EditLiveFile",
+            Self::CancelLiveFileEdit(_) => "CancelLiveFileEdit",
+            Self::SetLiveFileRevealed { .. } => "SetLiveFileRevealed",
+            Self::ResolveGuard(_) => "ResolveGuard",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +173,37 @@ enum PText {
     Config,
     Diagnostics,
     Routing,
+    Live,
+    LiveStatus,
+    Configured,
+    NotConfigured,
+    Authenticated,
+    NotAuthenticated,
+    RefreshLive,
+    ActivateProvider,
+    ReapplyProvider,
+    BackfillProvider,
+    ClearLive,
+    LiveConfigHidden,
+    LiveAuthHidden,
+    RevealLiveConfig,
+    RevealLiveAuth,
+    HideLiveConfig,
+    HideLiveAuth,
+    EditLiveConfig,
+    EditLiveAuth,
+    SaveLiveConfig,
+    SaveLiveAuth,
+    CancelLiveConfig,
+    CancelLiveAuth,
+    ConfirmLiveTitle,
+    ConfirmLiveNow,
+    CancelLiveChange,
+    LiveMutationFailed,
+    RollbackVerified,
+    RollbackFailed,
+    RollbackNotRequired,
+    BackupPath,
     SaveChanges,
     DiscardChanges,
     LoadingProviders,
@@ -174,6 +294,37 @@ fn ptext(locale: Locale, key: PText) -> &'static str {
         PText::Config => ("配置", "Config"),
         PText::Diagnostics => ("诊断", "Diagnostics"),
         PText::Routing => ("路由", "Routing"),
+        PText::Live => ("实时文件", "Live"),
+        PText::LiveStatus => ("实时状态", "Live status"),
+        PText::Configured => ("已配置", "Configured"),
+        PText::NotConfigured => ("未配置", "Not configured"),
+        PText::Authenticated => ("已认证", "Authenticated"),
+        PText::NotAuthenticated => ("未认证", "Not authenticated"),
+        PText::RefreshLive => ("刷新实时状态", "Refresh live status"),
+        PText::ActivateProvider => ("启用供应商", "Activate provider"),
+        PText::ReapplyProvider => ("重新应用当前供应商", "Reapply active provider"),
+        PText::BackfillProvider => ("从实时文件回填", "Backfill active provider"),
+        PText::ClearLive => ("清理实时配置", "Clear live configuration"),
+        PText::LiveConfigHidden => ("实时 config 已隐藏", "Live config hidden"),
+        PText::LiveAuthHidden => ("实时 auth 已隐藏", "Live auth hidden"),
+        PText::RevealLiveConfig => ("显示实时 config", "Reveal live config"),
+        PText::RevealLiveAuth => ("显示实时 auth", "Reveal live auth"),
+        PText::HideLiveConfig => ("隐藏实时 config", "Hide live config"),
+        PText::HideLiveAuth => ("隐藏实时 auth", "Hide live auth"),
+        PText::EditLiveConfig => ("编辑实时 config", "Edit live config"),
+        PText::EditLiveAuth => ("编辑实时 auth", "Edit live auth"),
+        PText::SaveLiveConfig => ("保存实时 config", "Save live config"),
+        PText::SaveLiveAuth => ("保存实时 auth", "Save live auth"),
+        PText::CancelLiveConfig => ("取消编辑实时 config", "Cancel live config"),
+        PText::CancelLiveAuth => ("取消编辑实时 auth", "Cancel live auth"),
+        PText::ConfirmLiveTitle => ("确认实时变更", "Confirm live change"),
+        PText::ConfirmLiveNow => ("立即确认实时变更", "Confirm live change now"),
+        PText::CancelLiveChange => ("取消实时变更", "Cancel live change"),
+        PText::LiveMutationFailed => ("实时变更失败", "Live mutation failed"),
+        PText::RollbackVerified => ("回滚已验证", "Rollback verified"),
+        PText::RollbackFailed => ("回滚失败", "Rollback failed"),
+        PText::RollbackNotRequired => ("无需回滚", "Rollback not required"),
+        PText::BackupPath => ("备份路径", "Backup path"),
         PText::SaveChanges => ("保存更改", "Save changes"),
         PText::DiscardChanges => ("放弃更改", "Discard changes"),
         PText::LoadingProviders => ("正在加载供应商...", "Loading providers..."),
@@ -300,6 +451,9 @@ pub fn render(
     }
     if state.delete_confirmation_required {
         render_delete_confirmation(ui.ctx(), locale, actions);
+    }
+    if state.pending_live_confirmation().is_some() {
+        render_live_confirmation(ui.ctx(), state, locale, actions);
     }
 }
 
@@ -477,6 +631,7 @@ fn render_editor(
             .weak(),
         );
     });
+    render_live_strip(ui, state, locale, actions);
 
     let effective_tab = render_tabs(ui, profile.kind(), state.editor_tab, locale, actions);
     ui.separator();
@@ -494,6 +649,9 @@ fn render_editor(
                 .id_salt("provider_editor_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| match (profile, effective_tab) {
+                    (_, ProviderEditorTab::Live) => {
+                        render_live_files(ui, state, locale, actions);
+                    }
                     (ProviderProfile::Ordinary(profile), ProviderEditorTab::General) => {
                         render_general(ui, profile, state, locale, actions);
                     }
@@ -518,6 +676,292 @@ fn render_editor(
     render_save_bar(ui, state, locale, actions);
 }
 
+fn render_live_strip(
+    ui: &mut egui::Ui,
+    state: &ProviderViewState,
+    locale: Locale,
+    actions: &mut Vec<ProviderAction>,
+) {
+    let Some(workspace) = state.live.workspace.as_ref() else {
+        return;
+    };
+    let running = state.live.mutation_phase == OperationPhase::Running;
+    let clean = !state.has_unsaved_changes();
+    let enabled = workspace.provider.activation.enabled && clean && !running;
+    let selected_is_active = state.selected_is_active();
+    let selected_id = state.selected_profile_id.clone();
+    let selected_is_ordinary = state
+        .selected_profile()
+        .is_some_and(|profile| profile.kind() == ProviderKind::Ordinary);
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(ptext(locale, PText::LiveStatus)).strong());
+        let configured = if workspace.status.configured {
+            PText::Configured
+        } else {
+            PText::NotConfigured
+        };
+        ui.colored_label(
+            if workspace.status.configured {
+                theme::SUCCESS_COLOR
+            } else {
+                ui.visuals().weak_text_color()
+            },
+            ptext(locale, configured),
+        );
+        let authenticated = if workspace.status.authenticated {
+            PText::Authenticated
+        } else {
+            PText::NotAuthenticated
+        };
+        ui.colored_label(
+            if workspace.status.authenticated {
+                theme::SUCCESS_COLOR
+            } else {
+                ui.visuals().weak_text_color()
+            },
+            ptext(locale, authenticated),
+        );
+        if running {
+            ui.spinner();
+            ui.label(ptext(locale, PText::Running));
+        }
+        ui.separator();
+        if tool_button(
+            ui,
+            icons::refresh_cw(),
+            ptext(locale, PText::RefreshLive),
+            clean && !running,
+        )
+        .clicked()
+        {
+            actions.push(ProviderAction::RefreshLive);
+        }
+        let activation_label = if selected_is_active {
+            PText::ReapplyProvider
+        } else {
+            PText::ActivateProvider
+        };
+        if tool_button(
+            ui,
+            icons::circle_check(),
+            ptext(locale, activation_label),
+            enabled && selected_id.is_some(),
+        )
+        .clicked()
+        {
+            let kind = if selected_is_active {
+                LiveMutationKind::Reapply
+            } else {
+                LiveMutationKind::Switch {
+                    target_profile_id: selected_id.unwrap_or_default(),
+                }
+            };
+            actions.push(ProviderAction::RequestLiveMutation(kind));
+        }
+        if tool_button(
+            ui,
+            icons::save(),
+            ptext(locale, PText::BackfillProvider),
+            enabled && selected_is_active && selected_is_ordinary,
+        )
+        .clicked()
+        {
+            actions.push(ProviderAction::RequestLiveMutation(
+                LiveMutationKind::Backfill,
+            ));
+        }
+        if tool_button(
+            ui,
+            icons::trash_2(),
+            ptext(locale, PText::ClearLive),
+            enabled && workspace.status.configured,
+        )
+        .clicked()
+        {
+            actions.push(ProviderAction::RequestLiveMutation(LiveMutationKind::Clear));
+        }
+    });
+    render_live_evidence(ui, state, locale);
+    ui.add_space(2.0);
+}
+
+fn render_live_evidence(ui: &mut egui::Ui, state: &ProviderViewState, locale: Locale) {
+    if let Some(failure) = &state.live.failure {
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(theme::ERROR_COLOR, ptext(locale, PText::LiveMutationFailed));
+            let failure_kind = match failure.kind {
+                LiveMutationFailureKind::Activation(kind) => format!("{kind:?}"),
+                LiveMutationFailureKind::WorkerStopped => "WorkerStopped".to_string(),
+            };
+            ui.label(egui::RichText::new(failure_kind).weak());
+            ui.label(ptext(locale, rollback_text(failure.rollback)));
+        });
+    } else if state.live.mutation_phase == OperationPhase::Ready {
+        ui.label(ptext(locale, rollback_text(state.live.rollback)));
+    }
+    if let Some(path) = state.live.backup_path.as_deref() {
+        ui.horizontal(|ui| {
+            ui.label(ptext(locale, PText::BackupPath));
+            ui.add(egui::Label::new(path).selectable(true).truncate());
+        });
+    }
+}
+
+fn rollback_text(rollback: ProviderRollbackOutcome) -> PText {
+    match rollback {
+        ProviderRollbackOutcome::NotRequired => PText::RollbackNotRequired,
+        ProviderRollbackOutcome::Verified => PText::RollbackVerified,
+        ProviderRollbackOutcome::Failed => PText::RollbackFailed,
+    }
+}
+
+fn render_live_files(
+    ui: &mut egui::Ui,
+    state: &ProviderViewState,
+    locale: Locale,
+    actions: &mut Vec<ProviderAction>,
+) {
+    let Some(workspace) = state.live.workspace.as_ref() else {
+        return;
+    };
+    render_live_file(
+        ui,
+        state,
+        locale,
+        actions,
+        ProviderLiveFileKind::Config,
+        &workspace.files.config_path,
+    );
+    ui.separator();
+    render_live_file(
+        ui,
+        state,
+        locale,
+        actions,
+        ProviderLiveFileKind::Auth,
+        &workspace.files.auth_path,
+    );
+}
+
+fn render_live_file(
+    ui: &mut egui::Ui,
+    state: &ProviderViewState,
+    locale: Locale,
+    actions: &mut Vec<ProviderAction>,
+    kind: ProviderLiveFileKind,
+    path: &str,
+) {
+    let is_config = kind == ProviderLiveFileKind::Config;
+    ui.label(
+        egui::RichText::new(if is_config {
+            "config.toml"
+        } else {
+            "auth.json"
+        })
+        .strong(),
+    );
+    ui.add(egui::Label::new(path).selectable(true).truncate())
+        .on_hover_text(path);
+    let editing = state.live_file_editing(kind);
+    let revealed = state.live_file_revealed(kind);
+    let mut draft = state.live_file_draft(kind).unwrap_or_default().to_string();
+    if editing || revealed {
+        let response = ui.add_sized(
+            [ui.available_width(), 112.0],
+            egui::TextEdit::multiline(&mut draft)
+                .code_editor()
+                .interactive(editing),
+        );
+        if editing && response.changed() {
+            actions.push(ProviderAction::EditLiveFile {
+                kind,
+                contents: draft,
+            });
+        }
+    } else {
+        ui.add_sized(
+            [ui.available_width(), 42.0],
+            egui::Label::new(ptext(
+                locale,
+                if is_config {
+                    PText::LiveConfigHidden
+                } else {
+                    PText::LiveAuthHidden
+                },
+            )),
+        );
+    }
+    ui.horizontal(|ui| {
+        if editing {
+            let save_label = if is_config {
+                PText::SaveLiveConfig
+            } else {
+                PText::SaveLiveAuth
+            };
+            if ui
+                .add_enabled(
+                    state.live_file_dirty(kind)
+                        && state.live.mutation_phase != OperationPhase::Running,
+                    egui::Button::new(ptext(locale, save_label)),
+                )
+                .clicked()
+            {
+                actions.push(ProviderAction::RequestLiveMutation(
+                    LiveMutationKind::SaveFile(kind),
+                ));
+            }
+            let cancel_label = if is_config {
+                PText::CancelLiveConfig
+            } else {
+                PText::CancelLiveAuth
+            };
+            if ui.button(ptext(locale, cancel_label)).clicked() {
+                actions.push(ProviderAction::CancelLiveFileEdit(kind));
+            }
+        } else {
+            let reveal_label = match (is_config, revealed) {
+                (true, false) => PText::RevealLiveConfig,
+                (true, true) => PText::HideLiveConfig,
+                (false, false) => PText::RevealLiveAuth,
+                (false, true) => PText::HideLiveAuth,
+            };
+            if tool_button(
+                ui,
+                if revealed {
+                    icons::eye_off()
+                } else {
+                    icons::eye()
+                },
+                ptext(locale, reveal_label),
+                state.live.mutation_phase != OperationPhase::Running,
+            )
+            .clicked()
+            {
+                actions.push(ProviderAction::SetLiveFileRevealed {
+                    kind,
+                    revealed: !revealed,
+                });
+            }
+            let edit_label = if is_config {
+                PText::EditLiveConfig
+            } else {
+                PText::EditLiveAuth
+            };
+            if ui
+                .add_enabled(
+                    !state.is_dirty() && state.live.mutation_phase != OperationPhase::Running,
+                    egui::Button::new(ptext(locale, edit_label)),
+                )
+                .clicked()
+            {
+                actions.push(ProviderAction::BeginLiveFileEdit(kind));
+            }
+        }
+    });
+}
+
 fn render_tabs(
     ui: &mut egui::Ui,
     kind: ProviderKind,
@@ -530,10 +974,12 @@ fn render_tabs(
             (ProviderEditorTab::General, PText::General),
             (ProviderEditorTab::Models, PText::Models),
             (ProviderEditorTab::Config, PText::Config),
+            (ProviderEditorTab::Live, PText::Live),
             (ProviderEditorTab::Diagnostics, PText::Diagnostics),
         ],
         ProviderKind::Aggregate => &[
             (ProviderEditorTab::Routing, PText::Routing),
+            (ProviderEditorTab::Live, PText::Live),
             (ProviderEditorTab::Diagnostics, PText::Diagnostics),
         ],
     };
@@ -1122,6 +1568,50 @@ fn render_guard(ctx: &egui::Context, locale: Locale, actions: &mut Vec<ProviderA
                 }
             });
         });
+}
+
+fn render_live_confirmation(
+    ctx: &egui::Context,
+    state: &ProviderViewState,
+    locale: Locale,
+    actions: &mut Vec<ProviderAction>,
+) {
+    let Some(kind) = state.pending_live_confirmation() else {
+        return;
+    };
+    egui::Window::new(ptext(locale, PText::ConfirmLiveTitle))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label(ptext(locale, live_action_text(kind)));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(ptext(locale, PText::CancelLiveChange)).clicked() {
+                    actions.push(ProviderAction::CancelLiveMutation);
+                }
+                if ui
+                    .add_enabled(
+                        state.live.mutation_phase != OperationPhase::Running,
+                        egui::Button::new(ptext(locale, PText::ConfirmLiveNow)),
+                    )
+                    .clicked()
+                {
+                    actions.push(ProviderAction::ConfirmLiveMutation);
+                }
+            });
+        });
+}
+
+fn live_action_text(kind: &LiveMutationKind) -> PText {
+    match kind {
+        LiveMutationKind::Switch { .. } => PText::ActivateProvider,
+        LiveMutationKind::Reapply => PText::ReapplyProvider,
+        LiveMutationKind::Backfill => PText::BackfillProvider,
+        LiveMutationKind::Clear => PText::ClearLive,
+        LiveMutationKind::SaveFile(ProviderLiveFileKind::Config) => PText::SaveLiveConfig,
+        LiveMutationKind::SaveFile(ProviderLiveFileKind::Auth) => PText::SaveLiveAuth,
+    }
 }
 
 fn render_delete_confirmation(

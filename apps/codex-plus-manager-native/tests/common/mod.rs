@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use codex_plus_core::relay_config::CodexContextEntries;
+use codex_plus_core::relay_config::{CodexContextEntries, RelayStatus};
 use codex_plus_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, RelayMode, RelayProfile,
 };
@@ -11,8 +11,8 @@ use codex_plus_manager_native::state::{OverviewPhase, Route};
 use codex_plus_manager_native::views::shell::ShellViewModel;
 use codex_plus_manager_service::{
     LocatedResource, OverviewSnapshot, ProviderActivationSummary, ProviderDocument, ProviderKind,
-    ProviderProfile, ProviderRevision, ProviderWorkspace, ResourcePresence, ShortcutSnapshot,
-    UpdateCheckState,
+    ProviderLiveFiles, ProviderLiveRevision, ProviderLiveWorkspace, ProviderProfile,
+    ProviderRevision, ProviderWorkspace, ResourcePresence, ShortcutSnapshot, UpdateCheckState,
 };
 
 pub fn snapshot(codex_version: &str) -> Arc<OverviewSnapshot> {
@@ -104,8 +104,31 @@ pub fn provider_state() -> ProviderViewState {
         },
     };
     let mut state = ProviderViewState::default();
-    let request_id = state.begin_load();
-    assert!(state.apply_load_response(request_id, Ok(Arc::new(workspace))));
+    let request_id = state.begin_live_load().unwrap();
+    assert!(state.apply_live_load_response(
+        request_id,
+        Ok(Arc::new(ProviderLiveWorkspace {
+            provider: workspace,
+            status: RelayStatus {
+                authenticated: true,
+                auth_source: "fixture".to_owned(),
+                account_label: None,
+                config_path: "C:/Fixtures/Codex/config.toml".to_owned(),
+                configured: true,
+                requires_openai_auth: true,
+                has_bearer_token: true,
+            },
+            files: ProviderLiveFiles {
+                config_path: "C:/Fixtures/Codex/config.toml".to_owned(),
+                auth_path: "C:/Fixtures/Codex/auth.json".to_owned(),
+                config_exists: true,
+                auth_exists: true,
+                config_contents: "model = \"model-alpha\"\n".to_owned(),
+                auth_contents: "{}\n".to_owned(),
+            },
+            revision: ProviderLiveRevision::parse("d".repeat(64)).unwrap(),
+        })),
+    ));
     state
 }
 

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-const SCRIPT_DURATION: Duration = Duration::from_secs(5);
+const SCRIPT_DURATION: Duration = Duration::from_secs(7);
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const FINAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -26,6 +26,11 @@ pub enum PerfScriptAction {
     SelectNextProvider,
     EditProviderName,
     DiscardProvider,
+    RefreshLive,
+    OpenLiveTab,
+    RequestClearLive,
+    CancelLiveConfirmation,
+    ConfirmLiveMutation,
     ToggleProviderList,
     NavigateOverview,
 }
@@ -123,6 +128,12 @@ impl PerfRecorder {
                 egui::Key::F9,
                 egui::Key::F10,
                 egui::Key::F11,
+                egui::Key::F12,
+                egui::Key::F13,
+                egui::Key::F14,
+                egui::Key::F15,
+                egui::Key::F16,
+                egui::Key::F17,
             ]
             .into_iter()
             .find(|key| input.key_pressed(*key))
@@ -198,7 +209,7 @@ fn valid_samples(samples: &[f64]) -> Vec<f64> {
 }
 
 fn script_step(index: usize) -> Option<(Duration, egui::Key)> {
-    const STEPS: [(u64, egui::Key); 7] = [
+    const STEPS: [(u64, egui::Key); 13] = [
         (500, egui::Key::F5),
         (1_000, egui::Key::F6),
         (1_500, egui::Key::F7),
@@ -206,6 +217,12 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key)> {
         (2_500, egui::Key::F9),
         (3_000, egui::Key::F10),
         (3_500, egui::Key::F11),
+        (4_000, egui::Key::F12),
+        (4_500, egui::Key::F13),
+        (5_000, egui::Key::F14),
+        (5_500, egui::Key::F15),
+        (6_000, egui::Key::F16),
+        (6_500, egui::Key::F17),
     ];
     STEPS
         .get(index)
@@ -218,8 +235,13 @@ fn script_action_for_key(key: egui::Key) -> Option<PerfScriptAction> {
         egui::Key::F6 => Some(PerfScriptAction::SelectNextProvider),
         egui::Key::F7 => Some(PerfScriptAction::EditProviderName),
         egui::Key::F8 => Some(PerfScriptAction::DiscardProvider),
-        egui::Key::F9 | egui::Key::F10 => Some(PerfScriptAction::ToggleProviderList),
-        egui::Key::F11 => Some(PerfScriptAction::NavigateOverview),
+        egui::Key::F9 => Some(PerfScriptAction::RefreshLive),
+        egui::Key::F10 => Some(PerfScriptAction::OpenLiveTab),
+        egui::Key::F11 | egui::Key::F13 => Some(PerfScriptAction::RequestClearLive),
+        egui::Key::F12 => Some(PerfScriptAction::CancelLiveConfirmation),
+        egui::Key::F14 => Some(PerfScriptAction::ConfirmLiveMutation),
+        egui::Key::F15 | egui::Key::F16 => Some(PerfScriptAction::ToggleProviderList),
+        egui::Key::F17 => Some(PerfScriptAction::NavigateOverview),
         _ => None,
     }
 }
@@ -231,6 +253,11 @@ impl PerfScriptAction {
             Self::SelectNextProvider => "select_next_provider",
             Self::EditProviderName => "edit_provider_name",
             Self::DiscardProvider => "discard_provider",
+            Self::RefreshLive => "refresh_live",
+            Self::OpenLiveTab => "open_live_tab",
+            Self::RequestClearLive => "request_clear_live",
+            Self::CancelLiveConfirmation => "cancel_live_confirmation",
+            Self::ConfirmLiveMutation => "confirm_live_mutation",
             Self::ToggleProviderList => "toggle_provider_list",
             Self::NavigateOverview => "navigate_overview",
         }
@@ -375,9 +402,19 @@ mod tests {
             (1_000, egui::Key::F6, PerfScriptAction::SelectNextProvider),
             (1_500, egui::Key::F7, PerfScriptAction::EditProviderName),
             (2_000, egui::Key::F8, PerfScriptAction::DiscardProvider),
-            (2_500, egui::Key::F9, PerfScriptAction::ToggleProviderList),
-            (3_000, egui::Key::F10, PerfScriptAction::ToggleProviderList),
-            (3_500, egui::Key::F11, PerfScriptAction::NavigateOverview),
+            (2_500, egui::Key::F9, PerfScriptAction::RefreshLive),
+            (3_000, egui::Key::F10, PerfScriptAction::OpenLiveTab),
+            (3_500, egui::Key::F11, PerfScriptAction::RequestClearLive),
+            (
+                4_000,
+                egui::Key::F12,
+                PerfScriptAction::CancelLiveConfirmation,
+            ),
+            (4_500, egui::Key::F13, PerfScriptAction::RequestClearLive),
+            (5_000, egui::Key::F14, PerfScriptAction::ConfirmLiveMutation),
+            (5_500, egui::Key::F15, PerfScriptAction::ToggleProviderList),
+            (6_000, egui::Key::F16, PerfScriptAction::ToggleProviderList),
+            (6_500, egui::Key::F17, PerfScriptAction::NavigateOverview),
         ];
         for (index, (milliseconds, key, action)) in expected.into_iter().enumerate() {
             assert_eq!(
