@@ -13,6 +13,7 @@ mod provider_system;
 mod relay_environment;
 mod sessions;
 mod system;
+mod user_scripts;
 
 pub use context_tools::{
     CompatContextDeleteRequest, CompatContextEntries, CompatContextEntryRequest, ContextBundle,
@@ -86,3 +87,10 @@ pub use sessions::{
     SessionSource, SessionSummary, SessionWorkspace,
 };
 pub use system::{SystemOverviewEnvironment, SystemOverviewSource};
+pub use user_scripts::{
+    DeleteUserScript, InstallMarketScript, ScriptIntegrity, ScriptMarketCompatibilityWorkspace,
+    ScriptMarketRevision, ScriptMarketSummary, ScriptMarketWorkspace, SetUserScriptEnabled,
+    SetUserScriptsEnabled, UserScriptBackupEvidence, UserScriptEnvironment, UserScriptError,
+    UserScriptErrorKind, UserScriptMutationOutcome, UserScriptOrigin, UserScriptRevision,
+    UserScriptService, UserScriptSource, UserScriptStatus, UserScriptSummary, UserScriptWorkspace,
+};

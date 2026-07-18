@@ -23,6 +23,11 @@ pub struct SystemProviderEnvironment {
     ccs_db_path: PathBuf,
     pending_import_path: PathBuf,
     backup_dir: PathBuf,
+    user_script_builtin_dir: PathBuf,
+    user_script_user_dir: PathBuf,
+    user_script_config_path: PathBuf,
+    script_market_index_url: String,
+    script_market_policy: codex_plus_core::script_market::MarketFetchPolicy,
     process_only_env_cleanup: bool,
     runtime: Arc<tokio::runtime::Runtime>,
 }
@@ -60,6 +65,10 @@ impl SystemProviderEnvironment {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("context-live-ownership.json");
+        let state_dir = settings_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
         Self {
             settings: SettingsStore::new(settings_path),
             codex_home,
@@ -67,6 +76,11 @@ impl SystemProviderEnvironment {
             ccs_db_path,
             pending_import_path,
             backup_dir,
+            user_script_builtin_dir: default_builtin_user_scripts_dir(),
+            user_script_user_dir: state_dir.join("user_scripts"),
+            user_script_config_path: state_dir.join("user_scripts.json"),
+            script_market_index_url: configured_script_market_index_url(),
+            script_market_policy: codex_plus_core::script_market::MarketFetchPolicy::https_only(),
             process_only_env_cleanup,
             runtime: Arc::new(provider_runtime()),
         }
@@ -75,6 +89,35 @@ impl SystemProviderEnvironment {
     pub fn with_context_ownership_path(mut self, path: PathBuf) -> Self {
         self.context_ownership_path = path;
         self
+    }
+
+    pub fn with_user_script_paths(
+        mut self,
+        builtin_dir: impl Into<PathBuf>,
+        user_dir: impl Into<PathBuf>,
+        config_path: impl Into<PathBuf>,
+    ) -> Self {
+        self.user_script_builtin_dir = builtin_dir.into();
+        self.user_script_user_dir = user_dir.into();
+        self.user_script_config_path = config_path.into();
+        self
+    }
+
+    pub fn with_script_market_index_url(mut self, url: impl Into<String>) -> Self {
+        self.script_market_index_url = url.into();
+        self.script_market_policy = codex_plus_core::script_market::MarketFetchPolicy::https_only();
+        self
+    }
+
+    pub fn with_loopback_script_market_for_tests(mut self, url: impl Into<String>) -> Self {
+        self.script_market_index_url = url.into();
+        self.script_market_policy =
+            codex_plus_core::script_market::MarketFetchPolicy::loopback_http_for_tests();
+        self
+    }
+
+    pub fn script_market_index_url(&self) -> &str {
+        &self.script_market_index_url
     }
 
     pub fn for_native_process() -> Self {
@@ -88,6 +131,15 @@ impl SystemProviderEnvironment {
         let pending_import_path = env_path("CODEX_PLUS_NATIVE_PENDING_IMPORT_PATH");
         let backup_dir = env_path("CODEX_PLUS_NATIVE_BACKUP_DIR");
         let context_ownership_path = env_path("CODEX_PLUS_NATIVE_CONTEXT_OWNERSHIP_PATH");
+        let user_script_builtin_dir = env_path("CODEX_PLUS_NATIVE_USER_SCRIPT_BUILTIN_DIR");
+        let user_script_user_dir = env_path("CODEX_PLUS_NATIVE_USER_SCRIPT_USER_DIR");
+        let user_script_config_path = env_path("CODEX_PLUS_NATIVE_USER_SCRIPT_CONFIG_PATH");
+        let script_market_index_url = std::env::var("CODEX_PLUS_SCRIPT_MARKET_INDEX_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let allow_loopback_script_market =
+            std::env::var("CODEX_PLUS_NATIVE_SCRIPT_MARKET_ALLOW_LOOPBACK")
+                .is_ok_and(|value| value == "1");
         let process_only_env_cleanup =
             std::env::var("CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY").is_ok_and(|value| value == "1");
         if settings_path.is_none()
@@ -96,6 +148,11 @@ impl SystemProviderEnvironment {
             && pending_import_path.is_none()
             && backup_dir.is_none()
             && context_ownership_path.is_none()
+            && user_script_builtin_dir.is_none()
+            && user_script_user_dir.is_none()
+            && user_script_config_path.is_none()
+            && script_market_index_url.is_none()
+            && !allow_loopback_script_market
         {
             return Self::default();
         }
@@ -106,7 +163,7 @@ impl SystemProviderEnvironment {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        let environment = Self::for_manager_paths(
+        let mut environment = Self::for_manager_paths(
             settings_path.clone(),
             codex_home.unwrap_or_else(|| isolated_codex_home_for_settings(&settings_path)),
             ccs_db_path.unwrap_or_else(|| state_dir.join("cc-switch.db")),
@@ -114,21 +171,42 @@ impl SystemProviderEnvironment {
             backup_dir.unwrap_or_else(|| state_dir.join("backups")),
             process_only_env_cleanup,
         );
-        context_ownership_path.map_or(environment.clone(), |path| {
-            environment.with_context_ownership_path(path)
-        })
+        if let Some(path) = context_ownership_path {
+            environment = environment.with_context_ownership_path(path);
+        }
+        environment = environment.with_user_script_paths(
+            user_script_builtin_dir.unwrap_or_else(default_builtin_user_scripts_dir),
+            user_script_user_dir.unwrap_or_else(|| state_dir.join("user_scripts")),
+            user_script_config_path.unwrap_or_else(|| state_dir.join("user_scripts.json")),
+        );
+        if let Some(url) = script_market_index_url {
+            environment = if allow_loopback_script_market {
+                environment.with_loopback_script_market_for_tests(url)
+            } else {
+                environment.with_script_market_index_url(url)
+            };
+        }
+        environment
     }
 }
 
 impl Default for SystemProviderEnvironment {
     fn default() -> Self {
+        let state_dir = codex_plus_core::paths::default_app_state_dir();
+        let user_script_config_dir =
+            codex_plus_core::user_scripts::default_user_scripts_config_dir();
         Self {
             settings: SettingsStore::default(),
             codex_home: codex_plus_core::relay_config::default_codex_home_dir(),
             context_ownership_path: codex_plus_core::paths::default_context_ownership_path(),
             ccs_db_path: codex_plus_core::ccs_import::default_ccs_db_path(),
             pending_import_path: codex_plus_core::paths::default_pending_provider_import_path(),
-            backup_dir: codex_plus_core::paths::default_app_state_dir().join("backups"),
+            backup_dir: state_dir.join("backups"),
+            user_script_builtin_dir: default_builtin_user_scripts_dir(),
+            user_script_user_dir: user_script_config_dir.join("user_scripts"),
+            user_script_config_path: user_script_config_dir.join("user_scripts.json"),
+            script_market_index_url: configured_script_market_index_url(),
+            script_market_policy: codex_plus_core::script_market::MarketFetchPolicy::https_only(),
             process_only_env_cleanup: false,
             runtime: Arc::new(provider_runtime()),
         }
@@ -254,6 +332,184 @@ impl crate::SessionEnvironment for SystemProviderEnvironment {
             session,
         )
     }
+}
+
+impl crate::UserScriptEnvironment for SystemProviderEnvironment {
+    type Prepared = codex_plus_core::script_market::PreparedMarketScript;
+
+    fn inspect_local(&self) -> Result<crate::UserScriptWorkspace, crate::UserScriptError> {
+        let inspection = self.user_script_manager().inspect().map_err(|error| {
+            crate::UserScriptError::with_compatibility_detail(
+                crate::UserScriptErrorKind::InspectFailed,
+                format!("{error:#}"),
+            )
+        })?;
+        Ok(crate::user_scripts::workspace_from_core(inspection))
+    }
+
+    fn refresh_market(
+        &self,
+    ) -> Result<crate::ScriptMarketCompatibilityWorkspace, crate::UserScriptError> {
+        self.runtime
+            .block_on(
+                codex_plus_core::script_market::fetch_market_manifest_with_policy(
+                    &self.script_market_index_url,
+                    self.script_market_policy,
+                ),
+            )
+            .map(crate::ScriptMarketCompatibilityWorkspace::from_manifest)
+            .map_err(|error| map_script_market_error(error, true))
+    }
+
+    fn prepare_market_script(
+        &self,
+        script: &codex_plus_core::script_market::MarketScript,
+    ) -> Result<Self::Prepared, crate::UserScriptError> {
+        let content = self
+            .runtime
+            .block_on(codex_plus_core::script_market::download_script_with_policy(
+                &script.script_url,
+                self.script_market_policy,
+            ))
+            .map_err(|error| map_script_market_error(error, false))?;
+        codex_plus_core::script_market::prepare_market_script_content(script, &content)
+            .map_err(|error| map_script_market_error(error, false))
+    }
+
+    fn commit_market_script(
+        &self,
+        expected_revision: crate::UserScriptRevision,
+        prepared: Self::Prepared,
+    ) -> Result<crate::UserScriptMutationOutcome, crate::UserScriptError> {
+        let manager = self.user_script_manager();
+        let current = current_core_user_script_inspection(&manager, &expected_revision)?;
+        manager
+            .commit_market_script(&current.revision, &prepared)
+            .map(service_outcome_from_core)
+            .map_err(map_user_script_mutation_error)
+    }
+
+    fn set_global_enabled(
+        &self,
+        expected_revision: crate::UserScriptRevision,
+        enabled: bool,
+    ) -> Result<crate::UserScriptMutationOutcome, crate::UserScriptError> {
+        let manager = self.user_script_manager();
+        let current = current_core_user_script_inspection(&manager, &expected_revision)?;
+        manager
+            .set_global_enabled_if_revision(&current.revision, enabled)
+            .map(service_outcome_from_core)
+            .map_err(map_user_script_mutation_error)
+    }
+
+    fn set_script_enabled(
+        &self,
+        expected_revision: crate::UserScriptRevision,
+        key: &str,
+        enabled: bool,
+    ) -> Result<crate::UserScriptMutationOutcome, crate::UserScriptError> {
+        let manager = self.user_script_manager();
+        let current = current_core_user_script_inspection(&manager, &expected_revision)?;
+        manager
+            .set_script_enabled_if_revision(&current.revision, key, enabled)
+            .map(service_outcome_from_core)
+            .map_err(map_user_script_mutation_error)
+    }
+
+    fn delete_user_script(
+        &self,
+        expected_revision: crate::UserScriptRevision,
+        key: &str,
+    ) -> Result<crate::UserScriptMutationOutcome, crate::UserScriptError> {
+        let manager = self.user_script_manager();
+        let current = current_core_user_script_inspection(&manager, &expected_revision)?;
+        manager
+            .delete_user_script_with_backup(&current.revision, key)
+            .map(service_outcome_from_core)
+            .map_err(map_user_script_mutation_error)
+    }
+}
+
+impl SystemProviderEnvironment {
+    fn user_script_manager(&self) -> codex_plus_core::user_scripts::UserScriptManager {
+        codex_plus_core::user_scripts::UserScriptManager::new(
+            &self.user_script_builtin_dir,
+            &self.user_script_user_dir,
+            &self.user_script_config_path,
+        )
+        .with_backup_root(&self.backup_dir)
+    }
+}
+
+fn current_core_user_script_inspection(
+    manager: &codex_plus_core::user_scripts::UserScriptManager,
+    expected: &crate::UserScriptRevision,
+) -> Result<codex_plus_core::user_scripts::UserScriptInspection, crate::UserScriptError> {
+    let inspection = manager.inspect().map_err(|error| {
+        crate::UserScriptError::with_compatibility_detail(
+            crate::UserScriptErrorKind::InspectFailed,
+            format!("{error:#}"),
+        )
+    })?;
+    let current = crate::UserScriptRevision::from_digest(inspection.revision.digest());
+    if &current != expected {
+        return Err(crate::UserScriptError::new(
+            crate::UserScriptErrorKind::Conflict,
+        ));
+    }
+    Ok(inspection)
+}
+
+fn service_outcome_from_core(
+    outcome: codex_plus_core::user_scripts::UserScriptMutationOutcome,
+) -> crate::UserScriptMutationOutcome {
+    crate::UserScriptMutationOutcome {
+        workspace: crate::user_scripts::workspace_from_core(outcome.inspection),
+        backup: crate::UserScriptBackupEvidence {
+            id: outcome.backup.id,
+            created: outcome.backup.created,
+        },
+    }
+}
+
+fn map_user_script_mutation_error(
+    error: codex_plus_core::user_scripts::UserScriptMutationError,
+) -> crate::UserScriptError {
+    use codex_plus_core::user_scripts::UserScriptMutationErrorKind as CoreKind;
+
+    let kind = match error.kind() {
+        CoreKind::InspectFailed => crate::UserScriptErrorKind::InspectFailed,
+        CoreKind::Conflict => crate::UserScriptErrorKind::Conflict,
+        CoreKind::InvalidTarget => crate::UserScriptErrorKind::InvalidTarget,
+        CoreKind::BackupFailed => crate::UserScriptErrorKind::BackupFailed,
+        CoreKind::WriteFailed => crate::UserScriptErrorKind::WriteFailed,
+        CoreKind::RollbackFailed => crate::UserScriptErrorKind::RollbackFailed,
+    };
+    crate::UserScriptError::with_compatibility_detail(kind, error.to_string())
+}
+
+fn map_script_market_error(
+    error: codex_plus_core::script_market::ScriptMarketError,
+    refreshing_manifest: bool,
+) -> crate::UserScriptError {
+    use codex_plus_core::script_market::ScriptMarketErrorKind as CoreKind;
+
+    let kind = match error.kind() {
+        CoreKind::ResponseTooLarge => crate::UserScriptErrorKind::DownloadTooLarge,
+        CoreKind::InvalidIntegrity => crate::UserScriptErrorKind::InvalidIntegrity,
+        CoreKind::IntegrityMismatch => crate::UserScriptErrorKind::IntegrityMismatch,
+        CoreKind::InvalidUrl
+        | CoreKind::InsecureTransport
+        | CoreKind::RequestFailed
+        | CoreKind::DecodeFailed => {
+            if refreshing_manifest {
+                crate::UserScriptErrorKind::MarketRefreshFailed
+            } else {
+                crate::UserScriptErrorKind::DownloadFailed
+            }
+        }
+    };
+    crate::UserScriptError::with_compatibility_detail(kind, error.to_string())
 }
 
 impl crate::ProviderSyncEnvironment for SystemProviderEnvironment {
@@ -557,4 +813,20 @@ fn isolated_codex_home_for_settings(settings_path: &Path) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("codex")
+}
+
+fn configured_script_market_index_url() -> String {
+    std::env::var("CODEX_PLUS_SCRIPT_MARKET_INDEX_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| codex_plus_core::script_market::DEFAULT_MARKET_INDEX_URL.to_string())
+}
+
+fn default_builtin_user_scripts_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .map(|path| path.join("user_scripts"))
+        .unwrap_or_else(|| PathBuf::from("user_scripts"))
 }

@@ -7,7 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use codex_plus_core::install::SILENT_BINARY;
 use codex_plus_core::models::DeleteResult;
 use codex_plus_core::relay_environment::RelayEnvironmentReport;
-use codex_plus_core::script_market::{self, MarketScript, ScriptMarketManifest};
 use codex_plus_core::settings::{BackendSettings, RelayProfile, SettingsStore};
 use codex_plus_core::status::LaunchStatus;
 use codex_plus_core::user_scripts::UserScriptManager;
@@ -26,7 +25,7 @@ use codex_plus_manager_service::{
     RelayEnvironmentService, RelayEnvironmentSource, RemoveEnvironmentConflicts,
     RepairPluginMarketplace, ResourcePresence, RunProviderSync, SessionEnvironment, SessionService,
     SessionSource, SystemOverviewSource, SystemProviderEnvironment, TestProviderProfile,
-    UpdateCheckState,
+    UpdateCheckState, UserScriptService,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -1231,55 +1230,37 @@ fn provider_sync_result_payload(sync: &codex_plus_data::ProviderSyncResult) -> V
 
 #[tauri::command]
 pub async fn refresh_script_market() -> CommandResult<ScriptMarketPayload> {
-    match script_market::fetch_market_manifest(script_market::DEFAULT_MARKET_INDEX_URL).await {
-        Ok(manifest) => ok(
-            "脚本市场已刷新。",
-            script_market_payload_from_manifest(&manifest, "ok", "脚本市场已刷新。"),
-        ),
-        Err(error) => failed(
-            &format!("脚本市场加载失败：{error}"),
-            failed_script_market_payload(&format!("脚本市场加载失败：{error}")),
+    let (service, index_url) = default_user_script_service();
+    match tauri::async_runtime::spawn_blocking(move || {
+        refresh_script_market_with_service(&service, &index_url)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => failed(
+            "脚本市场后台任务失败。",
+            failed_script_market_payload(
+                "脚本市场后台任务失败。",
+                codex_plus_core::script_market::DEFAULT_MARKET_INDEX_URL,
+            ),
         ),
     }
 }
 
 #[tauri::command]
 pub async fn install_market_script(id: String) -> CommandResult<ScriptMarketPayload> {
-    let trimmed = id.trim();
-    if trimmed.is_empty() {
-        return failed(
-            "脚本 id 不能为空。",
-            failed_script_market_payload("脚本 id 不能为空。"),
-        );
-    }
-    let manifest =
-        match script_market::fetch_market_manifest(script_market::DEFAULT_MARKET_INDEX_URL).await {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                return failed(
-                    &format!("脚本市场加载失败：{error}"),
-                    failed_script_market_payload(&format!("脚本市场加载失败：{error}")),
-                );
-            }
-        };
-    let Some(script) = manifest.scripts.iter().find(|script| script.id == trimmed) else {
-        return failed(
-            "市场清单中未找到该脚本。",
-            script_market_payload_from_manifest(&manifest, "failed", "市场清单中未找到该脚本。"),
-        );
-    };
-    let manager = default_user_script_manager();
-    match script_market::install_market_script(&manager, script).await {
-        Ok(()) => ok(
-            "脚本已安装。",
-            script_market_payload_from_manifest(&manifest, "ok", "脚本已安装。"),
-        ),
-        Err(error) => failed(
-            &format!("安装脚本失败：{error}"),
-            script_market_payload_from_manifest(
-                &manifest,
-                "failed",
-                &format!("安装脚本失败：{error}"),
+    let (service, index_url) = default_user_script_service();
+    match tauri::async_runtime::spawn_blocking(move || {
+        install_market_script_with_service(&service, &index_url, id)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => failed(
+            "安装脚本后台任务失败。",
+            failed_script_market_payload(
+                "安装脚本后台任务失败。",
+                codex_plus_core::script_market::DEFAULT_MARKET_INDEX_URL,
             ),
         ),
     }
@@ -1291,8 +1272,21 @@ pub fn set_user_script_enabled(key: String, enabled: bool) -> CommandResult<Sett
     if trimmed.is_empty() {
         return failed("脚本 key 不能为空。", fallback_settings_payload());
     }
-    let manager = default_user_script_manager();
-    match manager.set_script_enabled(trimmed, enabled) {
+    let (service, _) = default_user_script_service();
+    let current = match service.inspect_local() {
+        Ok(current) => current,
+        Err(error) => {
+            return failed(
+                &format!("脚本启停失败：{}", error.detail()),
+                fallback_settings_payload(),
+            );
+        }
+    };
+    match service.set_script_enabled(codex_plus_manager_service::SetUserScriptEnabled {
+        expected_revision: current.revision,
+        key: trimmed.to_string(),
+        enabled,
+    }) {
         Ok(_) => settings_payload(
             if enabled {
                 "脚本已启用。"
@@ -1314,8 +1308,21 @@ pub fn delete_user_script(key: String) -> CommandResult<SettingsPayload> {
     if trimmed.is_empty() {
         return failed("脚本 key 不能为空。", fallback_settings_payload());
     }
-    let manager = default_user_script_manager();
-    match manager.delete_user_script(trimmed) {
+    let (service, _) = default_user_script_service();
+    let current = match service.inspect_local() {
+        Ok(current) => current,
+        Err(error) => {
+            return failed(
+                &format!("脚本删除失败：{}", error.detail()),
+                fallback_settings_payload(),
+            );
+        }
+    };
+    match service.delete(codex_plus_manager_service::DeleteUserScript {
+        expected_revision: current.revision,
+        key: trimmed.to_string(),
+        confirmed_key: trimmed.to_string(),
+    }) {
         Ok(_) => settings_payload("脚本已删除。", "脚本删除失败"),
         Err(error) => failed(
             &format!("脚本删除失败：{error}"),
@@ -2946,6 +2953,121 @@ fn fallback_settings_payload() -> SettingsPayload {
     }
 }
 
+fn default_user_script_service() -> (UserScriptService<SystemProviderEnvironment>, String) {
+    let environment = SystemProviderEnvironment::default();
+    let index_url = environment.script_market_index_url().to_string();
+    (UserScriptService::new(environment), index_url)
+}
+
+fn refresh_script_market_with_service(
+    service: &UserScriptService<SystemProviderEnvironment>,
+    index_url: &str,
+) -> CommandResult<ScriptMarketPayload> {
+    match service.refresh_market_compatibility() {
+        Ok((compatibility, local)) => ok(
+            "脚本市场已刷新。",
+            script_market_payload_from_compatibility(
+                &compatibility,
+                &local,
+                user_script_inventory(),
+                index_url,
+                "ok",
+                "脚本市场已刷新。",
+            ),
+        ),
+        Err(error) => {
+            let message = format!("脚本市场加载失败：{}", error.detail());
+            failed(&message, failed_script_market_payload(&message, index_url))
+        }
+    }
+}
+
+fn install_market_script_with_service(
+    service: &UserScriptService<SystemProviderEnvironment>,
+    index_url: &str,
+    id: String,
+) -> CommandResult<ScriptMarketPayload> {
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return failed(
+            "脚本 id 不能为空。",
+            failed_script_market_payload("脚本 id 不能为空。", index_url),
+        );
+    }
+    let (compatibility, local) = match service.refresh_market_compatibility() {
+        Ok(result) => result,
+        Err(error) => {
+            let message = format!("脚本市场加载失败：{}", error.detail());
+            return failed(&message, failed_script_market_payload(&message, index_url));
+        }
+    };
+    let mut matches = compatibility
+        .scripts()
+        .iter()
+        .filter(|script| script.id == id);
+    let Some(script) = matches.next() else {
+        return failed(
+            "市场清单中未找到该脚本。",
+            script_market_payload_from_compatibility(
+                &compatibility,
+                &local,
+                user_script_inventory(),
+                index_url,
+                "failed",
+                "市场清单中未找到该脚本。",
+            ),
+        );
+    };
+    if matches.next().is_some() {
+        return failed(
+            "市场清单中的脚本 id 不唯一。",
+            script_market_payload_from_compatibility(
+                &compatibility,
+                &local,
+                user_script_inventory(),
+                index_url,
+                "failed",
+                "市场清单中的脚本 id 不唯一。",
+            ),
+        );
+    }
+    let request = codex_plus_manager_service::InstallMarketScript {
+        expected_local_revision: local.revision.clone(),
+        expected_market_revision: compatibility.workspace.revision.clone(),
+        script_id: script.id.clone(),
+        confirmed_script_id: script.id.clone(),
+        confirmed_version: script.version.clone(),
+        acknowledge_unverified: true,
+    };
+    match service.install(request) {
+        Ok(outcome) => ok(
+            "脚本已安装。",
+            script_market_payload_from_compatibility(
+                &compatibility,
+                &outcome.workspace,
+                user_script_inventory(),
+                index_url,
+                "ok",
+                "脚本已安装。",
+            ),
+        ),
+        Err(error) => {
+            let message = format!("安装脚本失败：{}", error.detail());
+            failed(
+                &message,
+                script_market_payload_from_compatibility(
+                    &compatibility,
+                    &local,
+                    user_script_inventory(),
+                    index_url,
+                    "failed",
+                    &message,
+                ),
+            )
+        }
+    }
+}
+
 fn user_script_inventory() -> Value {
     default_user_script_manager()
         .inventory()
@@ -2958,12 +3080,12 @@ fn user_script_inventory() -> Value {
         })
 }
 
-fn failed_script_market_payload(message: &str) -> ScriptMarketPayload {
+fn failed_script_market_payload(message: &str, index_url: &str) -> ScriptMarketPayload {
     ScriptMarketPayload {
         market: json!({
             "status": "failed",
             "message": message,
-            "indexUrl": script_market::DEFAULT_MARKET_INDEX_URL,
+            "indexUrl": index_url,
             "updatedAt": "",
             "scripts": []
         }),
@@ -2971,15 +3093,17 @@ fn failed_script_market_payload(message: &str) -> ScriptMarketPayload {
     }
 }
 
-fn script_market_payload_from_manifest(
-    manifest: &ScriptMarketManifest,
+fn script_market_payload_from_compatibility(
+    compatibility: &codex_plus_manager_service::ScriptMarketCompatibilityWorkspace,
+    local: &codex_plus_manager_service::UserScriptWorkspace,
+    user_scripts: Value,
+    index_url: &str,
     status: &str,
     message: &str,
 ) -> ScriptMarketPayload {
-    let user_scripts = user_script_inventory();
-    let installed = installed_market_versions(&user_scripts);
-    let scripts = manifest
-        .scripts
+    let installed = installed_market_versions(local);
+    let scripts = compatibility
+        .scripts()
         .iter()
         .map(|script| market_script_payload(script, &installed))
         .collect::<Vec<_>>();
@@ -2987,39 +3111,28 @@ fn script_market_payload_from_manifest(
         market: json!({
             "status": status,
             "message": message,
-            "indexUrl": script_market::DEFAULT_MARKET_INDEX_URL,
-            "updatedAt": manifest.updated_at.clone().unwrap_or_default(),
+            "indexUrl": index_url,
+            "updatedAt": compatibility.workspace.updated_at.clone().unwrap_or_default(),
             "scripts": scripts
         }),
         user_scripts,
     }
 }
 
-fn installed_market_versions(user_scripts: &Value) -> BTreeMap<String, String> {
-    user_scripts
-        .get("scripts")
-        .and_then(Value::as_array)
-        .map(|scripts| {
-            scripts
-                .iter()
-                .filter_map(|script| {
-                    let id = script.get("market_id").and_then(Value::as_str)?;
-                    if id.is_empty() {
-                        return None;
-                    }
-                    let version = script
-                        .get("version")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    Some((id.to_string(), version))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+fn installed_market_versions(
+    local: &codex_plus_manager_service::UserScriptWorkspace,
+) -> BTreeMap<String, String> {
+    local
+        .scripts
+        .iter()
+        .filter_map(|script| Some((script.market_id.clone()?, script.version.clone()?)))
+        .collect()
 }
 
-fn market_script_payload(script: &MarketScript, installed: &BTreeMap<String, String>) -> Value {
+fn market_script_payload(
+    script: &codex_plus_core::script_market::MarketScript,
+    installed: &BTreeMap<String, String>,
+) -> Value {
     let installed_version = installed.get(&script.id).cloned().unwrap_or_default();
     let is_installed = !installed_version.is_empty();
     json!({
@@ -3048,16 +3161,7 @@ fn default_user_script_manager() -> UserScriptManager {
 }
 
 fn user_scripts_config_dir() -> PathBuf {
-    if cfg!(windows) {
-        if let Some(roaming) = std::env::var_os("APPDATA") {
-            return PathBuf::from(roaming).join("Codex++");
-        }
-    }
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".config")))
-        .unwrap_or_else(|| PathBuf::from(".config"))
-        .join("Codex++")
+    codex_plus_core::user_scripts::default_user_scripts_config_dir()
 }
 
 fn builtin_user_scripts_dir() -> PathBuf {
@@ -3492,6 +3596,67 @@ fn default_log_lines() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_plus_core::script_market::{MarketScript, ScriptMarketManifest};
+
+    #[test]
+    fn user_script_market_adapter_preserves_react_json_contract() {
+        let compatibility =
+            codex_plus_manager_service::ScriptMarketCompatibilityWorkspace::from_manifest(
+                ScriptMarketManifest {
+                    version: 1,
+                    updated_at: Some("2026-07-18T00:00:00Z".to_string()),
+                    scripts: vec![MarketScript {
+                        id: "demo".to_string(),
+                        name: "Demo".to_string(),
+                        description: "Useful".to_string(),
+                        version: "2".to_string(),
+                        author: "Fixture".to_string(),
+                        tags: vec!["ui".to_string()],
+                        homepage: "https://example.invalid/demo".to_string(),
+                        script_url: "https://example.invalid/demo.js".to_string(),
+                        sha256: String::new(),
+                    }],
+                },
+            );
+        let local = codex_plus_manager_service::UserScriptWorkspace {
+            revision: codex_plus_manager_service::UserScriptRevision::from_digest([1; 32]),
+            globally_enabled: true,
+            scripts: vec![codex_plus_manager_service::UserScriptSummary {
+                key: "user:market-demo.js".to_string(),
+                name: "Demo".to_string(),
+                origin: codex_plus_manager_service::UserScriptOrigin::User,
+                enabled: true,
+                status: codex_plus_manager_service::UserScriptStatus::NotLoaded,
+                market_id: Some("demo".to_string()),
+                version: Some("1".to_string()),
+            }],
+        };
+        let payload = script_market_payload_from_compatibility(
+            &compatibility,
+            &local,
+            json!({"enabled": true, "scripts": []}),
+            "https://market.example.invalid/index.json",
+            "ok",
+            "refreshed",
+        );
+        let serialized = serde_json::to_value(payload).unwrap();
+
+        assert!(serialized.get("market").is_some());
+        assert!(serialized.get("user_scripts").is_some());
+        for key in ["indexUrl", "updatedAt", "scripts"] {
+            assert!(serialized["market"].get(key).is_some());
+        }
+        for key in ["installedVersion", "updateAvailable"] {
+            assert!(serialized["market"]["scripts"][0].get(key).is_some());
+        }
+        assert_eq!(serialized["market"]["scripts"][0]["installed"], true);
+        assert_eq!(serialized["market"]["scripts"][0]["installedVersion"], "1");
+        assert_eq!(serialized["market"]["scripts"][0]["updateAvailable"], true);
+        assert_eq!(
+            serialized["market"]["indexUrl"],
+            "https://market.example.invalid/index.json"
+        );
+    }
 
     #[test]
     fn session_and_provider_sync_adapters_preserve_compatibility_fields() {
