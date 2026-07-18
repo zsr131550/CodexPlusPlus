@@ -914,7 +914,7 @@ fn install_market_script_writes_file_and_records_metadata() {
 }
 
 #[test]
-fn install_market_script_ignores_checksum_mismatch_and_replaces_existing_file() {
+fn install_market_script_rejects_checksum_mismatch_and_preserves_existing_file() {
     let temp = tempfile::tempdir().unwrap();
     let user_dir = temp.path().join("user");
     std::fs::create_dir_all(&user_dir).unwrap();
@@ -933,15 +933,17 @@ fn install_market_script_ignores_checksum_mismatch_and_replaces_existing_file() 
         tags: Vec::new(),
         homepage: String::new(),
         script_url: "https://example.com/demo.js".to_string(),
-        sha256: "0000".to_string(),
+        sha256: "0".repeat(64),
     };
 
-    codex_plus_core::script_market::install_market_script_content(&manager, &script, b"new")
-        .unwrap();
+    let error =
+        codex_plus_core::script_market::install_market_script_content(&manager, &script, b"new")
+            .unwrap_err();
 
+    assert!(error.to_string().contains("digest does not match"));
     assert_eq!(
         std::fs::read_to_string(user_dir.join("market-demo.js")).unwrap(),
-        "new"
+        "old"
     );
 }
 
