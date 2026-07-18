@@ -4144,11 +4144,10 @@ mod tests {
     fn env_conflict_commands_ignore_codex_home_and_remove_openai_vars() {
         let test_openai_name = "OPENAI_CODEX_PLUS_ENV_CONFLICT_TEST";
         let previous_openai = std::env::var_os(test_openai_name);
-        let previous_codex_home = std::env::var_os("CODEX_HOME");
         let temp = tempfile::tempdir().unwrap();
+        let codex_home_guard = CodexHomeEnvGuard::set(temp.path());
         unsafe {
             std::env::set_var(test_openai_name, "sk-test");
-            std::env::set_var("CODEX_HOME", temp.path());
         }
 
         let check = check_env_conflicts();
@@ -4184,17 +4183,13 @@ mod tests {
                 Some(value) => std::env::set_var(test_openai_name, value),
                 None => std::env::remove_var(test_openai_name),
             }
-            match previous_codex_home {
-                Some(value) => std::env::set_var("CODEX_HOME", value),
-                None => std::env::remove_var("CODEX_HOME"),
-            }
         }
+        drop(codex_home_guard);
     }
 
     #[test]
     fn delete_local_session_falls_back_when_requested_db_no_longer_contains_thread() {
         let temp = tempfile::tempdir().unwrap();
-        let previous_codex_home = std::env::var_os("CODEX_HOME");
         let codex_home = temp.path().join("codex-home");
         let sqlite_dir = codex_home.join("sqlite");
         std::fs::create_dir_all(&sqlite_dir).unwrap();
@@ -4225,21 +4220,14 @@ mod tests {
             .unwrap();
         drop(active);
 
-        unsafe {
-            std::env::set_var("CODEX_HOME", &codex_home);
-        }
-        let result = delete_local_session(DeleteLocalSessionRequest {
-            session_id: "t1".to_string(),
-            title: "Active Thread".to_string(),
-            db_path: Some(stale_db.to_string_lossy().to_string()),
-        });
-        unsafe {
-            if let Some(value) = previous_codex_home {
-                std::env::set_var("CODEX_HOME", value);
-            } else {
-                std::env::remove_var("CODEX_HOME");
-            }
-        }
+        let result = {
+            let _codex_home_guard = CodexHomeEnvGuard::set(&codex_home);
+            delete_local_session(DeleteLocalSessionRequest {
+                session_id: "t1".to_string(),
+                title: "Active Thread".to_string(),
+                db_path: Some(stale_db.to_string_lossy().to_string()),
+            })
+        };
 
         assert_eq!(result.status, "ok");
         assert_eq!(
@@ -4260,7 +4248,6 @@ mod tests {
     #[test]
     fn list_local_sessions_deduplicates_threads_across_current_and_legacy_dbs() {
         let temp = tempfile::tempdir().unwrap();
-        let previous_codex_home = std::env::var_os("CODEX_HOME");
         let codex_home = temp.path().join("codex-home");
         let sqlite_dir = codex_home.join("sqlite");
         std::fs::create_dir_all(&sqlite_dir).unwrap();
@@ -4269,11 +4256,10 @@ mod tests {
         create_minimal_thread_db(&current_db, "t1", "Current Copy", 100);
         create_minimal_thread_db(&legacy_db, "t1", "Legacy Copy", 200);
 
-        unsafe {
-            std::env::set_var("CODEX_HOME", &codex_home);
-        }
-        let result = list_local_sessions();
-        restore_codex_home(previous_codex_home);
+        let result = {
+            let _codex_home_guard = CodexHomeEnvGuard::set(&codex_home);
+            list_local_sessions()
+        };
 
         assert_eq!(result.status, "ok");
         assert_eq!(result.payload.sessions.len(), 1);
@@ -4288,7 +4274,6 @@ mod tests {
     #[test]
     fn delete_local_session_removes_duplicate_threads_from_all_candidate_dbs() {
         let temp = tempfile::tempdir().unwrap();
-        let previous_codex_home = std::env::var_os("CODEX_HOME");
         let codex_home = temp.path().join("codex-home");
         let sqlite_dir = codex_home.join("sqlite");
         std::fs::create_dir_all(&sqlite_dir).unwrap();
@@ -4297,15 +4282,14 @@ mod tests {
         create_minimal_thread_db(&current_db, "t1", "Current Copy", 100);
         create_minimal_thread_db(&legacy_db, "t1", "Legacy Copy", 200);
 
-        unsafe {
-            std::env::set_var("CODEX_HOME", &codex_home);
-        }
-        let result = delete_local_session(DeleteLocalSessionRequest {
-            session_id: "t1".to_string(),
-            title: "Legacy Copy".to_string(),
-            db_path: Some(legacy_db.to_string_lossy().to_string()),
-        });
-        restore_codex_home(previous_codex_home);
+        let result = {
+            let _codex_home_guard = CodexHomeEnvGuard::set(&codex_home);
+            delete_local_session(DeleteLocalSessionRequest {
+                session_id: "t1".to_string(),
+                title: "Legacy Copy".to_string(),
+                db_path: Some(legacy_db.to_string_lossy().to_string()),
+            })
+        };
 
         assert_eq!(result.status, "ok");
         assert_eq!(thread_count(&current_db, "t1"), 0);
@@ -4334,12 +4318,37 @@ mod tests {
         .unwrap()
     }
 
-    fn restore_codex_home(previous: Option<std::ffi::OsString>) {
-        unsafe {
-            if let Some(value) = previous {
-                std::env::set_var("CODEX_HOME", value);
-            } else {
-                std::env::remove_var("CODEX_HOME");
+    static CODEX_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct CodexHomeEnvGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl CodexHomeEnvGuard {
+        fn set(path: &Path) -> Self {
+            let lock = CODEX_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = std::env::var_os("CODEX_HOME");
+            unsafe {
+                std::env::set_var("CODEX_HOME", path);
+            }
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for CodexHomeEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(value) = self.previous.take() {
+                    std::env::set_var("CODEX_HOME", value);
+                } else {
+                    std::env::remove_var("CODEX_HOME");
+                }
             }
         }
     }
