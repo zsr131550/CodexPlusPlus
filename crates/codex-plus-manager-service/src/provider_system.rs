@@ -4,6 +4,7 @@ use std::sync::Arc;
 use codex_plus_core::relay_config::{relay_profile_base_url, test_relay_profile};
 use codex_plus_core::settings::{BackendSettings, SettingsStore};
 use codex_plus_core::settings::{RelayProfile, RelayProtocol};
+use codex_plus_data::{BackupStore, SQLiteStorageAdapter};
 use serde_json::Value;
 
 use crate::{
@@ -227,6 +228,116 @@ impl ProviderActivationEnvironment for SystemProviderEnvironment {
 
     fn codex_home(&self) -> &Path {
         &self.codex_home
+    }
+}
+
+impl crate::SessionEnvironment for SystemProviderEnvironment {
+    fn session_db_paths(&self) -> Vec<PathBuf> {
+        codex_plus_core::codex_sqlite::codex_session_db_paths_from_home(&self.codex_home)
+    }
+
+    fn list_local_sessions(
+        &self,
+        db_path: &Path,
+    ) -> anyhow::Result<Vec<codex_plus_data::LocalSession>> {
+        SQLiteStorageAdapter::new(db_path, BackupStore::new(&self.backup_dir)).list_local_sessions()
+    }
+
+    fn delete_local_from_paths(
+        &self,
+        db_paths: Vec<PathBuf>,
+        session: &codex_plus_core::models::SessionRef,
+    ) -> codex_plus_core::models::DeleteResult {
+        codex_plus_data::delete_local_from_paths(
+            db_paths,
+            BackupStore::new(&self.backup_dir),
+            session,
+        )
+    }
+}
+
+impl crate::ProviderSyncEnvironment for SystemProviderEnvironment {
+    fn load_provider_sync_settings(&self) -> anyhow::Result<BackendSettings> {
+        self.settings.load()
+    }
+
+    fn load_provider_sync_targets(&self) -> codex_plus_data::ProviderSyncTargetList {
+        codex_plus_data::load_provider_sync_targets(Some(&self.codex_home))
+    }
+
+    fn run_provider_sync(&self, target: &str) -> codex_plus_data::ProviderSyncResult {
+        codex_plus_data::run_provider_sync_with_target(Some(&self.codex_home), Some(target))
+    }
+
+    fn save_provider_sync_enabled(
+        &self,
+        expected: &crate::ProviderSyncRevision,
+        enabled: bool,
+    ) -> Result<(), crate::ProviderSyncError> {
+        let _lock =
+            codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&self.codex_home)
+                .map_err(|error| {
+                    crate::ProviderSyncError::with_compatibility_detail(
+                        crate::ProviderSyncErrorKind::SettingsConflict,
+                        format!("{error:#}"),
+                    )
+                })?;
+        let expected = expected.clone();
+        let updated = self
+            .settings
+            .update_if(
+                serde_json::json!({"providerSyncEnabled": enabled}),
+                move |current| crate::provider_sync::provider_sync_revision(current) == expected,
+            )
+            .map_err(|error| {
+                crate::ProviderSyncError::with_compatibility_detail(
+                    crate::ProviderSyncErrorKind::SettingsConflict,
+                    format!("{error:#}"),
+                )
+            })?;
+        if updated.is_none() {
+            return Err(crate::ProviderSyncError::new(
+                crate::ProviderSyncErrorKind::SettingsConflict,
+            ));
+        }
+        Ok(())
+    }
+
+    fn save_provider_sync_target(&self, target: &str) -> Result<(), crate::ProviderSyncError> {
+        let target = target.trim();
+        if target.is_empty() {
+            return Err(crate::ProviderSyncError::new(
+                crate::ProviderSyncErrorKind::SyncFailed,
+            ));
+        }
+        let _lock =
+            codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&self.codex_home)
+                .map_err(|error| {
+                    crate::ProviderSyncError::with_compatibility_detail(
+                        crate::ProviderSyncErrorKind::SyncFailed,
+                        format!("{error:#}"),
+                    )
+                })?;
+        let mut settings = self.settings.load().map_err(|error| {
+            crate::ProviderSyncError::with_compatibility_detail(
+                crate::ProviderSyncErrorKind::SyncFailed,
+                format!("{error:#}"),
+            )
+        })?;
+        settings.provider_sync_last_selected_provider = target.to_owned();
+        let mut saved =
+            crate::provider_sync::normalized_provider_ids(&settings.provider_sync_saved_providers);
+        if !saved.iter().any(|item| item == target) {
+            saved.push(target.to_owned());
+        }
+        saved.sort();
+        settings.provider_sync_saved_providers = saved;
+        self.settings.save(&settings).map_err(|error| {
+            crate::ProviderSyncError::with_compatibility_detail(
+                crate::ProviderSyncErrorKind::SyncFailed,
+                format!("{error:#}"),
+            )
+        })
     }
 }
 

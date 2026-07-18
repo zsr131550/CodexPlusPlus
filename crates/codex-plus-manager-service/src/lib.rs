@@ -8,8 +8,10 @@ mod provider_error;
 mod provider_import;
 mod provider_network;
 mod provider_presets;
+mod provider_sync;
 mod provider_system;
 mod relay_environment;
+mod sessions;
 mod system;
 
 pub use context_tools::{
@@ -65,10 +67,21 @@ pub use provider_presets::{
     ProviderPreset, ProviderPresetCatalogError, ProviderPresetCatalogErrorKind,
     ProviderPresetCategory, apply_provider_preset, parse_provider_presets, provider_presets,
 };
+pub use provider_sync::{
+    ProviderSyncEnvironment, ProviderSyncError, ProviderSyncErrorKind, ProviderSyncOutcome,
+    ProviderSyncRevision, ProviderSyncService, ProviderSyncSource, ProviderSyncWorkspace,
+    RunProviderSync, SetProviderAutoRepair,
+};
 pub use provider_system::SystemProviderEnvironment;
 pub use relay_environment::{
     EnvironmentRemovalOutcome, RelayEnvironmentEnvironment, RelayEnvironmentError,
     RelayEnvironmentErrorKind, RelayEnvironmentService, RelayEnvironmentSource,
     RelayEnvironmentWorkspace, RemoveEnvironmentConflicts,
+};
+pub use sessions::{
+    CompatibilityUndoToken, DeleteSessionSelection, DeleteSessions, SessionDeleteBatchOutcome,
+    SessionDeleteOutcome, SessionDeleteResult, SessionEnvironment, SessionError, SessionErrorKind,
+    SessionLoadResult, SessionReadIssue, SessionReadIssueKind, SessionRevision, SessionService,
+    SessionSource, SessionSummary, SessionWorkspace,
 };
 pub use system::{SystemOverviewEnvironment, SystemOverviewSource};
