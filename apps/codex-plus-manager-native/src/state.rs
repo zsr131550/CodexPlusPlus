@@ -2,8 +2,12 @@ use std::sync::Arc;
 
 use codex_plus_manager_service::OverviewSnapshot;
 
+pub mod environment;
+pub mod import;
 pub mod provider;
 
+use environment::EnvironmentViewState;
+use import::ImportViewState;
 use provider::ProviderViewState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -11,6 +15,7 @@ pub enum Route {
     #[default]
     Overview,
     Providers,
+    Environment,
     About,
 }
 
@@ -81,6 +86,21 @@ pub struct AppState {
     pub route: Route,
     pub overview: OverviewViewState,
     pub provider: ProviderViewState,
+    pub provider_import: ImportViewState,
+    pub environment: EnvironmentViewState,
+}
+
+impl AppState {
+    pub fn apply_imported_provider_workspace(
+        &mut self,
+        workspace: Arc<codex_plus_manager_service::ProviderWorkspace>,
+    ) -> bool {
+        if self.provider.is_dirty() {
+            return false;
+        }
+        let request_id = self.provider.begin_load();
+        self.provider.apply_load_response(request_id, Ok(workspace))
+    }
 }
 
 #[cfg(test)]
@@ -165,10 +185,12 @@ mod tests {
     }
 
     #[test]
-    fn app_state_defaults_to_overview_and_supports_only_milestone_routes() {
+    fn app_state_defaults_to_overview_and_supports_native_routes() {
         let mut app = AppState::default();
         assert_eq!(app.route, Route::Overview);
 
+        app.route = Route::Environment;
+        assert_eq!(app.route, Route::Environment);
         app.route = Route::About;
         assert_eq!(app.route, Route::About);
     }

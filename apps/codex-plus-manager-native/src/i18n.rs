@@ -57,10 +57,74 @@ pub enum TextKey {
     Renderer,
     License,
     LastUpdated,
+    Environment,
+    EnvironmentSubtitle,
+    ImportProviders,
+    ImportFromCcs,
+    ImportSource,
+    Importable,
+    Duplicates,
+    Duplicate,
+    ImportNew,
+    Cancel,
+    PendingImport,
+    ConfirmImport,
+    DismissImport,
+    RefreshPendingImport,
+    ApiKeyPresent,
+    ApiKeyMissing,
+    ProviderDraftDirty,
+    ImportSucceeded,
+    NoImportableProviders,
+    RelayDiagnostics,
+    TunMode,
+    ProxyEnvironment,
+    CodexEnvFile,
+    OpenAiConflicts,
+    Enabled,
+    Disabled,
+    Present,
+    NotPresent,
+    Process,
+    User,
+    System,
+    Removed,
+    Failed,
+    CleanupSelected,
+    ConfirmCleanup,
+    CleanupSucceeded,
+    CleanupPartial,
+    BackupCreated,
+    NoBackup,
+    RemainingConflicts,
+    NoConflicts,
+    InspectionFailed,
+    CleanupFailed,
+    SourceChanged,
+    EnvironmentChanged,
+    PendingChanged,
+    ProviderChanged,
+    WireApi,
+    RelayMode,
+    BaseUrl,
+    ImportedCount,
+    FailureCount,
+    SelectAtLeastOne,
+    InProgress,
+    ReviewPendingImport,
+    EnvironmentHealthy,
+    EnvironmentIssues,
+    CleanupConfirmationTitle,
+    CcsImportTitle,
+    PendingImportTitle,
+    RefreshEnvironment,
+    EnvironmentWorkerStopped,
+    ImportWorkerStopped,
+    RetryInspection,
 }
 
 impl TextKey {
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 106] = [
         Self::AppName,
         Self::Overview,
         Self::Providers,
@@ -103,6 +167,70 @@ impl TextKey {
         Self::Renderer,
         Self::License,
         Self::LastUpdated,
+        Self::Environment,
+        Self::EnvironmentSubtitle,
+        Self::ImportProviders,
+        Self::ImportFromCcs,
+        Self::ImportSource,
+        Self::Importable,
+        Self::Duplicates,
+        Self::Duplicate,
+        Self::ImportNew,
+        Self::Cancel,
+        Self::PendingImport,
+        Self::ConfirmImport,
+        Self::DismissImport,
+        Self::RefreshPendingImport,
+        Self::ApiKeyPresent,
+        Self::ApiKeyMissing,
+        Self::ProviderDraftDirty,
+        Self::ImportSucceeded,
+        Self::NoImportableProviders,
+        Self::RelayDiagnostics,
+        Self::TunMode,
+        Self::ProxyEnvironment,
+        Self::CodexEnvFile,
+        Self::OpenAiConflicts,
+        Self::Enabled,
+        Self::Disabled,
+        Self::Present,
+        Self::NotPresent,
+        Self::Process,
+        Self::User,
+        Self::System,
+        Self::Removed,
+        Self::Failed,
+        Self::CleanupSelected,
+        Self::ConfirmCleanup,
+        Self::CleanupSucceeded,
+        Self::CleanupPartial,
+        Self::BackupCreated,
+        Self::NoBackup,
+        Self::RemainingConflicts,
+        Self::NoConflicts,
+        Self::InspectionFailed,
+        Self::CleanupFailed,
+        Self::SourceChanged,
+        Self::EnvironmentChanged,
+        Self::PendingChanged,
+        Self::ProviderChanged,
+        Self::WireApi,
+        Self::RelayMode,
+        Self::BaseUrl,
+        Self::ImportedCount,
+        Self::FailureCount,
+        Self::SelectAtLeastOne,
+        Self::InProgress,
+        Self::ReviewPendingImport,
+        Self::EnvironmentHealthy,
+        Self::EnvironmentIssues,
+        Self::CleanupConfirmationTitle,
+        Self::CcsImportTitle,
+        Self::PendingImportTitle,
+        Self::RefreshEnvironment,
+        Self::EnvironmentWorkerStopped,
+        Self::ImportWorkerStopped,
+        Self::RetryInspection,
     ];
 }
 
@@ -111,7 +239,7 @@ struct CatalogEntry {
     en: &'static str,
 }
 
-const CATALOG: [CatalogEntry; 42] = [
+const CATALOG: [CatalogEntry; 106] = [
     CatalogEntry {
         zh: "Codex++",
         en: "Codex++",
@@ -280,6 +408,262 @@ const CATALOG: [CatalogEntry; 42] = [
         zh: "最近更新",
         en: "Last updated",
     },
+    CatalogEntry {
+        zh: "环境检查",
+        en: "Environment",
+    },
+    CatalogEntry {
+        zh: "检查影响供应商连接的本机环境",
+        en: "Inspect the local environment affecting provider connections",
+    },
+    CatalogEntry {
+        zh: "导入供应商",
+        en: "Import providers",
+    },
+    CatalogEntry {
+        zh: "从 cc-switch 导入",
+        en: "Import from cc-switch",
+    },
+    CatalogEntry {
+        zh: "导入来源",
+        en: "Import source",
+    },
+    CatalogEntry {
+        zh: "可导入",
+        en: "Importable",
+    },
+    CatalogEntry {
+        zh: "重复项",
+        en: "Duplicates",
+    },
+    CatalogEntry {
+        zh: "已存在",
+        en: "Duplicate",
+    },
+    CatalogEntry {
+        zh: "导入新增项",
+        en: "Import new",
+    },
+    CatalogEntry {
+        zh: "取消",
+        en: "Cancel",
+    },
+    CatalogEntry {
+        zh: "待处理导入",
+        en: "Pending import",
+    },
+    CatalogEntry {
+        zh: "确认导入",
+        en: "Confirm import",
+    },
+    CatalogEntry {
+        zh: "放弃导入",
+        en: "Dismiss import",
+    },
+    CatalogEntry {
+        zh: "刷新待确认导入",
+        en: "Refresh pending import",
+    },
+    CatalogEntry {
+        zh: "已提供 API 密钥",
+        en: "API key provided",
+    },
+    CatalogEntry {
+        zh: "未提供 API 密钥",
+        en: "No API key provided",
+    },
+    CatalogEntry {
+        zh: "请先保存或放弃供应商草稿。",
+        en: "Save or discard the provider draft first.",
+    },
+    CatalogEntry {
+        zh: "供应商导入完成",
+        en: "Provider import completed",
+    },
+    CatalogEntry {
+        zh: "没有新的供应商可导入",
+        en: "No new providers to import",
+    },
+    CatalogEntry {
+        zh: "中转环境诊断",
+        en: "Relay environment diagnostics",
+    },
+    CatalogEntry {
+        zh: "TUN 模式",
+        en: "TUN mode",
+    },
+    CatalogEntry {
+        zh: "代理环境变量",
+        en: "Proxy environment",
+    },
+    CatalogEntry {
+        zh: "Codex .env 文件",
+        en: "Codex .env file",
+    },
+    CatalogEntry {
+        zh: "OPENAI 环境冲突",
+        en: "OPENAI environment conflicts",
+    },
+    CatalogEntry {
+        zh: "已启用",
+        en: "Enabled",
+    },
+    CatalogEntry {
+        zh: "未启用",
+        en: "Disabled",
+    },
+    CatalogEntry {
+        zh: "存在",
+        en: "Present",
+    },
+    CatalogEntry {
+        zh: "不存在",
+        en: "Not present",
+    },
+    CatalogEntry {
+        zh: "进程",
+        en: "Process",
+    },
+    CatalogEntry {
+        zh: "用户",
+        en: "User",
+    },
+    CatalogEntry {
+        zh: "系统",
+        en: "System",
+    },
+    CatalogEntry {
+        zh: "已删除",
+        en: "Removed",
+    },
+    CatalogEntry {
+        zh: "失败",
+        en: "Failed",
+    },
+    CatalogEntry {
+        zh: "清理所选项",
+        en: "Clean selected",
+    },
+    CatalogEntry {
+        zh: "确认清理",
+        en: "Confirm cleanup",
+    },
+    CatalogEntry {
+        zh: "环境冲突清理完成",
+        en: "Environment cleanup completed",
+    },
+    CatalogEntry {
+        zh: "部分环境冲突未能清理",
+        en: "Some environment conflicts could not be removed",
+    },
+    CatalogEntry {
+        zh: "已创建元数据备份",
+        en: "Metadata backup created",
+    },
+    CatalogEntry {
+        zh: "无需备份",
+        en: "No backup required",
+    },
+    CatalogEntry {
+        zh: "剩余冲突",
+        en: "Remaining conflicts",
+    },
+    CatalogEntry {
+        zh: "未检测到冲突",
+        en: "No conflicts detected",
+    },
+    CatalogEntry {
+        zh: "环境检查失败",
+        en: "Environment inspection failed",
+    },
+    CatalogEntry {
+        zh: "环境清理失败",
+        en: "Environment cleanup failed",
+    },
+    CatalogEntry {
+        zh: "导入来源已变化，请重新检查。",
+        en: "The import source changed. Inspect it again.",
+    },
+    CatalogEntry {
+        zh: "环境状态已变化，请重新检查。",
+        en: "The environment changed. Inspect it again.",
+    },
+    CatalogEntry {
+        zh: "待处理导入已变化，请重新读取。",
+        en: "The pending import changed. Load it again.",
+    },
+    CatalogEntry {
+        zh: "供应商配置已变化，请重新加载。",
+        en: "Provider settings changed. Reload them.",
+    },
+    CatalogEntry {
+        zh: "接口协议",
+        en: "Wire API",
+    },
+    CatalogEntry {
+        zh: "中转模式",
+        en: "Relay mode",
+    },
+    CatalogEntry {
+        zh: "基础地址",
+        en: "Base URL",
+    },
+    CatalogEntry {
+        zh: "已导入数量",
+        en: "Imported count",
+    },
+    CatalogEntry {
+        zh: "失败数量",
+        en: "Failure count",
+    },
+    CatalogEntry {
+        zh: "请至少选择一个冲突项。",
+        en: "Select at least one conflict.",
+    },
+    CatalogEntry {
+        zh: "正在处理",
+        en: "In progress",
+    },
+    CatalogEntry {
+        zh: "查看待处理导入",
+        en: "Review pending import",
+    },
+    CatalogEntry {
+        zh: "环境检查通过",
+        en: "Environment checks passed",
+    },
+    CatalogEntry {
+        zh: "检测到环境问题",
+        en: "Environment issues detected",
+    },
+    CatalogEntry {
+        zh: "确认清理环境变量",
+        en: "Confirm environment cleanup",
+    },
+    CatalogEntry {
+        zh: "cc-switch 供应商导入",
+        en: "cc-switch provider import",
+    },
+    CatalogEntry {
+        zh: "确认待处理供应商导入",
+        en: "Confirm pending provider import",
+    },
+    CatalogEntry {
+        zh: "刷新环境检查",
+        en: "Refresh environment checks",
+    },
+    CatalogEntry {
+        zh: "环境检查后台服务已停止。",
+        en: "The environment worker has stopped.",
+    },
+    CatalogEntry {
+        zh: "供应商导入后台服务已停止。",
+        en: "The provider import worker has stopped.",
+    },
+    CatalogEntry {
+        zh: "重新检查",
+        en: "Inspect again",
+    },
 ];
 
 pub fn text(locale: Locale, key: TextKey) -> &'static str {
@@ -295,8 +679,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_milestone_one_key_has_both_locales() {
-        assert_eq!(TextKey::ALL.len(), 42);
+    fn every_native_manager_key_has_both_locales() {
+        assert_eq!(TextKey::ALL.len(), CATALOG.len());
         for key in TextKey::ALL {
             assert!(
                 !text(Locale::ZhCn, key).trim().is_empty(),

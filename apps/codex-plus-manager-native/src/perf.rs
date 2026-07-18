@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-const SCRIPT_DURATION: Duration = Duration::from_secs(7);
+const SCRIPT_DURATION: Duration = Duration::from_secs(12);
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const FINAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -32,7 +32,16 @@ pub enum PerfScriptAction {
     CancelLiveConfirmation,
     ConfirmLiveMutation,
     ToggleProviderList,
+    NavigateEnvironment,
+    RefreshEnvironment,
+    SelectFirstEnvironmentConflict,
+    RequestEnvironmentCleanup,
+    CancelEnvironmentCleanup,
+    OpenCcsImport,
+    CloseCcsImport,
     NavigateOverview,
+    RefreshPendingImport,
+    DismissPendingImport,
 }
 
 enum PerfEvent {
@@ -134,6 +143,14 @@ impl PerfRecorder {
                 egui::Key::F15,
                 egui::Key::F16,
                 egui::Key::F17,
+                egui::Key::F18,
+                egui::Key::F19,
+                egui::Key::F20,
+                egui::Key::F21,
+                egui::Key::F22,
+                egui::Key::F23,
+                egui::Key::F24,
+                egui::Key::F25,
             ]
             .into_iter()
             .find(|key| input.key_pressed(*key))
@@ -209,7 +226,7 @@ fn valid_samples(samples: &[f64]) -> Vec<f64> {
 }
 
 fn script_step(index: usize) -> Option<(Duration, egui::Key)> {
-    const STEPS: [(u64, egui::Key); 13] = [
+    const STEPS: [(u64, egui::Key); 23] = [
         (500, egui::Key::F5),
         (1_000, egui::Key::F6),
         (1_500, egui::Key::F7),
@@ -223,6 +240,16 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key)> {
         (5_500, egui::Key::F15),
         (6_000, egui::Key::F16),
         (6_500, egui::Key::F17),
+        (7_000, egui::Key::F18),
+        (7_500, egui::Key::F19),
+        (8_000, egui::Key::F20),
+        (8_500, egui::Key::F21),
+        (9_000, egui::Key::F22),
+        (9_500, egui::Key::F23),
+        (10_000, egui::Key::F24),
+        (10_500, egui::Key::F25),
+        (11_000, egui::Key::F26),
+        (11_500, egui::Key::F27),
     ];
     STEPS
         .get(index)
@@ -241,7 +268,17 @@ fn script_action_for_key(key: egui::Key) -> Option<PerfScriptAction> {
         egui::Key::F12 => Some(PerfScriptAction::CancelLiveConfirmation),
         egui::Key::F14 => Some(PerfScriptAction::ConfirmLiveMutation),
         egui::Key::F15 | egui::Key::F16 => Some(PerfScriptAction::ToggleProviderList),
-        egui::Key::F17 => Some(PerfScriptAction::NavigateOverview),
+        egui::Key::F17 => Some(PerfScriptAction::NavigateEnvironment),
+        egui::Key::F18 => Some(PerfScriptAction::RefreshEnvironment),
+        egui::Key::F19 => Some(PerfScriptAction::SelectFirstEnvironmentConflict),
+        egui::Key::F20 => Some(PerfScriptAction::RequestEnvironmentCleanup),
+        egui::Key::F21 => Some(PerfScriptAction::CancelEnvironmentCleanup),
+        egui::Key::F22 => Some(PerfScriptAction::NavigateProviders),
+        egui::Key::F23 => Some(PerfScriptAction::OpenCcsImport),
+        egui::Key::F24 => Some(PerfScriptAction::CloseCcsImport),
+        egui::Key::F25 => Some(PerfScriptAction::NavigateOverview),
+        egui::Key::F26 => Some(PerfScriptAction::RefreshPendingImport),
+        egui::Key::F27 => Some(PerfScriptAction::DismissPendingImport),
         _ => None,
     }
 }
@@ -259,7 +296,16 @@ impl PerfScriptAction {
             Self::CancelLiveConfirmation => "cancel_live_confirmation",
             Self::ConfirmLiveMutation => "confirm_live_mutation",
             Self::ToggleProviderList => "toggle_provider_list",
+            Self::NavigateEnvironment => "navigate_environment",
+            Self::RefreshEnvironment => "refresh_environment",
+            Self::SelectFirstEnvironmentConflict => "select_environment_conflict",
+            Self::RequestEnvironmentCleanup => "request_environment_cleanup",
+            Self::CancelEnvironmentCleanup => "cancel_environment_cleanup",
+            Self::OpenCcsImport => "open_ccs_import",
+            Self::CloseCcsImport => "close_ccs_import",
             Self::NavigateOverview => "navigate_overview",
+            Self::RefreshPendingImport => "refresh_pending_import",
+            Self::DismissPendingImport => "dismiss_pending_import",
         }
     }
 }
@@ -396,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_perf_script_has_the_approved_order_and_timing() {
+    fn native_perf_script_covers_provider_import_and_environment_paths() {
         let expected = [
             (500, egui::Key::F5, PerfScriptAction::NavigateProviders),
             (1_000, egui::Key::F6, PerfScriptAction::SelectNextProvider),
@@ -414,7 +460,37 @@ mod tests {
             (5_000, egui::Key::F14, PerfScriptAction::ConfirmLiveMutation),
             (5_500, egui::Key::F15, PerfScriptAction::ToggleProviderList),
             (6_000, egui::Key::F16, PerfScriptAction::ToggleProviderList),
-            (6_500, egui::Key::F17, PerfScriptAction::NavigateOverview),
+            (6_500, egui::Key::F17, PerfScriptAction::NavigateEnvironment),
+            (7_000, egui::Key::F18, PerfScriptAction::RefreshEnvironment),
+            (
+                7_500,
+                egui::Key::F19,
+                PerfScriptAction::SelectFirstEnvironmentConflict,
+            ),
+            (
+                8_000,
+                egui::Key::F20,
+                PerfScriptAction::RequestEnvironmentCleanup,
+            ),
+            (
+                8_500,
+                egui::Key::F21,
+                PerfScriptAction::CancelEnvironmentCleanup,
+            ),
+            (9_000, egui::Key::F22, PerfScriptAction::NavigateProviders),
+            (9_500, egui::Key::F23, PerfScriptAction::OpenCcsImport),
+            (10_000, egui::Key::F24, PerfScriptAction::CloseCcsImport),
+            (10_500, egui::Key::F25, PerfScriptAction::NavigateOverview),
+            (
+                11_000,
+                egui::Key::F26,
+                PerfScriptAction::RefreshPendingImport,
+            ),
+            (
+                11_500,
+                egui::Key::F27,
+                PerfScriptAction::DismissPendingImport,
+            ),
         ];
         for (index, (milliseconds, key, action)) in expected.into_iter().enumerate() {
             assert_eq!(

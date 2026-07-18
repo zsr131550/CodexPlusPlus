@@ -17,7 +17,7 @@ struct TestShellState {
 fn render_test_shell(ui: &mut egui::Ui, state: &mut TestShellState) {
     egui_extras::install_image_loaders(ui.ctx());
     theme::apply(ui.ctx(), state.model.theme);
-    for action in render_shell(ui, &state.model, None) {
+    for action in render_shell(ui, &state.model, None, None, None) {
         state.emitted.push(action.clone());
         match action {
             ShellAction::Navigate(route) => state.model.route = route,
@@ -25,6 +25,7 @@ fn render_test_shell(ui: &mut egui::Ui, state: &mut TestShellState) {
             ShellAction::SetTheme(theme) => state.model.theme = theme,
             ShellAction::Refresh | ShellAction::Retry => {}
             ShellAction::Provider(_) => {}
+            ShellAction::Import(_) | ShellAction::Environment(_) => {}
         }
         ui.ctx().request_repaint();
     }

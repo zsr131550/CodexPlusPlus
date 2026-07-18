@@ -4,11 +4,14 @@ use codex_plus_manager_service::OverviewSnapshot;
 use eframe::egui;
 
 use crate::i18n::{Locale, TextKey, ThemeMode, text};
+use crate::state::environment::EnvironmentViewState;
+use crate::state::import::ImportViewState;
+use crate::state::provider::OperationPhase;
 use crate::state::provider::{ProviderLoadPhase, ProviderViewState};
 use crate::state::{OverviewFailureKind, OverviewPhase, Route};
 use crate::{icons, theme};
 
-use super::{about, overview, provider};
+use super::{about, environment, import, overview, provider};
 
 pub const SIDEBAR_WIDTH: f32 = 176.0;
 pub const HEADER_HEIGHT: f32 = 58.0;
@@ -22,6 +25,8 @@ pub enum ShellAction {
     SetTheme(ThemeMode),
     Retry,
     Provider(provider::ProviderAction),
+    Import(import::ImportAction),
+    Environment(environment::EnvironmentAction),
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +45,8 @@ pub fn render_shell(
     ui: &mut egui::Ui,
     model: &ShellViewModel,
     provider_state: Option<&ProviderViewState>,
+    import_state: Option<&ImportViewState>,
+    environment_state: Option<&EnvironmentViewState>,
 ) -> Vec<ShellAction> {
     let mut actions = Vec::new();
 
@@ -69,7 +76,9 @@ pub fn render_shell(
                 .fill(ui.visuals().window_fill)
                 .inner_margin(egui::Margin::symmetric(16, 4)),
         )
-        .show(ui, |ui| render_status(ui, model, provider_state));
+        .show(ui, |ui| {
+            render_status(ui, model, provider_state, environment_state)
+        });
 
     egui::CentralPanel::default()
         .frame(
@@ -81,13 +90,47 @@ pub fn render_shell(
             Route::Overview => overview::render(ui, model, &mut actions),
             Route::Providers => {
                 if let Some(state) = provider_state {
+                    if let Some(import_state) = import_state {
+                        let mut import_actions = Vec::new();
+                        import::render_provider_toolbar(
+                            ui,
+                            import_state,
+                            model.locale,
+                            &mut import_actions,
+                        );
+                        actions.extend(import_actions.into_iter().map(ShellAction::Import));
+                        ui.separator();
+                    }
                     let mut provider_actions = Vec::new();
                     provider::render(ui, state, model.locale, &mut provider_actions);
                     actions.extend(provider_actions.into_iter().map(ShellAction::Provider));
                 }
             }
+            Route::Environment => {
+                if let Some(state) = environment_state {
+                    let mut environment_actions = Vec::new();
+                    environment::render(ui, state, model.locale, &mut environment_actions);
+                    actions.extend(
+                        environment_actions
+                            .into_iter()
+                            .map(ShellAction::Environment),
+                    );
+                }
+            }
             Route::About => about::render(ui, model),
         });
+
+    if let (Some(import_state), Some(provider_state)) = (import_state, provider_state) {
+        let mut import_actions = Vec::new();
+        import::render_modals(
+            ui.ctx(),
+            import_state,
+            provider_state,
+            model.locale,
+            &mut import_actions,
+        );
+        actions.extend(import_actions.into_iter().map(ShellAction::Import));
+    }
 
     actions
 }
@@ -115,6 +158,14 @@ fn render_sidebar(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<S
         text(model.locale, TextKey::Providers),
         model.route == Route::Providers,
         Route::Providers,
+        actions,
+    );
+    navigation_button(
+        ui,
+        icons::triangle_alert(),
+        text(model.locale, TextKey::Environment),
+        model.route == Route::Environment,
+        Route::Environment,
         actions,
     );
     navigation_button(
@@ -232,6 +283,11 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
                     text(model.locale, TextKey::AppName),
                     text(model.locale, TextKey::Providers)
                 ),
+                Route::Environment => format!(
+                    "{} {}",
+                    text(model.locale, TextKey::AppName),
+                    text(model.locale, TextKey::Environment)
+                ),
                 Route::About => format!(
                     "{} {}",
                     text(model.locale, TextKey::About),
@@ -242,6 +298,7 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
             let subtitle = match model.route {
                 Route::Overview => TextKey::OverviewSubtitle,
                 Route::Providers => TextKey::ProvidersSubtitle,
+                Route::Environment => TextKey::EnvironmentSubtitle,
                 Route::About => TextKey::AboutSubtitle,
             };
             ui.label(
@@ -286,6 +343,7 @@ fn render_status(
     ui: &mut egui::Ui,
     model: &ShellViewModel,
     provider_state: Option<&ProviderViewState>,
+    environment_state: Option<&EnvironmentViewState>,
 ) {
     if model.route == Route::Providers {
         let phase = provider_state.map_or(ProviderLoadPhase::Idle, |state| state.load_phase);
@@ -303,6 +361,28 @@ fn render_status(
                     Locale::ZhCn => "供应商加载失败",
                     Locale::En => "Provider load failed",
                 },
+                theme::ERROR_COLOR,
+            ),
+        };
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                color,
+                format!("{}: {status}", text(model.locale, TextKey::Status)),
+            );
+            render_status_metadata(ui, model);
+        });
+        return;
+    }
+
+    if model.route == Route::Environment {
+        let phase = environment_state.map_or(OperationPhase::Idle, |state| state.inspection_phase);
+        let (status, color) = match phase {
+            OperationPhase::Idle | OperationPhase::Running => {
+                (text(model.locale, TextKey::Loading), theme::WARNING_COLOR)
+            }
+            OperationPhase::Ready => (text(model.locale, TextKey::Ready), theme::SUCCESS_COLOR),
+            OperationPhase::Error => (
+                text(model.locale, TextKey::InspectionFailed),
                 theme::ERROR_COLOR,
             ),
         };

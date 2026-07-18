@@ -1,12 +1,13 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use rusqlite::Connection;
 use serde_json::Value;
 
-use crate::settings::{RelayMode, RelayProfile, RelayProtocol};
+use crate::settings::{BackendSettings, RelayMode, RelayProfile, RelayProtocol};
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CcsProviderImport {
     pub source_id: String,
@@ -16,6 +17,35 @@ pub struct CcsProviderImport {
     pub protocol: RelayProtocol,
     pub config_contents: String,
     pub auth_contents: String,
+}
+
+impl fmt::Debug for CcsProviderImport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CcsProviderImport")
+            .field("source_id", &self.source_id)
+            .field("name", &self.name)
+            .field("base_url", &self.base_url)
+            .field("protocol", &self.protocol)
+            .field("api_key_present", &!self.api_key.trim().is_empty())
+            .field(
+                "config_contents_present",
+                &!self.config_contents.trim().is_empty(),
+            )
+            .field(
+                "auth_contents_present",
+                &!self.auth_contents.trim().is_empty(),
+            )
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CcsImportSummary {
+    pub imported: usize,
+    pub duplicates: usize,
+    pub imported_profile_ids: Vec<String>,
 }
 
 pub fn default_ccs_db_path() -> PathBuf {
@@ -101,6 +131,45 @@ pub fn relay_profile_from_ccs(
         model_windows: String::new(),
         user_agent: String::new(),
     }
+}
+
+pub fn apply_ccs_providers_to_settings(
+    settings: &BackendSettings,
+    providers: &[CcsProviderImport],
+) -> anyhow::Result<(BackendSettings, CcsImportSummary)> {
+    let mut next = settings.clone();
+    let mut existing_keys = next
+        .relay_profiles
+        .iter()
+        .map(imported_provider_identity)
+        .collect::<Vec<_>>();
+    let mut existing_ids = next
+        .relay_profiles
+        .iter()
+        .map(|profile| profile.id.clone())
+        .collect::<Vec<_>>();
+    let mut summary = CcsImportSummary {
+        imported: 0,
+        duplicates: 0,
+        imported_profile_ids: Vec::new(),
+    };
+
+    for provider in providers {
+        let identity = provider_identity_from_ccs(provider);
+        if existing_keys.iter().any(|existing| existing == &identity) {
+            summary.duplicates += 1;
+            continue;
+        }
+
+        let profile = relay_profile_from_ccs(provider, &existing_ids);
+        existing_ids.push(profile.id.clone());
+        existing_keys.push(identity);
+        summary.imported_profile_ids.push(profile.id.clone());
+        next.relay_profiles.push(profile);
+        summary.imported += 1;
+    }
+
+    Ok((next, summary))
 }
 
 fn import_from_ccs_value(source_id: &str, name: &str, config: &Value) -> Option<CcsProviderImport> {
@@ -414,5 +483,69 @@ mod tests {
         assert_eq!(providers[0].base_url, "https://relay.example/v1");
         assert_eq!(providers[0].api_key, "key-2");
         assert_eq!(providers[0].protocol, RelayProtocol::Responses);
+    }
+
+    #[test]
+    fn batch_import_preserves_existing_profiles_and_active_id() {
+        let settings = BackendSettings::default();
+        let provider = CcsProviderImport {
+            source_id: "one".to_string(),
+            name: "One".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            api_key: "ccs-secret".to_string(),
+            protocol: RelayProtocol::Responses,
+            config_contents: "config-secret".to_string(),
+            auth_contents: "auth-secret".to_string(),
+        };
+
+        let (next, summary) =
+            apply_ccs_providers_to_settings(&settings, std::slice::from_ref(&provider)).unwrap();
+
+        assert_eq!(next.active_relay_id, settings.active_relay_id);
+        assert_eq!(next.relay_profiles.len(), settings.relay_profiles.len() + 1);
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.duplicates, 0);
+        assert!(!format!("{provider:?}").contains("ccs-secret"));
+        assert!(!format!("{provider:?}").contains("config-secret"));
+    }
+
+    #[test]
+    fn batch_import_deduplicates_by_existing_identity() {
+        let settings = BackendSettings::default();
+        let provider = CcsProviderImport {
+            source_id: "one".to_string(),
+            name: "One".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            api_key: "ccs-secret".to_string(),
+            protocol: RelayProtocol::Responses,
+            config_contents: String::new(),
+            auth_contents: String::new(),
+        };
+
+        let (next, summary) =
+            apply_ccs_providers_to_settings(&settings, &[provider.clone(), provider]).unwrap();
+
+        assert_eq!(next.relay_profiles.len(), settings.relay_profiles.len() + 1);
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.duplicates, 1);
+    }
+
+    #[test]
+    fn ccs_debug_output_redacts_secret_fields() {
+        let provider = CcsProviderImport {
+            source_id: "one".to_string(),
+            name: "One".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            api_key: "ccs-secret".to_string(),
+            protocol: RelayProtocol::Responses,
+            config_contents: "config-secret".to_string(),
+            auth_contents: "auth-secret".to_string(),
+        };
+
+        let debug = format!("{provider:?}");
+        assert!(!debug.contains("ccs-secret"));
+        assert!(!debug.contains("config-secret"));
+        assert!(!debug.contains("auth-secret"));
+        assert!(debug.contains("api_key_present: true"));
     }
 }

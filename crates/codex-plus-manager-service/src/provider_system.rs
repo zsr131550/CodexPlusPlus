@@ -15,6 +15,10 @@ use crate::{
 pub struct SystemProviderEnvironment {
     settings: SettingsStore,
     codex_home: PathBuf,
+    ccs_db_path: PathBuf,
+    pending_import_path: PathBuf,
+    backup_dir: PathBuf,
+    process_only_env_cleanup: bool,
     runtime: Arc<tokio::runtime::Runtime>,
 }
 
@@ -25,9 +29,35 @@ impl SystemProviderEnvironment {
     }
 
     pub fn for_paths(settings_path: PathBuf, codex_home: PathBuf) -> Self {
+        let state_dir = settings_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        Self::for_manager_paths(
+            settings_path,
+            codex_home,
+            state_dir.join("cc-switch.db"),
+            state_dir.join("pending-provider-import.json"),
+            state_dir.join("backups"),
+            true,
+        )
+    }
+
+    pub fn for_manager_paths(
+        settings_path: PathBuf,
+        codex_home: PathBuf,
+        ccs_db_path: PathBuf,
+        pending_import_path: PathBuf,
+        backup_dir: PathBuf,
+        process_only_env_cleanup: bool,
+    ) -> Self {
         Self {
             settings: SettingsStore::new(settings_path),
             codex_home,
+            ccs_db_path,
+            pending_import_path,
+            backup_dir,
+            process_only_env_cleanup,
             runtime: Arc::new(provider_runtime()),
         }
     }
@@ -39,14 +69,34 @@ impl SystemProviderEnvironment {
         let codex_home = std::env::var_os("CODEX_PLUS_NATIVE_CODEX_HOME")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
-        match (settings_path, codex_home) {
-            (None, None) => Self::default(),
-            (Some(settings_path), None) => Self::for_settings_path(settings_path),
-            (settings_path, Some(codex_home)) => Self::for_paths(
-                settings_path.unwrap_or_else(codex_plus_core::paths::default_settings_path),
-                codex_home,
-            ),
+        let ccs_db_path = env_path("CODEX_PLUS_NATIVE_CCS_DB_PATH");
+        let pending_import_path = env_path("CODEX_PLUS_NATIVE_PENDING_IMPORT_PATH");
+        let backup_dir = env_path("CODEX_PLUS_NATIVE_BACKUP_DIR");
+        let process_only_env_cleanup =
+            std::env::var("CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY").is_ok_and(|value| value == "1");
+        if settings_path.is_none()
+            && codex_home.is_none()
+            && ccs_db_path.is_none()
+            && pending_import_path.is_none()
+            && backup_dir.is_none()
+        {
+            return Self::default();
         }
+
+        let settings_path =
+            settings_path.unwrap_or_else(codex_plus_core::paths::default_settings_path);
+        let state_dir = settings_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        Self::for_manager_paths(
+            settings_path.clone(),
+            codex_home.unwrap_or_else(|| isolated_codex_home_for_settings(&settings_path)),
+            ccs_db_path.unwrap_or_else(|| state_dir.join("cc-switch.db")),
+            pending_import_path.unwrap_or_else(|| state_dir.join("pending-provider-import.json")),
+            backup_dir.unwrap_or_else(|| state_dir.join("backups")),
+            process_only_env_cleanup,
+        )
     }
 }
 
@@ -55,6 +105,10 @@ impl Default for SystemProviderEnvironment {
         Self {
             settings: SettingsStore::default(),
             codex_home: codex_plus_core::relay_config::default_codex_home_dir(),
+            ccs_db_path: codex_plus_core::ccs_import::default_ccs_db_path(),
+            pending_import_path: codex_plus_core::paths::default_pending_provider_import_path(),
+            backup_dir: codex_plus_core::paths::default_app_state_dir().join("backups"),
+            process_only_env_cleanup: false,
             runtime: Arc::new(provider_runtime()),
         }
     }
@@ -154,6 +208,40 @@ impl ProviderActivationEnvironment for SystemProviderEnvironment {
     fn codex_home(&self) -> &Path {
         &self.codex_home
     }
+}
+
+impl crate::ProviderImportEnvironment for SystemProviderEnvironment {
+    fn ccs_db_path(&self) -> &Path {
+        &self.ccs_db_path
+    }
+
+    fn pending_import_path(&self) -> &Path {
+        &self.pending_import_path
+    }
+}
+
+impl crate::RelayEnvironmentEnvironment for SystemProviderEnvironment {
+    fn environment_codex_home(&self) -> &Path {
+        &self.codex_home
+    }
+
+    fn environment_backup_dir(&self) -> &Path {
+        &self.backup_dir
+    }
+
+    fn process_only_env_cleanup(&self) -> bool {
+        self.process_only_env_cleanup
+    }
+
+    fn isolated_environment_inspection(&self) -> bool {
+        self.process_only_env_cleanup
+    }
+}
+
+pub(crate) fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn isolated_codex_home_for_settings(settings_path: &Path) -> PathBuf {

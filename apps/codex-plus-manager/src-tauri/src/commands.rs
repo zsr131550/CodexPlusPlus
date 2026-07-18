@@ -13,13 +13,15 @@ use codex_plus_core::status::LaunchStatus;
 use codex_plus_core::user_scripts::UserScriptManager;
 use codex_plus_core::zed_remote::{ZedOpenStrategy, ZedRemoteProject};
 use codex_plus_manager_service::{
-    DiagnoseProviderProfile, DoctorCheckStatus, DoctorDetailKind, DoctorOutcome,
-    DoctorRecommendation, FetchProviderModels, OverviewSnapshot, OverviewSource,
-    ProviderDoctorCheck as ServiceProviderDoctorCheck, ProviderDoctorCheckId, ProviderDoctorReport,
+    ConfirmPendingImport, DiagnoseProviderProfile, DismissPendingImport, DoctorCheckStatus,
+    DoctorDetailKind, DoctorOutcome, DoctorRecommendation, FetchProviderModels, ImportCcsProviders,
+    OverviewSnapshot, OverviewSource, ProviderDoctorCheck as ServiceProviderDoctorCheck,
+    ProviderDoctorCheckId, ProviderDoctorReport, ProviderImportService, ProviderImportSource,
     ProviderModelsResult, ProviderNetworkError, ProviderNetworkFailureKind,
     ProviderProfile as ServiceProviderProfile, ProviderService, ProviderSource,
-    ProviderTestOutcome, ProviderTestResult, ResourcePresence, SystemOverviewSource,
-    SystemProviderEnvironment, TestProviderProfile, UpdateCheckState,
+    ProviderTestOutcome, ProviderTestResult, RelayEnvironmentService, RelayEnvironmentSource,
+    RemoveEnvironmentConflicts, ResourcePresence, SystemOverviewSource, SystemProviderEnvironment,
+    TestProviderProfile, UpdateCheckState,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -476,8 +478,9 @@ pub fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload
 
 #[tauri::command]
 pub fn load_ccs_providers() -> CommandResult<CcsProvidersPayload> {
-    let db_path = codex_plus_core::ccs_import::default_ccs_db_path();
-    match codex_plus_core::ccs_import::list_codex_providers_from_db(&db_path) {
+    let service = system_provider_import_source();
+    let db_path = service.ccs_source_path().to_path_buf();
+    match service.load_ccs_records() {
         Ok(providers) => ok(
             &format!(
                 "已读取 cc-switch Codex 供应商配置：{} 个。",
@@ -500,57 +503,25 @@ pub fn load_ccs_providers() -> CommandResult<CcsProvidersPayload> {
 
 #[tauri::command]
 pub fn import_ccs_providers() -> CommandResult<SettingsPayload> {
-    let providers = match codex_plus_core::ccs_import::list_codex_providers_from_default_db() {
-        Ok(providers) => providers,
+    let service = system_provider_import_source();
+    let discovery = match service.discover_ccs() {
+        Ok(discovery) => discovery,
         Err(error) => {
             let payload = settings_payload_value().unwrap_or_else(|(_, payload)| payload);
             return failed(&format!("读取 cc-switch 供应商配置失败：{error}"), payload);
         }
     };
 
-    let home = codex_plus_core::relay_config::default_codex_home_dir();
-    let _live_guard = match codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home) {
-        Ok(guard) => guard,
-        Err(error) => {
-            let payload = settings_payload_value().unwrap_or_else(|(_, payload)| payload);
-            return failed(&format!("获取供应商 live 写锁失败：{error}"), payload);
-        }
-    };
-
-    let store = SettingsStore::default();
-    let mut settings = store.load().unwrap_or_default();
-    let mut existing_keys: Vec<String> = settings
-        .relay_profiles
-        .iter()
-        .map(codex_plus_core::ccs_import::imported_provider_identity)
-        .collect();
-    let mut existing_ids: Vec<String> = settings
-        .relay_profiles
-        .iter()
-        .map(|profile| profile.id.clone())
-        .collect();
-    let mut imported = 0usize;
-
-    for provider in providers {
-        let key = codex_plus_core::ccs_import::provider_identity_from_ccs(&provider);
-        if existing_keys.iter().any(|existing| existing == &key) {
-            continue;
-        }
-        let profile = codex_plus_core::ccs_import::relay_profile_from_ccs(&provider, &existing_ids);
-        existing_ids.push(profile.id.clone());
-        existing_keys.push(key);
-        settings.relay_profiles.push(profile);
-        imported += 1;
-    }
-
-    if imported == 0 {
+    if discovery.importable_count == 0 {
         return settings_payload("没有新的 cc-switch 供应商配置需要导入。", "设置读取失败");
     }
 
-    settings = normalize_settings_before_save(settings);
-    match store.save(&settings) {
-        Ok(()) => settings_payload(
-            &format!("已从 cc-switch 导入供应商配置：{imported} 个。"),
+    match service.import_ccs(ImportCcsProviders {
+        source_revision: discovery.source_revision,
+        provider_revision: discovery.provider_revision,
+    }) {
+        Ok(outcome) => settings_payload(
+            &format!("已从 cc-switch 导入供应商配置：{} 个。", outcome.imported),
             "导入供应商配置后重新读取设置失败",
         ),
         Err(error) => failed(
@@ -562,7 +533,8 @@ pub fn import_ccs_providers() -> CommandResult<SettingsPayload> {
 
 #[tauri::command]
 pub fn load_pending_provider_import() -> CommandResult<PendingProviderImportPayload> {
-    match codex_plus_core::provider_import::load_pending_provider_import() {
+    let service = system_provider_import_source();
+    match service.load_pending_record() {
         Ok(pending) => ok(
             "待确认供应商导入已读取。",
             PendingProviderImportPayload { pending },
@@ -576,24 +548,37 @@ pub fn load_pending_provider_import() -> CommandResult<PendingProviderImportPayl
 
 #[tauri::command]
 pub fn confirm_pending_provider_import() -> CommandResult<SettingsPayload> {
-    let home = codex_plus_core::relay_config::default_codex_home_dir();
-    let _live_guard = match codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home) {
-        Ok(guard) => guard,
+    let service = system_provider_import_source();
+    let pending = match service.load_pending() {
+        Ok(snapshot) => snapshot.pending,
         Err(error) => {
             let payload = settings_payload_value().unwrap_or_else(|(_, payload)| payload);
-            return failed(&format!("获取供应商 live 写锁失败：{error}"), payload);
+            return failed(&format!("读取待确认供应商导入失败：{error}"), payload);
         }
     };
-    match codex_plus_core::provider_import::confirm_pending_provider_import() {
-        Ok(Some(result)) => {
-            let message = if result.imported {
-                format!("已导入供应商配置：{}。", result.profile_name)
+    let Some(pending) = pending else {
+        return settings_payload("没有待确认的供应商导入。", "设置读取失败");
+    };
+    let provider_revision = match service.current_provider_revision() {
+        Ok(revision) => revision,
+        Err(error) => {
+            let payload = settings_payload_value().unwrap_or_else(|(_, payload)| payload);
+            return failed(&format!("读取供应商配置失败：{error}"), payload);
+        }
+    };
+    match service.confirm_pending(ConfirmPendingImport {
+        pending_revision: pending.revision,
+        provider_revision,
+    }) {
+        Ok(outcome) => {
+            let profile_name = outcome.profile_name.unwrap_or_default();
+            let message = if outcome.imported > 0 {
+                format!("已导入供应商配置：{profile_name}。")
             } else {
-                format!("供应商配置已存在：{}。", result.profile_name)
+                format!("供应商配置已存在：{profile_name}。")
             };
             settings_payload(&message, "供应商导入后重新读取设置失败")
         }
-        Ok(None) => settings_payload("没有待确认的供应商导入。", "设置读取失败"),
         Err(error) => failed(
             &format!("导入供应商配置失败：{error}"),
             settings_payload_value().unwrap_or_else(|(_, payload)| payload),
@@ -603,8 +588,26 @@ pub fn confirm_pending_provider_import() -> CommandResult<SettingsPayload> {
 
 #[tauri::command]
 pub fn dismiss_pending_provider_import() -> CommandResult<PendingProviderImportPayload> {
-    match codex_plus_core::provider_import::clear_pending_provider_import() {
-        Ok(()) => ok(
+    let service = system_provider_import_source();
+    let pending = match service.load_pending() {
+        Ok(snapshot) => snapshot.pending,
+        Err(error) => {
+            return failed(
+                &format!("取消供应商导入失败：{error}"),
+                PendingProviderImportPayload { pending: None },
+            );
+        }
+    };
+    let Some(pending) = pending else {
+        return ok(
+            "已取消供应商导入。",
+            PendingProviderImportPayload { pending: None },
+        );
+    };
+    match service.dismiss_pending(DismissPendingImport {
+        pending_revision: pending.revision,
+    }) {
+        Ok(_) => ok(
             "已取消供应商导入。",
             PendingProviderImportPayload { pending: None },
         ),
@@ -1780,40 +1783,83 @@ pub fn read_relay_files() -> CommandResult<RelayFilesPayload> {
 
 #[tauri::command]
 pub fn check_env_conflicts() -> CommandResult<EnvConflictsPayload> {
-    let conflicts = codex_plus_core::env_conflicts::detect_env_conflicts();
-    let message = if conflicts.is_empty() {
-        "未检测到会覆盖 Codex 供应商配置的 OPENAI 环境变量。"
-    } else {
-        "检测到可能覆盖 Codex 供应商配置的 OPENAI 环境变量。"
-    };
-    ok(message, EnvConflictsPayload { conflicts })
+    let service = system_relay_environment_source();
+    match service.inspect() {
+        Ok(workspace) => {
+            let message = if workspace.conflicts.is_empty() {
+                "未检测到会覆盖 Codex 供应商配置的 OPENAI 环境变量。"
+            } else {
+                "检测到可能覆盖 Codex 供应商配置的 OPENAI 环境变量。"
+            };
+            ok(
+                message,
+                EnvConflictsPayload {
+                    conflicts: workspace.conflicts,
+                },
+            )
+        }
+        Err(error) => failed(
+            &format!("检查环境变量失败：{error}"),
+            EnvConflictsPayload {
+                conflicts: codex_plus_core::env_conflicts::detect_env_conflicts(),
+            },
+        ),
+    }
 }
 
 #[tauri::command]
 pub fn check_relay_environment() -> CommandResult<RelayEnvironmentReport> {
-    let report = codex_plus_core::relay_environment::inspect_relay_environment();
-    let message = if report.all_passed() {
-        "中转站环境配置检测全部通过。"
-    } else {
-        "检测到可能影响中转站配置的环境问题。"
-    };
-    ok(message, report)
+    let service = system_relay_environment_source();
+    match service.inspect() {
+        Ok(workspace) => {
+            let message = if workspace.report.all_passed() {
+                "中转站环境配置检测全部通过。"
+            } else {
+                "检测到可能影响中转站配置的环境问题。"
+            };
+            ok(message, workspace.report)
+        }
+        Err(error) => failed(
+            &format!("检查中转站环境失败：{error}"),
+            codex_plus_core::relay_environment::inspect_relay_environment(),
+        ),
+    }
 }
 
 #[tauri::command]
 pub fn remove_env_conflicts(
     request: RemoveEnvConflictsRequest,
 ) -> CommandResult<RemoveEnvConflictsPayload> {
-    let backup_dir = codex_plus_core::paths::default_app_state_dir().join("backups");
-    match codex_plus_core::env_conflicts::remove_env_conflicts(&request.names, backup_dir) {
+    let service = system_relay_environment_source();
+    let workspace = match service.inspect() {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            return failed(
+                &format!("删除环境变量失败：{error}"),
+                RemoveEnvConflictsPayload {
+                    removed: Vec::new(),
+                    backup_path: None,
+                    remaining: codex_plus_core::env_conflicts::detect_env_conflicts(),
+                },
+            );
+        }
+    };
+    match service.remove_conflicts(RemoveEnvironmentConflicts {
+        expected_revision: workspace.revision,
+        names: request.names,
+    }) {
         Ok(result) => {
-            let remaining = codex_plus_core::env_conflicts::detect_env_conflicts();
+            let message = if result.failures.is_empty() {
+                "环境变量已按确认项删除；重新启动 Codex 后生效。"
+            } else {
+                "部分环境变量未能删除；已保留失败项并完成其余清理。"
+            };
             ok(
-                "环境变量已按确认项删除；重新启动 Codex 后生效。",
+                message,
                 RemoveEnvConflictsPayload {
                     removed: result.removed,
                     backup_path: result.backup_path,
-                    remaining,
+                    remaining: result.remaining,
                 },
             )
         }
@@ -3091,7 +3137,23 @@ fn read_tail(path: &Path, max_lines: usize) -> std::io::Result<String> {
 
 fn system_provider_source() -> &'static ProviderService<SystemProviderEnvironment> {
     static SOURCE: OnceLock<ProviderService<SystemProviderEnvironment>> = OnceLock::new();
-    SOURCE.get_or_init(|| ProviderService::new(SystemProviderEnvironment::default()))
+    SOURCE.get_or_init(|| ProviderService::new(system_provider_environment().clone()))
+}
+
+fn system_provider_import_source() -> &'static ProviderImportService<SystemProviderEnvironment> {
+    static SOURCE: OnceLock<ProviderImportService<SystemProviderEnvironment>> = OnceLock::new();
+    SOURCE.get_or_init(|| ProviderImportService::new(system_provider_environment().clone()))
+}
+
+fn system_relay_environment_source() -> &'static RelayEnvironmentService<SystemProviderEnvironment>
+{
+    static SOURCE: OnceLock<RelayEnvironmentService<SystemProviderEnvironment>> = OnceLock::new();
+    SOURCE.get_or_init(|| RelayEnvironmentService::new(system_provider_environment().clone()))
+}
+
+fn system_provider_environment() -> &'static SystemProviderEnvironment {
+    static ENVIRONMENT: OnceLock<SystemProviderEnvironment> = OnceLock::new();
+    ENVIRONMENT.get_or_init(SystemProviderEnvironment::default)
 }
 
 fn provider_worker_error() -> ProviderNetworkError {
@@ -3360,6 +3422,47 @@ mod tests {
 
         assert_eq!(result.status, "ok");
         assert!(!result.payload.version.is_empty());
+    }
+
+    #[test]
+    fn provider_import_and_environment_payloads_preserve_legacy_json_fields() {
+        let ccs = ok(
+            "已读取 cc-switch Codex 供应商配置：0 个。",
+            CcsProvidersPayload {
+                db_path: "fixture/cc-switch.db".to_owned(),
+                providers: Vec::new(),
+            },
+        );
+        let ccs_json = serde_json::to_value(ccs).unwrap();
+        assert_eq!(ccs_json["status"], "ok");
+        assert_eq!(
+            ccs_json["message"],
+            "已读取 cc-switch Codex 供应商配置：0 个。"
+        );
+        assert_eq!(ccs_json["dbPath"], "fixture/cc-switch.db");
+        assert!(ccs_json["providers"].as_array().unwrap().is_empty());
+        assert!(ccs_json.get("db_path").is_none());
+
+        let pending = ok(
+            "待确认供应商导入已读取。",
+            PendingProviderImportPayload { pending: None },
+        );
+        let pending_json = serde_json::to_value(pending).unwrap();
+        assert!(pending_json["pending"].is_null());
+
+        let removal = ok(
+            "环境变量已按确认项删除；重新启动 Codex 后生效。",
+            RemoveEnvConflictsPayload {
+                removed: Vec::new(),
+                backup_path: None,
+                remaining: Vec::new(),
+            },
+        );
+        let removal_json = serde_json::to_value(removal).unwrap();
+        assert!(removal_json["removed"].as_array().unwrap().is_empty());
+        assert!(removal_json["backupPath"].is_null());
+        assert!(removal_json["remaining"].as_array().unwrap().is_empty());
+        assert!(removal_json.get("failures").is_none());
     }
 
     #[test]

@@ -137,7 +137,7 @@ fn apply_provider_action(state: &mut ProviderViewState, action: &ProviderAction)
 fn render(ui: &mut egui::Ui, state: &mut ProviderHarnessState) {
     egui_extras::install_image_loaders(ui.ctx());
     theme::apply(ui.ctx(), state.model.theme);
-    for action in render_shell(ui, &state.model, Some(&state.provider)) {
+    for action in render_shell(ui, &state.model, Some(&state.provider), None, None) {
         if let ShellAction::Navigate(route) = &action {
             state.model.route = *route;
         }

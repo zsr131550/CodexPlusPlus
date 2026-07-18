@@ -3,6 +3,8 @@ use std::thread;
 
 use codex_plus_manager_service::{OverviewError, OverviewSnapshot, OverviewSource};
 
+pub mod environment;
+pub mod import;
 pub mod provider;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

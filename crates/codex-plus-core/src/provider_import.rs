@@ -1,9 +1,10 @@
-use crate::settings::{RelayMode, RelayProfile, RelayProtocol, SettingsStore};
+use crate::settings::{BackendSettings, RelayMode, RelayProfile, RelayProtocol, SettingsStore};
 use anyhow::Context;
 use base64::Engine;
+use std::fmt;
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderImportRequest {
     pub name: String,
@@ -19,12 +20,71 @@ pub struct ProviderImportRequest {
     pub auth_contents: String,
 }
 
+impl fmt::Debug for ProviderImportRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderImportRequest")
+            .field("name", &self.name)
+            .field("base_url", &self.base_url)
+            .field("wire_api", &self.wire_api)
+            .field("relay_mode", &self.relay_mode)
+            .field("api_key_present", &!self.api_key.trim().is_empty())
+            .field(
+                "config_contents_present",
+                &!self.config_contents.trim().is_empty(),
+            )
+            .field(
+                "auth_contents_present",
+                &!self.auth_contents.trim().is_empty(),
+            )
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderImportResult {
     pub imported: bool,
     pub profile_id: String,
     pub profile_name: String,
+}
+
+pub fn apply_provider_import_to_settings(
+    settings: &BackendSettings,
+    request: &ProviderImportRequest,
+) -> anyhow::Result<(BackendSettings, ProviderImportResult)> {
+    let request = normalize_request(request.clone())?;
+    let identity = provider_identity(&request.name, &request.base_url);
+    if let Some(existing) = settings
+        .relay_profiles
+        .iter()
+        .find(|profile| provider_identity(&profile.name, &profile.upstream_base_url) == identity)
+    {
+        return Ok((
+            settings.clone(),
+            ProviderImportResult {
+                imported: false,
+                profile_id: existing.id.clone(),
+                profile_name: existing.name.clone(),
+            },
+        ));
+    }
+
+    let existing_ids = settings
+        .relay_profiles
+        .iter()
+        .map(|profile| profile.id.clone())
+        .collect::<Vec<_>>();
+    let profile = relay_profile_from_request(&request, &existing_ids);
+    let result = ProviderImportResult {
+        imported: true,
+        profile_id: profile.id.clone(),
+        profile_name: profile.name.clone(),
+    };
+    let mut next = settings.clone();
+    next.relay_profiles.push(profile);
+    next.active_relay_id = result.profile_id.clone();
+    Ok((next, result))
 }
 
 pub fn import_provider_from_url(url: &str) -> anyhow::Result<ProviderImportResult> {
@@ -53,6 +113,32 @@ pub fn clear_pending_provider_import() -> anyhow::Result<()> {
     clear_pending_provider_import_at(&crate::paths::default_pending_provider_import_path())
 }
 
+pub struct PendingProviderImportLock {
+    path: std::path::PathBuf,
+    _lock: crate::coordination_lock::CoordinationLock,
+}
+
+impl PendingProviderImportLock {
+    pub fn load(&self) -> anyhow::Result<Option<ProviderImportRequest>> {
+        load_pending_provider_import_unlocked(&self.path)
+    }
+
+    pub fn clear(&self) -> anyhow::Result<()> {
+        clear_pending_provider_import_unlocked(&self.path)
+    }
+}
+
+pub fn acquire_pending_provider_import_lock(
+    path: &Path,
+) -> anyhow::Result<PendingProviderImportLock> {
+    let lock =
+        crate::coordination_lock::acquire_exclusive(&crate::coordination_lock::sidecar_path(path))?;
+    Ok(PendingProviderImportLock {
+        path: path.to_path_buf(),
+        _lock: lock,
+    })
+}
+
 pub fn confirm_pending_provider_import() -> anyhow::Result<Option<ProviderImportResult>> {
     let path = crate::paths::default_pending_provider_import_path();
     if !path.exists() {
@@ -65,15 +151,30 @@ pub fn save_pending_provider_import_at(
     path: &Path,
     request: &ProviderImportRequest,
 ) -> anyhow::Result<()> {
+    let _lock = acquire_pending_provider_import_lock(path)?;
+    save_pending_provider_import_unlocked(path, request)
+}
+
+fn save_pending_provider_import_unlocked(
+    path: &Path,
+    request: &ProviderImportRequest,
+) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let contents = serde_json::to_string_pretty(request)?;
-    std::fs::write(path, format!("{contents}\n"))?;
+    crate::settings::atomic_write(path, format!("{contents}\n").as_bytes())?;
     Ok(())
 }
 
 pub fn load_pending_provider_import_at(
+    path: &Path,
+) -> anyhow::Result<Option<ProviderImportRequest>> {
+    let _lock = acquire_pending_provider_import_lock(path)?;
+    load_pending_provider_import_unlocked(path)
+}
+
+fn load_pending_provider_import_unlocked(
     path: &Path,
 ) -> anyhow::Result<Option<ProviderImportRequest>> {
     if !path.exists() {
@@ -86,6 +187,11 @@ pub fn load_pending_provider_import_at(
 }
 
 pub fn clear_pending_provider_import_at(path: &Path) -> anyhow::Result<()> {
+    let _lock = acquire_pending_provider_import_lock(path)?;
+    clear_pending_provider_import_unlocked(path)
+}
+
+fn clear_pending_provider_import_unlocked(path: &Path) -> anyhow::Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -98,9 +204,10 @@ pub fn confirm_pending_provider_import_at(
     path: &Path,
     store: SettingsStore,
 ) -> anyhow::Result<ProviderImportResult> {
-    let request = load_pending_provider_import_at(path)?.context("没有待确认的供应商导入")?;
+    let _lock = acquire_pending_provider_import_lock(path)?;
+    let request = load_pending_provider_import_unlocked(path)?.context("没有待确认的供应商导入")?;
     let result = import_provider_with_store(request, store)?;
-    clear_pending_provider_import_at(path)?;
+    clear_pending_provider_import_unlocked(path)?;
     Ok(result)
 }
 
@@ -112,35 +219,18 @@ pub fn import_provider_with_store(
     request: ProviderImportRequest,
     store: SettingsStore,
 ) -> anyhow::Result<ProviderImportResult> {
-    let request = normalize_request(request)?;
-    let mut settings = store.load().unwrap_or_default();
-    let identity = provider_identity(&request.name, &request.base_url);
-    if let Some(existing) = settings
-        .relay_profiles
-        .iter()
-        .find(|profile| provider_identity(&profile.name, &profile.upstream_base_url) == identity)
-    {
-        return Ok(ProviderImportResult {
-            imported: false,
-            profile_id: existing.id.clone(),
-            profile_name: existing.name.clone(),
+    let current = store.load().unwrap_or_default();
+    let (next, result) = apply_provider_import_to_settings(&current, &request)?;
+    if result.imported {
+        let payload = serde_json::json!({
+            "relayProfiles": next.relay_profiles,
+            "activeRelayId": next.active_relay_id,
         });
+        let updated = store.update_if(payload, |fresh| fresh == &current)?;
+        if updated.is_none() {
+            anyhow::bail!("供应商设置已变更，请重试");
+        }
     }
-
-    let existing_ids = settings
-        .relay_profiles
-        .iter()
-        .map(|profile| profile.id.clone())
-        .collect::<Vec<_>>();
-    let profile = relay_profile_from_request(&request, &existing_ids);
-    let result = ProviderImportResult {
-        imported: true,
-        profile_id: profile.id.clone(),
-        profile_name: profile.name.clone(),
-    };
-    settings.relay_profiles.push(profile);
-    settings.active_relay_id = result.profile_id.clone();
-    store.save(&settings)?;
     Ok(result)
 }
 
@@ -375,6 +465,10 @@ fn default_relay_mode() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -450,6 +544,28 @@ mod tests {
     }
 
     #[test]
+    fn pending_save_replaces_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-provider-import.json");
+        let request = |name: &str| ProviderImportRequest {
+            name: name.to_owned(),
+            base_url: "https://pending.invalid/v1".to_owned(),
+            api_key: "pending-secret".to_owned(),
+            wire_api: "responses".to_owned(),
+            relay_mode: "pureApi".to_owned(),
+            config_contents: String::new(),
+            auth_contents: String::new(),
+        };
+
+        save_pending_provider_import_at(&path, &request("First")).unwrap();
+        save_pending_provider_import_at(&path, &request("Second")).unwrap();
+
+        let pending = load_pending_provider_import_at(&path).unwrap().unwrap();
+        assert_eq!(pending.name, "Second");
+        assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
     fn confirms_pending_provider_import_and_removes_pending_file() {
         let dir = tempfile::tempdir().unwrap();
         let pending_path = dir.path().join("pending-provider-import.json");
@@ -477,6 +593,155 @@ mod tests {
             load_pending_provider_import_at(&pending_path)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn pending_import_transform_sets_active_id() {
+        let settings = BackendSettings::default();
+        let request = ProviderImportRequest {
+            name: "Imported".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            api_key: "pending-secret".to_string(),
+            wire_api: "responses".to_string(),
+            relay_mode: "pureApi".to_string(),
+            config_contents: "config-secret".to_string(),
+            auth_contents: "auth-secret".to_string(),
+        };
+
+        let (next, result) = apply_provider_import_to_settings(&settings, &request).unwrap();
+
+        assert!(result.imported);
+        assert_eq!(next.active_relay_id, result.profile_id);
+        assert!(!format!("{request:?}").contains("pending-secret"));
+    }
+
+    #[test]
+    fn pending_duplicate_transform_does_not_write_settings() {
+        let settings = BackendSettings::default();
+        let request = ProviderImportRequest {
+            name: "Imported".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            api_key: "pending-secret".to_string(),
+            wire_api: "responses".to_string(),
+            relay_mode: "pureApi".to_string(),
+            config_contents: String::new(),
+            auth_contents: String::new(),
+        };
+        let (saved, first) = apply_provider_import_to_settings(&settings, &request).unwrap();
+        let (unchanged, second) = apply_provider_import_to_settings(&saved, &request).unwrap();
+
+        assert!(first.imported);
+        assert!(!second.imported);
+        assert_eq!(unchanged, saved);
+    }
+
+    #[test]
+    fn provider_import_debug_output_redacts_secret_fields() {
+        let request = ProviderImportRequest {
+            name: "Imported".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            api_key: "pending-secret".to_string(),
+            wire_api: "responses".to_string(),
+            relay_mode: "pureApi".to_string(),
+            config_contents: "config-secret".to_string(),
+            auth_contents: "auth-secret".to_string(),
+        };
+
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("pending-secret"));
+        assert!(!debug.contains("config-secret"));
+        assert!(!debug.contains("auth-secret"));
+        assert!(debug.contains("api_key_present: true"));
+    }
+
+    #[test]
+    fn import_provider_with_store_preserves_unknown_settings_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::new(path.clone());
+        let mut raw = serde_json::to_value(BackendSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().insert(
+            "futureField".to_owned(),
+            serde_json::json!({ "keep": true }),
+        );
+        std::fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+
+        import_provider_with_store(
+            ProviderImportRequest {
+                name: "Future-safe fixture".to_owned(),
+                base_url: "https://future.invalid/v1".to_owned(),
+                api_key: "pending-secret".to_owned(),
+                wire_api: "responses".to_owned(),
+                relay_mode: "pureApi".to_owned(),
+                config_contents: String::new(),
+                auth_contents: String::new(),
+            },
+            store,
+        )
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved["futureField"]["keep"], true);
+    }
+
+    #[test]
+    fn pending_operations_exclude_two_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-provider-import.json");
+        let first = acquire_pending_provider_import_lock(&path).unwrap();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let path_for_thread = path.clone();
+        let thread = thread::spawn(move || {
+            let _second = acquire_pending_provider_import_lock(&path_for_thread).unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+
+        assert!(
+            acquired_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "second pending handle must wait for the stable sidecar lock"
+        );
+        drop(first);
+        acquired_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second pending handle should acquire after release");
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn pending_confirm_keeps_file_when_settings_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending_path = dir.path().join("pending-provider-import.json");
+        let invalid_settings_path = dir.path().join("settings-as-directory");
+        std::fs::create_dir(&invalid_settings_path).unwrap();
+        save_pending_provider_import_at(
+            &pending_path,
+            &ProviderImportRequest {
+                name: "Failure fixture".to_owned(),
+                base_url: "https://failure.invalid/v1".to_owned(),
+                api_key: "pending-secret".to_owned(),
+                wire_api: "responses".to_owned(),
+                relay_mode: "pureApi".to_owned(),
+                config_contents: String::new(),
+                auth_contents: String::new(),
+            },
+        )
+        .unwrap();
+
+        let result = confirm_pending_provider_import_at(
+            &pending_path,
+            SettingsStore::new(invalid_settings_path),
+        );
+
+        assert!(result.is_err());
+        assert!(
+            load_pending_provider_import_at(&pending_path)
+                .unwrap()
+                .is_some(),
+            "failed settings writes must not consume the pending request"
         );
     }
 }

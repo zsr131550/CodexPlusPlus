@@ -4,11 +4,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use codex_plus_manager_native::app::NativeManagerApp;
+use codex_plus_manager_native::app::{NativeManagerApp, NativeManagerSources};
 use codex_plus_manager_native::fonts;
 use codex_plus_manager_native::perf::PerfRecorder;
 use codex_plus_manager_service::{
-    ProviderService, SystemOverviewSource, SystemProviderEnvironment,
+    ProviderImportService, ProviderService, RelayEnvironmentService, SystemOverviewSource,
+    SystemProviderEnvironment,
 };
 use eframe::egui;
 
@@ -50,15 +51,20 @@ fn main() -> eframe::Result {
         APP_TITLE,
         native_options,
         Box::new(move |creation| {
-            let provider_service = Arc::new(ProviderService::new(
-                SystemProviderEnvironment::for_native_process(),
-            ));
+            let environment = SystemProviderEnvironment::for_native_process();
+            let provider_service = Arc::new(ProviderService::new(environment.clone()));
+            let import_service = Arc::new(ProviderImportService::new(environment.clone()));
+            let environment_service = Arc::new(RelayEnvironmentService::new(environment));
             Ok(Box::new(NativeManagerApp::new(
                 creation,
                 cjk_font,
-                Arc::new(SystemOverviewSource::default()),
-                provider_service.clone(),
-                provider_service,
+                NativeManagerSources {
+                    overview: Arc::new(SystemOverviewSource::default()),
+                    provider: provider_service.clone(),
+                    activation: provider_service,
+                    provider_import: import_service,
+                    environment: environment_service,
+                },
                 perf,
             )))
         }),

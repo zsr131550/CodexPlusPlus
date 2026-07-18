@@ -3,18 +3,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use codex_plus_manager_service::{
     DiagnoseProviderProfile, FetchProviderModels, OverviewSource, ProviderActivationSource,
-    ProviderErrorKind, ProviderNetworkFailureKind, ProviderProfile, ProviderSource,
-    TestProviderProfile,
+    ProviderErrorKind, ProviderImportSource, ProviderNetworkFailureKind, ProviderProfile,
+    ProviderSource, RelayEnvironmentSource, TestProviderProfile,
 };
 use eframe::egui;
 
 use crate::fonts;
 use crate::perf::{PerfRecorder, PerfScriptAction};
 use crate::persistence::{self, PersistedUiState};
+use crate::runtime::environment::{EnvironmentDispatcher, EnvironmentResponse};
+use crate::runtime::import::{ImportDispatcher, ImportResponse};
 use crate::runtime::provider::{
     ActivationResponse, ProviderActivationDispatcher, ProviderDispatcher, StoreResponse,
 };
 use crate::runtime::{DispatchError, OverviewDispatcher};
+use crate::state::environment::EnvironmentFailureKind;
+use crate::state::import::ImportFailureKind;
 use crate::state::provider::{
     DeleteProfileError, GuardOutcome, GuardResolution, LiveLoadFailureKind, LiveMutationFailure,
     LiveMutationKind, OperationPhase, ProviderEditorTab, ProviderLoadFailureKind,
@@ -22,8 +26,18 @@ use crate::state::provider::{
 };
 use crate::state::{AppState, OverviewFailureKind, OverviewPhase, Route};
 use crate::theme;
+use crate::views::environment::EnvironmentAction;
+use crate::views::import::ImportAction;
 use crate::views::provider::{ProviderAction, ProviderEdit};
 use crate::views::shell::{ShellAction, ShellViewModel, render_shell};
+
+pub struct NativeManagerSources {
+    pub overview: Arc<dyn OverviewSource>,
+    pub provider: Arc<dyn ProviderSource>,
+    pub activation: Arc<dyn ProviderActivationSource>,
+    pub provider_import: Arc<dyn ProviderImportSource>,
+    pub environment: Arc<dyn RelayEnvironmentSource>,
+}
 
 pub struct NativeManagerApp {
     state: AppState,
@@ -31,10 +45,15 @@ pub struct NativeManagerApp {
     overview_dispatcher: OverviewDispatcher,
     provider_dispatcher: ProviderDispatcher,
     activation_dispatcher: ProviderActivationDispatcher,
+    import_dispatcher: ImportDispatcher,
+    environment_dispatcher: EnvironmentDispatcher,
     last_updated: Option<String>,
     overview_worker_stopped: bool,
     provider_store_worker_stopped: bool,
     activation_worker_stopped: bool,
+    import_worker_stopped: bool,
+    environment_worker_stopped: bool,
+    window_focused: bool,
     pending_route: Option<Route>,
     pending_provider_reload: bool,
     perf: Option<PerfRecorder>,
@@ -44,9 +63,7 @@ impl NativeManagerApp {
     pub fn new(
         creation: &eframe::CreationContext<'_>,
         cjk_font: Option<Vec<u8>>,
-        source: Arc<dyn OverviewSource>,
-        provider_source: Arc<dyn ProviderSource>,
-        activation_source: Arc<dyn ProviderActivationSource>,
+        sources: NativeManagerSources,
         perf: Option<PerfRecorder>,
     ) -> Self {
         egui_extras::install_image_loaders(&creation.egui_ctx);
@@ -57,17 +74,29 @@ impl NativeManagerApp {
         let persisted = persistence::load(creation.storage);
         theme::apply(&creation.egui_ctx, persisted.theme);
         let repaint_context = creation.egui_ctx.clone();
-        let overview_dispatcher =
-            OverviewDispatcher::spawn(source, Arc::new(move || repaint_context.request_repaint()));
+        let overview_dispatcher = OverviewDispatcher::spawn(
+            sources.overview,
+            Arc::new(move || repaint_context.request_repaint()),
+        );
         let provider_repaint_context = creation.egui_ctx.clone();
         let provider_dispatcher = ProviderDispatcher::spawn(
-            provider_source,
+            sources.provider,
             Arc::new(move || provider_repaint_context.request_repaint()),
         );
         let activation_repaint_context = creation.egui_ctx.clone();
         let activation_dispatcher = ProviderActivationDispatcher::spawn(
-            activation_source,
+            sources.activation,
             Arc::new(move || activation_repaint_context.request_repaint()),
+        );
+        let import_repaint_context = creation.egui_ctx.clone();
+        let import_dispatcher = ImportDispatcher::spawn(
+            sources.provider_import,
+            Arc::new(move || import_repaint_context.request_repaint()),
+        );
+        let environment_repaint_context = creation.egui_ctx.clone();
+        let environment_dispatcher = EnvironmentDispatcher::spawn(
+            sources.environment,
+            Arc::new(move || environment_repaint_context.request_repaint()),
         );
         let mut app = Self {
             state: AppState::default(),
@@ -75,16 +104,22 @@ impl NativeManagerApp {
             overview_dispatcher,
             provider_dispatcher,
             activation_dispatcher,
+            import_dispatcher,
+            environment_dispatcher,
             last_updated: None,
             overview_worker_stopped: false,
             provider_store_worker_stopped: false,
             activation_worker_stopped: false,
+            import_worker_stopped: false,
+            environment_worker_stopped: false,
+            window_focused: true,
             pending_route: None,
             pending_provider_reload: false,
             perf,
         };
         app.refresh_overview();
         app.load_providers();
+        app.load_pending_import();
         app
     }
 
@@ -115,15 +150,21 @@ impl NativeManagerApp {
             ShellAction::Navigate(route) => self.navigate(route),
             ShellAction::Refresh => match self.state.route {
                 Route::Providers => self.request_provider_reload(),
+                Route::Environment => self.inspect_environment(),
                 Route::Overview | Route::About => self.refresh_overview(),
             },
-            ShellAction::Retry => self.refresh_overview(),
+            ShellAction::Retry => match self.state.route {
+                Route::Environment => self.inspect_environment(),
+                Route::Overview | Route::Providers | Route::About => self.refresh_overview(),
+            },
             ShellAction::SetLocale(locale) => self.persisted.locale = locale,
             ShellAction::SetTheme(mode) => {
                 self.persisted.theme = mode;
                 theme::apply(ctx, mode);
             }
             ShellAction::Provider(action) => self.apply_provider_action(action),
+            ShellAction::Import(action) => self.apply_import_action(action),
+            ShellAction::Environment(action) => self.apply_environment_action(action),
         }
         ctx.request_repaint();
     }
@@ -139,12 +180,18 @@ impl NativeManagerApp {
             return;
         }
         self.pending_route = None;
+        self.state.provider_import.reset_route_transients();
         if self.state.route == Route::Providers && route != Route::Providers {
             self.state.provider.leave_provider_route();
         }
         self.state.route = route;
         if route == Route::Providers && self.state.provider.load_phase == ProviderLoadPhase::Idle {
             self.load_providers();
+        }
+        if route == Route::Environment
+            && self.state.environment.inspection_phase == OperationPhase::Idle
+        {
+            self.inspect_environment();
         }
     }
 
@@ -276,6 +323,155 @@ impl NativeManagerApp {
         }
     }
 
+    fn apply_import_action(&mut self, action: ImportAction) {
+        match action {
+            ImportAction::DiscoverCcs => self.discover_ccs_providers(),
+            ImportAction::CloseCcs => {
+                self.state.provider_import.close_discovery();
+            }
+            ImportAction::ConfirmCcs => self.import_ccs_providers(),
+            ImportAction::ConfirmPending => self.confirm_pending_import(),
+            ImportAction::DismissPending => self.dismiss_pending_import(),
+            ImportAction::RefreshPending => self.load_pending_import(),
+        }
+    }
+
+    fn apply_environment_action(&mut self, action: EnvironmentAction) {
+        match action {
+            EnvironmentAction::RetryInspection => self.inspect_environment(),
+            EnvironmentAction::SetSelected { name, selected } => {
+                self.state.environment.toggle_selection(&name, selected);
+            }
+            EnvironmentAction::RequestCleanup => {
+                self.state.environment.request_cleanup_confirmation();
+            }
+            EnvironmentAction::CancelCleanup => {
+                self.state.environment.cancel_cleanup_confirmation();
+            }
+            EnvironmentAction::ConfirmCleanup => self.cleanup_environment(),
+        }
+    }
+
+    fn discover_ccs_providers(&mut self) {
+        let request_id = self.state.provider_import.begin_discovery();
+        if self
+            .import_dispatcher
+            .request_discovery(request_id)
+            .is_err()
+        {
+            self.import_worker_stopped = true;
+            self.state
+                .provider_import
+                .apply_discovery_response(request_id, Err(ImportFailureKind::WorkerStopped));
+        }
+    }
+
+    fn import_ccs_providers(&mut self) {
+        let Some((request_id, request)) = self
+            .state
+            .provider_import
+            .begin_ccs_import(self.state.provider.is_dirty())
+        else {
+            return;
+        };
+        if self
+            .import_dispatcher
+            .request_ccs_import(request_id, request)
+            .is_err()
+        {
+            self.import_worker_stopped = true;
+            self.state
+                .provider_import
+                .apply_ccs_import_response(request_id, Err(ImportFailureKind::WorkerStopped));
+        }
+    }
+
+    fn load_pending_import(&mut self) {
+        let request_id = self.state.provider_import.begin_pending_load();
+        if self
+            .import_dispatcher
+            .request_pending_load(request_id)
+            .is_err()
+        {
+            self.import_worker_stopped = true;
+            self.state
+                .provider_import
+                .apply_pending_load_response(request_id, Err(ImportFailureKind::WorkerStopped));
+        }
+    }
+
+    fn confirm_pending_import(&mut self) {
+        let provider_revision = self
+            .state
+            .provider
+            .baseline
+            .as_ref()
+            .map(|workspace| workspace.revision.clone());
+        let Some((request_id, request)) = self
+            .state
+            .provider_import
+            .begin_pending_confirm(self.state.provider.is_dirty(), provider_revision)
+        else {
+            return;
+        };
+        if self
+            .import_dispatcher
+            .request_pending_confirm(request_id, request)
+            .is_err()
+        {
+            self.import_worker_stopped = true;
+            self.state
+                .provider_import
+                .apply_pending_confirm_response(request_id, Err(ImportFailureKind::WorkerStopped));
+        }
+    }
+
+    fn dismiss_pending_import(&mut self) {
+        let Some((request_id, request)) = self.state.provider_import.begin_pending_dismiss() else {
+            return;
+        };
+        if self
+            .import_dispatcher
+            .request_pending_dismiss(request_id, request)
+            .is_err()
+        {
+            self.import_worker_stopped = true;
+            self.state
+                .provider_import
+                .apply_pending_dismiss_response(request_id, Err(ImportFailureKind::WorkerStopped));
+        }
+    }
+
+    fn inspect_environment(&mut self) {
+        let request_id = self.state.environment.begin_inspection();
+        if self
+            .environment_dispatcher
+            .request_inspection(request_id)
+            .is_err()
+        {
+            self.environment_worker_stopped = true;
+            self.state
+                .environment
+                .apply_inspection_response(request_id, Err(EnvironmentFailureKind::WorkerStopped));
+        }
+    }
+
+    fn cleanup_environment(&mut self) {
+        let Some((request_id, request)) = self.state.environment.begin_cleanup() else {
+            return;
+        };
+        if self
+            .environment_dispatcher
+            .request_cleanup(request_id, request)
+            .is_err()
+        {
+            self.environment_worker_stopped = true;
+            self.state
+                .environment
+                .apply_cleanup_response(request_id, Err(EnvironmentFailureKind::WorkerStopped));
+        }
+    }
+
     fn save_providers(&mut self) {
         let Some((request_id, request)) = self.state.provider.begin_save() else {
             return;
@@ -333,6 +529,11 @@ impl NativeManagerApp {
                 self.state.provider.leave_provider_route();
             }
             self.state.route = route;
+            if route == Route::Environment
+                && self.state.environment.inspection_phase == OperationPhase::Idle
+            {
+                self.inspect_environment();
+            }
         }
         if std::mem::take(&mut self.pending_provider_reload) {
             self.load_providers();
@@ -605,6 +806,158 @@ impl NativeManagerApp {
         }
     }
 
+    fn reduce_import_responses(&mut self) {
+        loop {
+            match self.import_dispatcher.try_recv() {
+                Ok(Some(ImportResponse::Discovery { request_id, result })) => {
+                    self.state.provider_import.apply_discovery_response(
+                        request_id,
+                        result.map_err(|error| ImportFailureKind::Service(error.kind())),
+                    );
+                }
+                Ok(Some(ImportResponse::CcsImport { request_id, result })) => {
+                    let apply = self.state.provider_import.apply_ccs_import_response(
+                        request_id,
+                        result.map_err(|error| ImportFailureKind::Service(error.kind())),
+                    );
+                    self.install_import_workspace(apply.workspace);
+                }
+                Ok(Some(ImportResponse::PendingLoad { request_id, result })) => {
+                    self.state.provider_import.apply_pending_load_response(
+                        request_id,
+                        result.map_err(|error| ImportFailureKind::Service(error.kind())),
+                    );
+                }
+                Ok(Some(ImportResponse::PendingConfirm { request_id, result })) => {
+                    let apply = self.state.provider_import.apply_pending_confirm_response(
+                        request_id,
+                        result.map_err(|error| ImportFailureKind::Service(error.kind())),
+                    );
+                    self.install_import_workspace(apply.workspace);
+                }
+                Ok(Some(ImportResponse::PendingDismiss { request_id, result })) => {
+                    self.state.provider_import.apply_pending_dismiss_response(
+                        request_id,
+                        result.map_err(|error| ImportFailureKind::Service(error.kind())),
+                    );
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    if !self.import_worker_stopped {
+                        self.import_worker_stopped = true;
+                        self.fail_running_import_operations();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn install_import_workspace(
+        &mut self,
+        workspace: Option<Arc<codex_plus_manager_service::ProviderWorkspace>>,
+    ) {
+        let Some(workspace) = workspace else {
+            return;
+        };
+        if self.state.apply_imported_provider_workspace(workspace) {
+            self.last_updated = Some(current_utc_time());
+            self.load_providers();
+        }
+    }
+
+    fn fail_running_import_operations(&mut self) {
+        if self.state.provider_import.discovery.phase == OperationPhase::Running {
+            self.state.provider_import.apply_discovery_response(
+                self.state.provider_import.discovery.current_request_id,
+                Err(ImportFailureKind::WorkerStopped),
+            );
+        }
+        if self.state.provider_import.batch_import.phase == OperationPhase::Running {
+            self.state.provider_import.apply_ccs_import_response(
+                self.state.provider_import.batch_import.current_request_id,
+                Err(ImportFailureKind::WorkerStopped),
+            );
+        }
+        if self.state.provider_import.pending_load.phase == OperationPhase::Running {
+            self.state.provider_import.apply_pending_load_response(
+                self.state.provider_import.pending_load.current_request_id,
+                Err(ImportFailureKind::WorkerStopped),
+            );
+        }
+        if self.state.provider_import.pending_confirm.phase == OperationPhase::Running {
+            self.state.provider_import.apply_pending_confirm_response(
+                self.state
+                    .provider_import
+                    .pending_confirm
+                    .current_request_id,
+                Err(ImportFailureKind::WorkerStopped),
+            );
+        }
+        if self.state.provider_import.pending_dismiss.phase == OperationPhase::Running {
+            self.state.provider_import.apply_pending_dismiss_response(
+                self.state
+                    .provider_import
+                    .pending_dismiss
+                    .current_request_id,
+                Err(ImportFailureKind::WorkerStopped),
+            );
+        }
+    }
+
+    fn reduce_environment_responses(&mut self) {
+        loop {
+            match self.environment_dispatcher.try_recv() {
+                Ok(Some(EnvironmentResponse::Inspection { request_id, result })) => {
+                    let accepted = self.state.environment.apply_inspection_response(
+                        request_id,
+                        result.map_err(|error| EnvironmentFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.environment.inspection_phase == OperationPhase::Ready
+                    {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(EnvironmentResponse::Cleanup { request_id, result })) => {
+                    let accepted = self.state.environment.apply_cleanup_response(
+                        request_id,
+                        result.map_err(|error| EnvironmentFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.environment.cleanup_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    if !self.environment_worker_stopped {
+                        self.environment_worker_stopped = true;
+                        if self.state.environment.inspection_phase == OperationPhase::Running {
+                            self.state.environment.apply_inspection_response(
+                                self.state.environment.current_inspection_request_id,
+                                Err(EnvironmentFailureKind::WorkerStopped),
+                            );
+                        }
+                        if self.state.environment.cleanup_phase == OperationPhase::Running {
+                            self.state.environment.apply_cleanup_response(
+                                self.state.environment.current_cleanup_request_id,
+                                Err(EnvironmentFailureKind::WorkerStopped),
+                            );
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn refresh_pending_on_focus_regain(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
+        if focused && !self.window_focused {
+            self.load_pending_import();
+        }
+        self.window_focused = focused;
+    }
+
     fn view_model(&self) -> ShellViewModel {
         ShellViewModel {
             route: self.state.route,
@@ -661,6 +1014,36 @@ impl NativeManagerApp {
             PerfScriptAction::ToggleProviderList => {
                 Some(ShellAction::Provider(ProviderAction::ToggleList))
             }
+            PerfScriptAction::NavigateEnvironment => {
+                Some(ShellAction::Navigate(Route::Environment))
+            }
+            PerfScriptAction::RefreshEnvironment => Some(ShellAction::Refresh),
+            PerfScriptAction::SelectFirstEnvironmentConflict => self
+                .state
+                .environment
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.conflicts.first())
+                .map(|conflict| {
+                    ShellAction::Environment(EnvironmentAction::SetSelected {
+                        name: conflict.name.clone(),
+                        selected: true,
+                    })
+                }),
+            PerfScriptAction::RequestEnvironmentCleanup => {
+                Some(ShellAction::Environment(EnvironmentAction::RequestCleanup))
+            }
+            PerfScriptAction::CancelEnvironmentCleanup => {
+                Some(ShellAction::Environment(EnvironmentAction::CancelCleanup))
+            }
+            PerfScriptAction::OpenCcsImport => Some(ShellAction::Import(ImportAction::DiscoverCcs)),
+            PerfScriptAction::CloseCcsImport => Some(ShellAction::Import(ImportAction::CloseCcs)),
+            PerfScriptAction::RefreshPendingImport => {
+                Some(ShellAction::Import(ImportAction::RefreshPending))
+            }
+            PerfScriptAction::DismissPendingImport => {
+                Some(ShellAction::Import(ImportAction::DismissPending))
+            }
         };
         if let Some(action) = shell_action {
             self.apply_action(ctx, action);
@@ -673,6 +1056,9 @@ impl eframe::App for NativeManagerApp {
         self.reduce_overview_responses();
         self.reduce_provider_responses();
         self.reduce_activation_responses();
+        self.reduce_import_responses();
+        self.reduce_environment_responses();
+        self.refresh_pending_on_focus_regain(ctx);
         if let Some(perf) = &mut self.perf {
             perf.drive(ctx);
         }
@@ -684,7 +1070,13 @@ impl eframe::App for NativeManagerApp {
             self.apply_perf_action(ui.ctx(), action);
         }
         let model = self.view_model();
-        for action in render_shell(ui, &model, Some(&self.state.provider)) {
+        for action in render_shell(
+            ui,
+            &model,
+            Some(&self.state.provider),
+            Some(&self.state.provider_import),
+            Some(&self.state.environment),
+        ) {
             self.apply_action(ui.ctx(), action);
         }
         if let Some(perf) = &mut self.perf {

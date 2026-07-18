@@ -142,6 +142,25 @@ base_url = "https://api.example.test/v1"
     )
 }
 
+function New-PendingImportFixture {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    $Pending = [ordered]@{
+        name = 'Performance pending provider'
+        baseUrl = 'https://pending.example.test/v1'
+        apiKey = ''
+        wireApi = 'responses'
+        relayMode = 'pureApi'
+        configContents = ''
+        authContents = ''
+    }
+    $Json = $Pending | ConvertTo-Json -Depth 4
+    [IO.File]::WriteAllText($Path, $Json, [Text.UTF8Encoding]::new($false))
+}
+
 function Invoke-NativeSample {
     param(
         [Parameter(Mandatory)]
@@ -158,9 +177,13 @@ function Invoke-NativeSample {
     $ReportPath = Join-Path $SampleDirectory 'report.json'
     $SettingsPath = Join-Path $SampleDirectory 'settings.json'
     $CodexHome = Join-Path $SampleDirectory 'codex-home'
+    $CcsDbPath = Join-Path $SampleDirectory 'cc-switch.db'
+    $PendingImportPath = Join-Path $SampleDirectory 'pending-provider-import.json'
+    $BackupDirectory = Join-Path $SampleDirectory 'backups'
     New-Item -ItemType Directory -Path $SampleDirectory | Out-Null
     New-ProviderSettingsFixture -Path $SettingsPath
     New-CodexHomeFixture -Path $CodexHome
+    New-PendingImportFixture -Path $PendingImportPath
 
     $env:CODEX_PLUS_NATIVE_STATE_DIR = $StateDirectory
     $env:CODEX_PLUS_NATIVE_PERF_REPORT = $ReportPath
@@ -169,10 +192,16 @@ function Invoke-NativeSample {
     )
     $env:CODEX_PLUS_NATIVE_SETTINGS_PATH = $SettingsPath
     $env:CODEX_PLUS_NATIVE_CODEX_HOME = $CodexHome
+    $env:CODEX_PLUS_NATIVE_CCS_DB_PATH = $CcsDbPath
+    $env:CODEX_PLUS_NATIVE_PENDING_IMPORT_PATH = $PendingImportPath
+    $env:CODEX_PLUS_NATIVE_BACKUP_DIR = $BackupDirectory
+    $env:CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY = '1'
+    $env:OPENAI_CODEX_PLUS_PERF_SENTINEL = 'present'
 
     $Process = Start-Process `
         -FilePath $BinaryPath `
         -WorkingDirectory $RepositoryRoot `
+        -WindowStyle Hidden `
         -PassThru
     $PrivateMemoryBytes = $null
 
@@ -257,7 +286,12 @@ foreach ($Name in @(
     'CODEX_PLUS_NATIVE_PERF_REPORT',
     'CODEX_PLUS_NATIVE_PERF_EXIT_AFTER_MS',
     'CODEX_PLUS_NATIVE_SETTINGS_PATH',
-    'CODEX_PLUS_NATIVE_CODEX_HOME'
+    'CODEX_PLUS_NATIVE_CODEX_HOME',
+    'CODEX_PLUS_NATIVE_CCS_DB_PATH',
+    'CODEX_PLUS_NATIVE_PENDING_IMPORT_PATH',
+    'CODEX_PLUS_NATIVE_BACKUP_DIR',
+    'CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY',
+    'OPENAI_CODEX_PLUS_PERF_SENTINEL'
 )) {
     $PreviousEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
 }
@@ -286,11 +320,11 @@ try {
     if ($CpuSamples.Count -eq 0) {
         throw 'the 30-second sample did not contain CPU frame samples'
     }
-    if ($InputSamples.Count -ne 13) {
-        throw "expected 13 scripted input samples, got $($InputSamples.Count)"
+    if ($InputSamples.Count -ne 23) {
+        throw "expected 23 scripted input samples, got $($InputSamples.Count)"
     }
-    if ($IdleSample.ScriptActions.Count -ne 13) {
-        throw "expected 13 scripted actions, got $($IdleSample.ScriptActions.Count)"
+    if ($IdleSample.ScriptActions.Count -ne 23) {
+        throw "expected 23 scripted actions, got $($IdleSample.ScriptActions.Count)"
     }
     if ($null -eq $IdleSample.PrivateMemoryBytes) {
         throw 'the 30-second sample did not record private memory'

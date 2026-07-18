@@ -57,13 +57,29 @@ pub struct CodexEnvFileCheck {
 }
 
 pub fn inspect_relay_environment() -> RelayEnvironmentReport {
-    let codex_home = crate::codex_home::default_codex_home_dir();
+    inspect_relay_environment_at(&crate::codex_home::default_codex_home_dir())
+}
+
+pub fn inspect_relay_environment_at(codex_home: &Path) -> RelayEnvironmentReport {
     RelayEnvironmentReport {
         clash_verge_tun: inspect_clash_verge_tun(&clash_verge_config_candidates()),
         proxy_environment: ProxyEnvironmentCheck {
             variables: detect_proxy_environment_variables(),
         },
-        codex_env_file: inspect_codex_env_file(&codex_home),
+        codex_env_file: inspect_codex_env_file(codex_home),
+    }
+}
+
+pub fn inspect_process_relay_environment_at(codex_home: &Path) -> RelayEnvironmentReport {
+    RelayEnvironmentReport {
+        clash_verge_tun: ClashVergeTunCheck {
+            enabled: false,
+            config_path: None,
+        },
+        proxy_environment: ProxyEnvironmentCheck {
+            variables: detect_process_proxy_environment_variables(),
+        },
+        codex_env_file: inspect_codex_env_file(codex_home),
     }
 }
 
@@ -175,8 +191,7 @@ where
 }
 
 fn detect_proxy_environment_variables() -> Vec<ProxyEnvironmentVariable> {
-    let mut variables =
-        proxy_variables_from_pairs(std::env::vars(), ProxyEnvironmentSource::Process);
+    let mut variables = detect_process_proxy_environment_variables();
     variables.extend(detect_user_proxy_environment_variables());
     variables.sort_by(|left, right| {
         left.name
@@ -185,6 +200,10 @@ fn detect_proxy_environment_variables() -> Vec<ProxyEnvironmentVariable> {
     });
     variables.dedup();
     variables
+}
+
+fn detect_process_proxy_environment_variables() -> Vec<ProxyEnvironmentVariable> {
+    proxy_variables_from_pairs(std::env::vars(), ProxyEnvironmentSource::Process)
 }
 
 #[cfg(windows)]
