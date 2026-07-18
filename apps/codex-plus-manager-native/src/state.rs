@@ -8,6 +8,7 @@ pub mod import;
 pub mod marketplace;
 pub mod provider;
 pub mod sessions;
+pub mod user_scripts;
 
 use context::{ContextFailureKind, ContextViewState};
 use environment::EnvironmentViewState;
@@ -22,6 +23,7 @@ pub enum Route {
     Providers,
     Environment,
     Sessions,
+    Scripts,
     Context,
     About,
 }
@@ -98,6 +100,7 @@ pub struct AppState {
     pub sessions: SessionViewState,
     pub context: ContextViewState,
     pub marketplace: marketplace::MarketplaceViewState,
+    pub user_scripts: user_scripts::UserScriptViewState,
 }
 
 impl AppState {

@@ -10,7 +10,7 @@ use codex_plus_manager_native::perf::PerfRecorder;
 use codex_plus_manager_service::{
     ContextToolsService, PluginMarketplaceService, ProviderImportService, ProviderService,
     ProviderSyncService, RelayEnvironmentService, SessionService, SystemOverviewSource,
-    SystemProviderEnvironment,
+    SystemProviderEnvironment, UserScriptService,
 };
 use eframe::egui;
 
@@ -59,6 +59,7 @@ fn main() -> eframe::Result {
             let marketplace_service = Arc::new(PluginMarketplaceService::new(environment.clone()));
             let session_service = Arc::new(SessionService::new(environment.clone()));
             let provider_sync_service = Arc::new(ProviderSyncService::new(environment.clone()));
+            let user_script_service = Arc::new(UserScriptService::new(environment.clone()));
             let environment_service = Arc::new(RelayEnvironmentService::new(environment));
             Ok(Box::new(NativeManagerApp::new(
                 creation,
@@ -73,6 +74,7 @@ fn main() -> eframe::Result {
                     marketplace: marketplace_service,
                     sessions: session_service,
                     provider_sync: provider_sync_service,
+                    user_scripts: user_script_service,
                 },
                 perf,
             )))

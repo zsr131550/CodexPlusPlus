@@ -64,6 +64,7 @@ fn render(ui: &mut egui::Ui, state: &mut FeatureState) {
             ShellAction::Import(_)
             | ShellAction::Environment(_)
             | ShellAction::Sessions(_)
+            | ShellAction::UserScripts(_)
             | ShellAction::Context(_)
             | ShellAction::Marketplace(_) => {}
             ShellAction::Refresh

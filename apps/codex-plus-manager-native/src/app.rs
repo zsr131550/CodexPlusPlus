@@ -5,7 +5,8 @@ use codex_plus_manager_service::{
     ContextKind, ContextToolsSource, DiagnoseProviderProfile, FetchProviderModels, OverviewSource,
     PluginMarketplaceKind, PluginMarketplaceSource, ProviderActivationSource, ProviderErrorKind,
     ProviderImportSource, ProviderNetworkFailureKind, ProviderProfile, ProviderSource,
-    ProviderSyncSource, RelayEnvironmentSource, SessionSource, TestProviderProfile,
+    ProviderSyncSource, RelayEnvironmentSource, ScriptIntegrity, SessionSource,
+    TestProviderProfile, UserScriptOrigin, UserScriptRevision, UserScriptSource,
 };
 use eframe::egui;
 
@@ -20,6 +21,7 @@ use crate::runtime::provider::{
     ActivationResponse, ProviderActivationDispatcher, ProviderDispatcher, StoreResponse,
 };
 use crate::runtime::sessions::{SessionDispatcher, SessionResponse};
+use crate::runtime::user_scripts::{UserScriptDispatcher, UserScriptResponse};
 use crate::runtime::{DispatchError, OverviewDispatcher};
 use crate::state::context::ContextFailureKind;
 use crate::state::environment::EnvironmentFailureKind;
@@ -31,6 +33,7 @@ use crate::state::provider::{
     ProviderLoadPhase, ProviderSaveFailureKind, TransitionResult,
 };
 use crate::state::sessions::{ProviderSyncFailureKind, SessionFailureKind};
+use crate::state::user_scripts::{ScriptsTab, UserScriptFailureKind};
 use crate::state::{AppState, OverviewFailureKind, OverviewPhase, Route};
 use crate::theme;
 use crate::views::context::ContextAction;
@@ -40,6 +43,7 @@ use crate::views::marketplace::MarketplaceAction;
 use crate::views::provider::{ProviderAction, ProviderEdit};
 use crate::views::sessions::SessionAction;
 use crate::views::shell::{ShellAction, ShellFeatureStates, ShellViewModel, render_shell};
+use crate::views::user_scripts::UserScriptAction;
 
 pub struct NativeManagerSources {
     pub overview: Arc<dyn OverviewSource>,
@@ -51,6 +55,7 @@ pub struct NativeManagerSources {
     pub marketplace: Arc<dyn PluginMarketplaceSource>,
     pub sessions: Arc<dyn SessionSource>,
     pub provider_sync: Arc<dyn ProviderSyncSource>,
+    pub user_scripts: Arc<dyn UserScriptSource>,
 }
 
 pub struct NativeManagerApp {
@@ -64,6 +69,7 @@ pub struct NativeManagerApp {
     context_dispatcher: ContextDispatcher,
     marketplace_dispatcher: MarketplaceDispatcher,
     session_dispatcher: SessionDispatcher,
+    user_script_dispatcher: UserScriptDispatcher,
     last_updated: Option<String>,
     overview_worker_stopped: bool,
     provider_store_worker_stopped: bool,
@@ -73,10 +79,12 @@ pub struct NativeManagerApp {
     context_worker_stopped: bool,
     marketplace_worker_stopped: bool,
     session_worker_stopped: bool,
+    user_script_worker_stopped: bool,
     window_focused: bool,
     pending_route: Option<Route>,
     pending_provider_reload: bool,
     perf: Option<PerfRecorder>,
+    perf_stale_user_script_revision: Option<UserScriptRevision>,
 }
 
 impl NativeManagerApp {
@@ -134,6 +142,11 @@ impl NativeManagerApp {
             sources.provider_sync,
             Arc::new(move || session_repaint_context.request_repaint()),
         );
+        let user_script_repaint_context = creation.egui_ctx.clone();
+        let user_script_dispatcher = UserScriptDispatcher::spawn(
+            sources.user_scripts,
+            Arc::new(move || user_script_repaint_context.request_repaint()),
+        );
         let mut app = Self {
             state: AppState::default(),
             persisted,
@@ -145,6 +158,7 @@ impl NativeManagerApp {
             context_dispatcher,
             marketplace_dispatcher,
             session_dispatcher,
+            user_script_dispatcher,
             last_updated: None,
             overview_worker_stopped: false,
             provider_store_worker_stopped: false,
@@ -154,10 +168,12 @@ impl NativeManagerApp {
             context_worker_stopped: false,
             marketplace_worker_stopped: false,
             session_worker_stopped: false,
+            user_script_worker_stopped: false,
             window_focused: true,
             pending_route: None,
             pending_provider_reload: false,
             perf,
+            perf_stale_user_script_revision: None,
         };
         app.refresh_overview();
         app.load_providers();
@@ -194,6 +210,7 @@ impl NativeManagerApp {
                 Route::Providers => self.request_provider_reload(),
                 Route::Environment => self.inspect_environment(),
                 Route::Sessions => self.refresh_sessions_route(),
+                Route::Scripts => self.refresh_user_scripts_route(),
                 Route::Context => {
                     self.load_context_workspace();
                     self.inspect_plugin_marketplaces();
@@ -203,6 +220,7 @@ impl NativeManagerApp {
             ShellAction::Retry => match self.state.route {
                 Route::Environment => self.inspect_environment(),
                 Route::Sessions => self.refresh_sessions_route(),
+                Route::Scripts => self.refresh_user_scripts_route(),
                 Route::Context => {
                     self.load_context_workspace();
                     self.inspect_plugin_marketplaces();
@@ -218,6 +236,7 @@ impl NativeManagerApp {
             ShellAction::Import(action) => self.apply_import_action(action),
             ShellAction::Environment(action) => self.apply_environment_action(action),
             ShellAction::Sessions(action) => self.apply_session_action(action),
+            ShellAction::UserScripts(action) => self.apply_user_script_action(action),
             ShellAction::Context(action) => self.apply_context_action(action),
             ShellAction::Marketplace(action) => self.apply_marketplace_action(action),
         }
@@ -241,6 +260,7 @@ impl NativeManagerApp {
         }
         let entering_context = self.state.route != Route::Context && route == Route::Context;
         let entering_sessions = self.state.route != Route::Sessions && route == Route::Sessions;
+        let entering_scripts = self.state.route != Route::Scripts && route == Route::Scripts;
         self.state.route = route;
         if route == Route::Providers && self.state.provider.load_phase == ProviderLoadPhase::Idle {
             self.load_providers();
@@ -256,6 +276,9 @@ impl NativeManagerApp {
         }
         if entering_sessions {
             self.refresh_sessions_route();
+        }
+        if entering_scripts {
+            self.refresh_user_scripts_route();
         }
     }
 
@@ -459,6 +482,180 @@ impl NativeManagerApp {
     fn refresh_sessions_route(&mut self) {
         self.load_session_workspace();
         self.load_session_provider_workspace();
+    }
+
+    fn apply_user_script_action(&mut self, action: UserScriptAction) {
+        match action {
+            UserScriptAction::RefreshMarket => self.load_script_market(),
+            UserScriptAction::RefreshLocal => self.load_local_scripts(),
+            UserScriptAction::SetTab(tab) => {
+                self.state.user_scripts.set_tab(tab);
+            }
+            UserScriptAction::SetMarketQuery(query) => {
+                self.state.user_scripts.set_market_query(query);
+            }
+            UserScriptAction::SetMarketFilter(filter) => {
+                self.state.user_scripts.set_market_filter(filter);
+            }
+            UserScriptAction::SetMarketPage(page) => {
+                self.state.user_scripts.set_market_page(page);
+            }
+            UserScriptAction::SetLocalQuery(query) => {
+                self.state.user_scripts.set_local_query(query);
+            }
+            UserScriptAction::SetLocalFilter(filter) => {
+                self.state.user_scripts.set_local_filter(filter);
+            }
+            UserScriptAction::SetLocalPage(page) => {
+                self.state.user_scripts.set_local_page(page);
+            }
+            UserScriptAction::RequestInstall(script_id) => {
+                self.state.user_scripts.request_install(&script_id);
+            }
+            UserScriptAction::SetUnverifiedAcknowledgement(acknowledged) => {
+                self.state
+                    .user_scripts
+                    .set_unverified_acknowledgement(acknowledged);
+            }
+            UserScriptAction::CancelInstall => {
+                self.state.user_scripts.cancel_install();
+            }
+            UserScriptAction::ConfirmInstall => self.install_user_script(),
+            UserScriptAction::SetGlobalEnabled(enabled) => {
+                self.set_all_user_scripts_enabled(enabled);
+            }
+            UserScriptAction::SetScriptEnabled { key, enabled } => {
+                self.set_user_script_enabled(&key, enabled);
+            }
+            UserScriptAction::RequestDelete(key) => {
+                self.state.user_scripts.request_delete(&key);
+            }
+            UserScriptAction::CancelDelete => {
+                self.state.user_scripts.cancel_delete();
+            }
+            UserScriptAction::ConfirmDelete => self.delete_user_script(),
+            UserScriptAction::Retry => self.refresh_user_scripts_route(),
+        }
+    }
+
+    fn refresh_user_scripts_route(&mut self) {
+        self.load_local_scripts();
+        self.load_script_market();
+    }
+
+    fn load_local_scripts(&mut self) {
+        if self.user_script_worker_stopped {
+            self.state.user_scripts.mark_worker_stopped();
+            return;
+        }
+        let request_id = self.state.user_scripts.begin_local_refresh();
+        if self
+            .user_script_dispatcher
+            .request_local(request_id)
+            .is_err()
+        {
+            self.stop_user_script_worker();
+        }
+    }
+
+    fn load_script_market(&mut self) {
+        if self.user_script_worker_stopped {
+            self.state.user_scripts.mark_worker_stopped();
+            return;
+        }
+        let request_id = self.state.user_scripts.begin_market_refresh();
+        if self
+            .user_script_dispatcher
+            .request_market(request_id)
+            .is_err()
+        {
+            self.stop_user_script_worker();
+        }
+    }
+
+    fn install_user_script(&mut self) {
+        let Some((request_id, request)) = self.state.user_scripts.confirm_install() else {
+            return;
+        };
+        if self
+            .user_script_dispatcher
+            .request_install(request_id, request)
+            .is_err()
+        {
+            self.stop_user_script_worker();
+        }
+    }
+
+    fn set_all_user_scripts_enabled(&mut self, enabled: bool) {
+        let Some((request_id, request)) = self.state.user_scripts.request_global_enabled(enabled)
+        else {
+            return;
+        };
+        if self
+            .user_script_dispatcher
+            .request_set_global(request_id, request)
+            .is_err()
+        {
+            self.stop_user_script_worker();
+        }
+    }
+
+    fn set_user_script_enabled(&mut self, key: &str, enabled: bool) {
+        let Some((request_id, request)) =
+            self.state.user_scripts.request_script_enabled(key, enabled)
+        else {
+            return;
+        };
+        if self
+            .user_script_dispatcher
+            .request_set_script(request_id, request)
+            .is_err()
+        {
+            self.stop_user_script_worker();
+        }
+    }
+
+    fn delete_user_script(&mut self) {
+        let Some((request_id, request)) = self.state.user_scripts.confirm_delete() else {
+            return;
+        };
+        if self
+            .user_script_dispatcher
+            .request_delete(request_id, request)
+            .is_err()
+        {
+            self.stop_user_script_worker();
+        }
+    }
+
+    fn stop_user_script_worker(&mut self) {
+        self.user_script_worker_stopped = true;
+        self.state.user_scripts.mark_worker_stopped();
+    }
+
+    fn request_perf_user_script_conflict(&mut self) {
+        let Some(stale_revision) = self.perf_stale_user_script_revision.clone() else {
+            return;
+        };
+        let enabled = self
+            .state
+            .user_scripts
+            .local
+            .as_ref()
+            .is_some_and(|workspace| !workspace.globally_enabled);
+        let Some((request_id, mut request)) =
+            self.state.user_scripts.request_global_enabled(enabled)
+        else {
+            return;
+        };
+        request.expected_revision = stale_revision;
+        if self
+            .user_script_dispatcher
+            .request_set_global(request_id, request)
+            .is_err()
+        {
+            self.stop_user_script_worker();
+        }
     }
 
     fn load_session_workspace(&mut self) {
@@ -955,6 +1152,9 @@ impl NativeManagerApp {
             if route == Route::Sessions {
                 self.refresh_sessions_route();
             }
+            if route == Route::Scripts {
+                self.refresh_user_scripts_route();
+            }
         }
         if std::mem::take(&mut self.pending_provider_reload) {
             self.load_providers();
@@ -1433,6 +1633,47 @@ impl NativeManagerApp {
         }
     }
 
+    fn reduce_user_script_responses(&mut self) {
+        loop {
+            match self.user_script_dispatcher.try_recv() {
+                Ok(Some(UserScriptResponse::LocalInspected { request_id, result })) => {
+                    let accepted = self.state.user_scripts.apply_local_response(
+                        request_id,
+                        result.map_err(|error| UserScriptFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.user_scripts.local_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(UserScriptResponse::MarketRefreshed { request_id, result })) => {
+                    let accepted = self.state.user_scripts.apply_market_response(
+                        request_id,
+                        result.map_err(|error| UserScriptFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.user_scripts.market_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(UserScriptResponse::MutationFinished { request_id, result })) => {
+                    let accepted = self.state.user_scripts.apply_mutation_response(
+                        request_id,
+                        result.map_err(|error| UserScriptFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.user_scripts.mutation_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    if !self.user_script_worker_stopped {
+                        self.stop_user_script_worker();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     fn reduce_context_responses(&mut self) {
         loop {
             match self.context_dispatcher.try_recv() {
@@ -1583,6 +1824,9 @@ impl NativeManagerApp {
             }
             if self.state.route == Route::Sessions {
                 self.refresh_sessions_route();
+            }
+            if self.state.route == Route::Scripts {
+                self.refresh_user_scripts_route();
             }
         }
         self.window_focused = focused;
@@ -1783,6 +2027,96 @@ impl NativeManagerApp {
             PerfScriptAction::CancelProviderRepair => {
                 Some(ShellAction::Sessions(SessionAction::CancelProviderRepair))
             }
+            PerfScriptAction::NavigateScripts => Some(ShellAction::Navigate(Route::Scripts)),
+            PerfScriptAction::RefreshLocalScripts => {
+                Some(ShellAction::UserScripts(UserScriptAction::RefreshLocal))
+            }
+            PerfScriptAction::RefreshScriptMarket => {
+                Some(ShellAction::UserScripts(UserScriptAction::RefreshMarket))
+            }
+            PerfScriptAction::OpenLocalScripts => Some(ShellAction::UserScripts(
+                UserScriptAction::SetTab(ScriptsTab::Local),
+            )),
+            PerfScriptAction::OpenScriptMarket => Some(ShellAction::UserScripts(
+                UserScriptAction::SetTab(ScriptsTab::Market),
+            )),
+            PerfScriptAction::RequestVerifiedScriptInstall => self
+                .state
+                .user_scripts
+                .market
+                .as_ref()
+                .and_then(|market| {
+                    market.entries.iter().find(|entry| {
+                        entry.integrity == ScriptIntegrity::Verified
+                            && self
+                                .state
+                                .user_scripts
+                                .installed_version(&entry.id)
+                                .is_none()
+                    })
+                })
+                .map(|entry| {
+                    ShellAction::UserScripts(UserScriptAction::RequestInstall(entry.id.clone()))
+                }),
+            PerfScriptAction::CancelScriptInstall => {
+                Some(ShellAction::UserScripts(UserScriptAction::CancelInstall))
+            }
+            PerfScriptAction::ConfirmVerifiedScriptInstall => {
+                Some(ShellAction::UserScripts(UserScriptAction::ConfirmInstall))
+            }
+            PerfScriptAction::DisableAllScripts => {
+                self.perf_stale_user_script_revision = self
+                    .state
+                    .user_scripts
+                    .local
+                    .as_ref()
+                    .map(|workspace| workspace.revision.clone());
+                Some(ShellAction::UserScripts(
+                    UserScriptAction::SetGlobalEnabled(false),
+                ))
+            }
+            PerfScriptAction::ToggleFirstUserScript => self
+                .state
+                .user_scripts
+                .local
+                .as_ref()
+                .and_then(|workspace| {
+                    workspace.scripts.iter().find(|script| {
+                        script.origin == UserScriptOrigin::User && script.market_id.is_none()
+                    })
+                })
+                .map(|script| {
+                    ShellAction::UserScripts(UserScriptAction::SetScriptEnabled {
+                        key: script.key.clone(),
+                        enabled: !script.enabled,
+                    })
+                }),
+            PerfScriptAction::RequestScriptConflict => {
+                self.request_perf_user_script_conflict();
+                None
+            }
+            PerfScriptAction::RetryScriptConflict => {
+                Some(ShellAction::UserScripts(UserScriptAction::Retry))
+            }
+            PerfScriptAction::RequestDeleteFirstUserScript => self
+                .state
+                .user_scripts
+                .local
+                .as_ref()
+                .and_then(|workspace| {
+                    workspace.scripts.iter().find(|script| {
+                        script.origin == UserScriptOrigin::User && script.market_id.is_none()
+                    })
+                })
+                .map(|script| {
+                    ShellAction::UserScripts(UserScriptAction::RequestDelete(script.key.clone()))
+                }),
+            PerfScriptAction::CancelUserScriptDelete => {
+                Some(ShellAction::UserScripts(UserScriptAction::CancelDelete))
+            }
+            PerfScriptAction::ConfirmUserScriptDelete => {
+                Some(ShellAction::UserScripts(UserScriptAction::ConfirmDelete))
+            }
         };
         if let Some(action) = shell_action {
             self.apply_action(ctx, action);
@@ -1798,6 +2132,7 @@ impl eframe::App for NativeManagerApp {
         self.reduce_import_responses();
         self.reduce_environment_responses();
         self.reduce_session_responses();
+        self.reduce_user_script_responses();
         self.reduce_context_responses();
         self.reduce_marketplace_responses();
         self.refresh_pending_on_focus_regain(ctx);
@@ -1822,6 +2157,7 @@ impl eframe::App for NativeManagerApp {
                 context: Some(&self.state.context),
                 marketplace: Some(&self.state.marketplace),
                 sessions: Some(&self.state.sessions),
+                user_scripts: Some(&self.state.user_scripts),
             },
         ) {
             self.apply_action(ui.ctx(), action);
