@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-const SCRIPT_DURATION: Duration = Duration::from_secs(12);
+const SCRIPT_DURATION: Duration = Duration::from_secs(20);
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const FINAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -42,6 +42,18 @@ pub enum PerfScriptAction {
     NavigateOverview,
     RefreshPendingImport,
     DismissPendingImport,
+    NavigateContext,
+    RefreshContext,
+    SelectNextContextKind,
+    CreateContextEntry,
+    CancelContextEditor,
+    OpenFirstContextEntry,
+    ToggleFirstContextEntry,
+    RequestDeleteFirstContextEntry,
+    CancelContextDelete,
+    PreviewContextSync,
+    CancelContextSyncPreview,
+    ConfirmContextSync,
 }
 
 enum PerfEvent {
@@ -130,6 +142,10 @@ impl PerfRecorder {
     pub fn scripted_action(&self, ui: &egui::Ui) -> Option<PerfScriptAction> {
         ui.input(|input| {
             [
+                egui::Key::F1,
+                egui::Key::F2,
+                egui::Key::F3,
+                egui::Key::F4,
                 egui::Key::F5,
                 egui::Key::F6,
                 egui::Key::F7,
@@ -151,6 +167,15 @@ impl PerfRecorder {
                 egui::Key::F23,
                 egui::Key::F24,
                 egui::Key::F25,
+                egui::Key::F26,
+                egui::Key::F27,
+                egui::Key::F28,
+                egui::Key::F29,
+                egui::Key::F30,
+                egui::Key::F31,
+                egui::Key::F32,
+                egui::Key::F33,
+                egui::Key::F34,
             ]
             .into_iter()
             .find(|key| input.key_pressed(*key))
@@ -226,59 +251,81 @@ fn valid_samples(samples: &[f64]) -> Vec<f64> {
 }
 
 fn script_step(index: usize) -> Option<(Duration, egui::Key)> {
-    const STEPS: [(u64, egui::Key); 23] = [
-        (500, egui::Key::F5),
-        (1_000, egui::Key::F6),
-        (1_500, egui::Key::F7),
-        (2_000, egui::Key::F8),
-        (2_500, egui::Key::F9),
-        (3_000, egui::Key::F10),
-        (3_500, egui::Key::F11),
-        (4_000, egui::Key::F12),
-        (4_500, egui::Key::F13),
-        (5_000, egui::Key::F14),
-        (5_500, egui::Key::F15),
-        (6_000, egui::Key::F16),
-        (6_500, egui::Key::F17),
-        (7_000, egui::Key::F18),
-        (7_500, egui::Key::F19),
-        (8_000, egui::Key::F20),
-        (8_500, egui::Key::F21),
-        (9_000, egui::Key::F22),
-        (9_500, egui::Key::F23),
-        (10_000, egui::Key::F24),
-        (10_500, egui::Key::F25),
-        (11_000, egui::Key::F26),
-        (11_500, egui::Key::F27),
+    const KEYS: [egui::Key; 34] = [
+        egui::Key::F1,
+        egui::Key::F2,
+        egui::Key::F3,
+        egui::Key::F4,
+        egui::Key::F5,
+        egui::Key::F6,
+        egui::Key::F7,
+        egui::Key::F8,
+        egui::Key::F9,
+        egui::Key::F10,
+        egui::Key::F11,
+        egui::Key::F12,
+        egui::Key::F13,
+        egui::Key::F14,
+        egui::Key::F15,
+        egui::Key::F16,
+        egui::Key::F17,
+        egui::Key::F18,
+        egui::Key::F19,
+        egui::Key::F20,
+        egui::Key::F21,
+        egui::Key::F22,
+        egui::Key::F23,
+        egui::Key::F24,
+        egui::Key::F25,
+        egui::Key::F26,
+        egui::Key::F27,
+        egui::Key::F28,
+        egui::Key::F29,
+        egui::Key::F30,
+        egui::Key::F31,
+        egui::Key::F32,
+        egui::Key::F33,
+        egui::Key::F34,
     ];
-    STEPS
-        .get(index)
-        .map(|(milliseconds, key)| (Duration::from_millis(*milliseconds), *key))
+    KEYS.get(index).map(|key| {
+        let milliseconds = u64::try_from(index + 1).expect("script index fits u64") * 500;
+        (Duration::from_millis(milliseconds), *key)
+    })
 }
 
 fn script_action_for_key(key: egui::Key) -> Option<PerfScriptAction> {
     match key {
-        egui::Key::F5 => Some(PerfScriptAction::NavigateProviders),
-        egui::Key::F6 => Some(PerfScriptAction::SelectNextProvider),
-        egui::Key::F7 => Some(PerfScriptAction::EditProviderName),
-        egui::Key::F8 => Some(PerfScriptAction::DiscardProvider),
-        egui::Key::F9 => Some(PerfScriptAction::RefreshLive),
-        egui::Key::F10 => Some(PerfScriptAction::OpenLiveTab),
-        egui::Key::F11 | egui::Key::F13 => Some(PerfScriptAction::RequestClearLive),
-        egui::Key::F12 => Some(PerfScriptAction::CancelLiveConfirmation),
-        egui::Key::F14 => Some(PerfScriptAction::ConfirmLiveMutation),
-        egui::Key::F15 | egui::Key::F16 => Some(PerfScriptAction::ToggleProviderList),
-        egui::Key::F17 => Some(PerfScriptAction::NavigateEnvironment),
-        egui::Key::F18 => Some(PerfScriptAction::RefreshEnvironment),
-        egui::Key::F19 => Some(PerfScriptAction::SelectFirstEnvironmentConflict),
-        egui::Key::F20 => Some(PerfScriptAction::RequestEnvironmentCleanup),
-        egui::Key::F21 => Some(PerfScriptAction::CancelEnvironmentCleanup),
-        egui::Key::F22 => Some(PerfScriptAction::NavigateProviders),
-        egui::Key::F23 => Some(PerfScriptAction::OpenCcsImport),
-        egui::Key::F24 => Some(PerfScriptAction::CloseCcsImport),
-        egui::Key::F25 => Some(PerfScriptAction::NavigateOverview),
-        egui::Key::F26 => Some(PerfScriptAction::RefreshPendingImport),
-        egui::Key::F27 => Some(PerfScriptAction::DismissPendingImport),
+        egui::Key::F1 => Some(PerfScriptAction::NavigateProviders),
+        egui::Key::F2 => Some(PerfScriptAction::SelectNextProvider),
+        egui::Key::F3 => Some(PerfScriptAction::EditProviderName),
+        egui::Key::F4 => Some(PerfScriptAction::DiscardProvider),
+        egui::Key::F5 => Some(PerfScriptAction::RefreshLive),
+        egui::Key::F6 => Some(PerfScriptAction::OpenLiveTab),
+        egui::Key::F7 | egui::Key::F9 => Some(PerfScriptAction::RequestClearLive),
+        egui::Key::F8 => Some(PerfScriptAction::CancelLiveConfirmation),
+        egui::Key::F10 => Some(PerfScriptAction::ConfirmLiveMutation),
+        egui::Key::F11 => Some(PerfScriptAction::ToggleProviderList),
+        egui::Key::F12 => Some(PerfScriptAction::NavigateEnvironment),
+        egui::Key::F13 => Some(PerfScriptAction::RefreshEnvironment),
+        egui::Key::F14 => Some(PerfScriptAction::SelectFirstEnvironmentConflict),
+        egui::Key::F15 => Some(PerfScriptAction::RequestEnvironmentCleanup),
+        egui::Key::F16 => Some(PerfScriptAction::CancelEnvironmentCleanup),
+        egui::Key::F17 => Some(PerfScriptAction::NavigateProviders),
+        egui::Key::F18 => Some(PerfScriptAction::OpenCcsImport),
+        egui::Key::F19 => Some(PerfScriptAction::CloseCcsImport),
+        egui::Key::F20 => Some(PerfScriptAction::NavigateOverview),
+        egui::Key::F21 => Some(PerfScriptAction::NavigateContext),
+        egui::Key::F22 => Some(PerfScriptAction::RefreshContext),
+        egui::Key::F23 => Some(PerfScriptAction::SelectNextContextKind),
+        egui::Key::F24 => Some(PerfScriptAction::CreateContextEntry),
+        egui::Key::F25 | egui::Key::F27 => Some(PerfScriptAction::CancelContextEditor),
+        egui::Key::F26 => Some(PerfScriptAction::OpenFirstContextEntry),
+        egui::Key::F28 => Some(PerfScriptAction::ToggleFirstContextEntry),
+        egui::Key::F29 => Some(PerfScriptAction::RequestDeleteFirstContextEntry),
+        egui::Key::F30 => Some(PerfScriptAction::CancelContextDelete),
+        egui::Key::F31 | egui::Key::F33 => Some(PerfScriptAction::PreviewContextSync),
+        egui::Key::F32 => Some(PerfScriptAction::CancelContextSyncPreview),
+        egui::Key::F34 => Some(PerfScriptAction::ConfirmContextSync),
         _ => None,
     }
 }
@@ -306,6 +353,18 @@ impl PerfScriptAction {
             Self::NavigateOverview => "navigate_overview",
             Self::RefreshPendingImport => "refresh_pending_import",
             Self::DismissPendingImport => "dismiss_pending_import",
+            Self::NavigateContext => "navigate_context",
+            Self::RefreshContext => "refresh_context",
+            Self::SelectNextContextKind => "select_next_context_kind",
+            Self::CreateContextEntry => "create_context_entry",
+            Self::CancelContextEditor => "cancel_context_editor",
+            Self::OpenFirstContextEntry => "open_first_context_entry",
+            Self::ToggleFirstContextEntry => "toggle_first_context_entry",
+            Self::RequestDeleteFirstContextEntry => "request_delete_first_context_entry",
+            Self::CancelContextDelete => "cancel_context_delete",
+            Self::PreviewContextSync => "preview_context_sync",
+            Self::CancelContextSyncPreview => "cancel_context_sync_preview",
+            Self::ConfirmContextSync => "confirm_context_sync",
         }
     }
 }
@@ -442,55 +501,90 @@ mod tests {
     }
 
     #[test]
-    fn native_perf_script_covers_provider_import_and_environment_paths() {
+    fn native_perf_script_covers_provider_import_environment_and_context_paths() {
         let expected = [
-            (500, egui::Key::F5, PerfScriptAction::NavigateProviders),
-            (1_000, egui::Key::F6, PerfScriptAction::SelectNextProvider),
-            (1_500, egui::Key::F7, PerfScriptAction::EditProviderName),
-            (2_000, egui::Key::F8, PerfScriptAction::DiscardProvider),
-            (2_500, egui::Key::F9, PerfScriptAction::RefreshLive),
-            (3_000, egui::Key::F10, PerfScriptAction::OpenLiveTab),
-            (3_500, egui::Key::F11, PerfScriptAction::RequestClearLive),
+            (500, egui::Key::F1, PerfScriptAction::NavigateProviders),
+            (1_000, egui::Key::F2, PerfScriptAction::SelectNextProvider),
+            (1_500, egui::Key::F3, PerfScriptAction::EditProviderName),
+            (2_000, egui::Key::F4, PerfScriptAction::DiscardProvider),
+            (2_500, egui::Key::F5, PerfScriptAction::RefreshLive),
+            (3_000, egui::Key::F6, PerfScriptAction::OpenLiveTab),
+            (3_500, egui::Key::F7, PerfScriptAction::RequestClearLive),
             (
                 4_000,
-                egui::Key::F12,
+                egui::Key::F8,
                 PerfScriptAction::CancelLiveConfirmation,
             ),
-            (4_500, egui::Key::F13, PerfScriptAction::RequestClearLive),
-            (5_000, egui::Key::F14, PerfScriptAction::ConfirmLiveMutation),
-            (5_500, egui::Key::F15, PerfScriptAction::ToggleProviderList),
-            (6_000, egui::Key::F16, PerfScriptAction::ToggleProviderList),
-            (6_500, egui::Key::F17, PerfScriptAction::NavigateEnvironment),
-            (7_000, egui::Key::F18, PerfScriptAction::RefreshEnvironment),
+            (4_500, egui::Key::F9, PerfScriptAction::RequestClearLive),
+            (5_000, egui::Key::F10, PerfScriptAction::ConfirmLiveMutation),
+            (5_500, egui::Key::F11, PerfScriptAction::ToggleProviderList),
+            (6_000, egui::Key::F12, PerfScriptAction::NavigateEnvironment),
+            (6_500, egui::Key::F13, PerfScriptAction::RefreshEnvironment),
             (
-                7_500,
-                egui::Key::F19,
+                7_000,
+                egui::Key::F14,
                 PerfScriptAction::SelectFirstEnvironmentConflict,
             ),
             (
-                8_000,
-                egui::Key::F20,
+                7_500,
+                egui::Key::F15,
                 PerfScriptAction::RequestEnvironmentCleanup,
             ),
             (
-                8_500,
-                egui::Key::F21,
+                8_000,
+                egui::Key::F16,
                 PerfScriptAction::CancelEnvironmentCleanup,
             ),
-            (9_000, egui::Key::F22, PerfScriptAction::NavigateProviders),
-            (9_500, egui::Key::F23, PerfScriptAction::OpenCcsImport),
-            (10_000, egui::Key::F24, PerfScriptAction::CloseCcsImport),
-            (10_500, egui::Key::F25, PerfScriptAction::NavigateOverview),
-            (
-                11_000,
-                egui::Key::F26,
-                PerfScriptAction::RefreshPendingImport,
-            ),
+            (8_500, egui::Key::F17, PerfScriptAction::NavigateProviders),
+            (9_000, egui::Key::F18, PerfScriptAction::OpenCcsImport),
+            (9_500, egui::Key::F19, PerfScriptAction::CloseCcsImport),
+            (10_000, egui::Key::F20, PerfScriptAction::NavigateOverview),
+            (10_500, egui::Key::F21, PerfScriptAction::NavigateContext),
+            (11_000, egui::Key::F22, PerfScriptAction::RefreshContext),
             (
                 11_500,
-                egui::Key::F27,
-                PerfScriptAction::DismissPendingImport,
+                egui::Key::F23,
+                PerfScriptAction::SelectNextContextKind,
             ),
+            (12_000, egui::Key::F24, PerfScriptAction::CreateContextEntry),
+            (
+                12_500,
+                egui::Key::F25,
+                PerfScriptAction::CancelContextEditor,
+            ),
+            (
+                13_000,
+                egui::Key::F26,
+                PerfScriptAction::OpenFirstContextEntry,
+            ),
+            (
+                13_500,
+                egui::Key::F27,
+                PerfScriptAction::CancelContextEditor,
+            ),
+            (
+                14_000,
+                egui::Key::F28,
+                PerfScriptAction::ToggleFirstContextEntry,
+            ),
+            (
+                14_500,
+                egui::Key::F29,
+                PerfScriptAction::RequestDeleteFirstContextEntry,
+            ),
+            (
+                15_000,
+                egui::Key::F30,
+                PerfScriptAction::CancelContextDelete,
+            ),
+            (15_500, egui::Key::F31, PerfScriptAction::PreviewContextSync),
+            (
+                16_000,
+                egui::Key::F32,
+                PerfScriptAction::CancelContextSyncPreview,
+            ),
+            (16_500, egui::Key::F33, PerfScriptAction::PreviewContextSync),
+            (17_000, egui::Key::F34, PerfScriptAction::ConfirmContextSync),
         ];
         for (index, (milliseconds, key, action)) in expected.into_iter().enumerate() {
             assert_eq!(

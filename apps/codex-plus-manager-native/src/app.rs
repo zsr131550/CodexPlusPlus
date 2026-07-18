@@ -2,21 +2,23 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use codex_plus_manager_service::{
-    DiagnoseProviderProfile, FetchProviderModels, OverviewSource, ProviderActivationSource,
-    ProviderErrorKind, ProviderImportSource, ProviderNetworkFailureKind, ProviderProfile,
-    ProviderSource, RelayEnvironmentSource, TestProviderProfile,
+    ContextKind, ContextToolsSource, DiagnoseProviderProfile, FetchProviderModels, OverviewSource,
+    ProviderActivationSource, ProviderErrorKind, ProviderImportSource, ProviderNetworkFailureKind,
+    ProviderProfile, ProviderSource, RelayEnvironmentSource, TestProviderProfile,
 };
 use eframe::egui;
 
 use crate::fonts;
 use crate::perf::{PerfRecorder, PerfScriptAction};
 use crate::persistence::{self, PersistedUiState};
+use crate::runtime::context::{ContextDispatcher, ContextResponse};
 use crate::runtime::environment::{EnvironmentDispatcher, EnvironmentResponse};
 use crate::runtime::import::{ImportDispatcher, ImportResponse};
 use crate::runtime::provider::{
     ActivationResponse, ProviderActivationDispatcher, ProviderDispatcher, StoreResponse,
 };
 use crate::runtime::{DispatchError, OverviewDispatcher};
+use crate::state::context::ContextFailureKind;
 use crate::state::environment::EnvironmentFailureKind;
 use crate::state::import::ImportFailureKind;
 use crate::state::provider::{
@@ -26,6 +28,7 @@ use crate::state::provider::{
 };
 use crate::state::{AppState, OverviewFailureKind, OverviewPhase, Route};
 use crate::theme;
+use crate::views::context::ContextAction;
 use crate::views::environment::EnvironmentAction;
 use crate::views::import::ImportAction;
 use crate::views::provider::{ProviderAction, ProviderEdit};
@@ -37,6 +40,7 @@ pub struct NativeManagerSources {
     pub activation: Arc<dyn ProviderActivationSource>,
     pub provider_import: Arc<dyn ProviderImportSource>,
     pub environment: Arc<dyn RelayEnvironmentSource>,
+    pub context: Arc<dyn ContextToolsSource>,
 }
 
 pub struct NativeManagerApp {
@@ -47,12 +51,14 @@ pub struct NativeManagerApp {
     activation_dispatcher: ProviderActivationDispatcher,
     import_dispatcher: ImportDispatcher,
     environment_dispatcher: EnvironmentDispatcher,
+    context_dispatcher: ContextDispatcher,
     last_updated: Option<String>,
     overview_worker_stopped: bool,
     provider_store_worker_stopped: bool,
     activation_worker_stopped: bool,
     import_worker_stopped: bool,
     environment_worker_stopped: bool,
+    context_worker_stopped: bool,
     window_focused: bool,
     pending_route: Option<Route>,
     pending_provider_reload: bool,
@@ -98,6 +104,11 @@ impl NativeManagerApp {
             sources.environment,
             Arc::new(move || environment_repaint_context.request_repaint()),
         );
+        let context_repaint_context = creation.egui_ctx.clone();
+        let context_dispatcher = ContextDispatcher::spawn(
+            sources.context,
+            Arc::new(move || context_repaint_context.request_repaint()),
+        );
         let mut app = Self {
             state: AppState::default(),
             persisted,
@@ -106,12 +117,14 @@ impl NativeManagerApp {
             activation_dispatcher,
             import_dispatcher,
             environment_dispatcher,
+            context_dispatcher,
             last_updated: None,
             overview_worker_stopped: false,
             provider_store_worker_stopped: false,
             activation_worker_stopped: false,
             import_worker_stopped: false,
             environment_worker_stopped: false,
+            context_worker_stopped: false,
             window_focused: true,
             pending_route: None,
             pending_provider_reload: false,
@@ -151,10 +164,12 @@ impl NativeManagerApp {
             ShellAction::Refresh => match self.state.route {
                 Route::Providers => self.request_provider_reload(),
                 Route::Environment => self.inspect_environment(),
+                Route::Context => self.load_context_workspace(),
                 Route::Overview | Route::About => self.refresh_overview(),
             },
             ShellAction::Retry => match self.state.route {
                 Route::Environment => self.inspect_environment(),
+                Route::Context => self.load_context_workspace(),
                 Route::Overview | Route::Providers | Route::About => self.refresh_overview(),
             },
             ShellAction::SetLocale(locale) => self.persisted.locale = locale,
@@ -165,6 +180,7 @@ impl NativeManagerApp {
             ShellAction::Provider(action) => self.apply_provider_action(action),
             ShellAction::Import(action) => self.apply_import_action(action),
             ShellAction::Environment(action) => self.apply_environment_action(action),
+            ShellAction::Context(action) => self.apply_context_action(action),
         }
         ctx.request_repaint();
     }
@@ -184,6 +200,7 @@ impl NativeManagerApp {
         if self.state.route == Route::Providers && route != Route::Providers {
             self.state.provider.leave_provider_route();
         }
+        let entering_context = self.state.route != Route::Context && route == Route::Context;
         self.state.route = route;
         if route == Route::Providers && self.state.provider.load_phase == ProviderLoadPhase::Idle {
             self.load_providers();
@@ -192,6 +209,9 @@ impl NativeManagerApp {
             && self.state.environment.inspection_phase == OperationPhase::Idle
         {
             self.inspect_environment();
+        }
+        if entering_context {
+            self.load_context_workspace();
         }
     }
 
@@ -349,6 +369,187 @@ impl NativeManagerApp {
                 self.state.environment.cancel_cleanup_confirmation();
             }
             EnvironmentAction::ConfirmCleanup => self.cleanup_environment(),
+        }
+    }
+
+    fn apply_context_action(&mut self, action: ContextAction) {
+        match action {
+            ContextAction::RetryWorkspace => self.load_context_workspace(),
+            ContextAction::SelectKind(kind) => self.state.context.selected_kind = kind,
+            ContextAction::OpenCreate(kind) => {
+                if !self.state.provider.is_dirty() {
+                    self.state.context.open_create(kind);
+                }
+            }
+            ContextAction::OpenEdit(key) => self.load_context_entry_draft(key),
+            ContextAction::SetEditorId(id) => {
+                self.state.context.set_editor_id(id);
+            }
+            ContextAction::SetEditorBody(body) => {
+                self.state.context.set_editor_body(body);
+            }
+            ContextAction::SetTomlRevealed(revealed) => {
+                self.state.context.set_editor_toml_revealed(revealed);
+            }
+            ContextAction::CancelEditor => {
+                self.state.context.cancel_editor();
+            }
+            ContextAction::SaveEditor => self.save_context_entry(),
+            ContextAction::SetEnabled { key, enabled } => {
+                self.toggle_context_entry(key, enabled);
+            }
+            ContextAction::RequestDelete(key) => {
+                if !self.state.provider.is_dirty() {
+                    self.state.context.request_delete(key);
+                }
+            }
+            ContextAction::CancelDelete => {
+                self.state.context.cancel_delete();
+            }
+            ContextAction::ConfirmDelete => self.delete_context_entry(),
+            ContextAction::PreviewSync => self.preview_context_sync(),
+            ContextAction::CancelSyncPreview => {
+                self.state.context.cancel_preview();
+            }
+            ContextAction::ConfirmSync => self.sync_context_to_live(),
+        }
+    }
+
+    fn load_context_workspace(&mut self) {
+        if self.state.provider.is_dirty() {
+            return;
+        }
+        let request_id = self.state.context.begin_workspace_refresh();
+        if self
+            .context_dispatcher
+            .request_workspace(request_id)
+            .is_err()
+        {
+            self.context_worker_stopped = true;
+            self.state.apply_context_workspace_response(
+                request_id,
+                Err(ContextFailureKind::WorkerStopped),
+            );
+        }
+    }
+
+    fn load_context_entry_draft(&mut self, key: codex_plus_manager_service::ContextEntryKey) {
+        if self.state.provider.is_dirty() {
+            return;
+        }
+        let Some((request_id, request)) = self.state.context.begin_edit(key) else {
+            return;
+        };
+        if self
+            .context_dispatcher
+            .request_draft(request_id, request)
+            .is_err()
+        {
+            self.context_worker_stopped = true;
+            self.state
+                .context
+                .apply_draft_response(request_id, Err(ContextFailureKind::WorkerStopped));
+        }
+    }
+
+    fn save_context_entry(&mut self) {
+        if self.state.provider.is_dirty() {
+            return;
+        }
+        let Some((request_id, request)) = self.state.context.begin_save() else {
+            return;
+        };
+        if self
+            .context_dispatcher
+            .request_save(request_id, request)
+            .is_err()
+        {
+            self.context_worker_stopped = true;
+            self.state.apply_context_stored_mutation_response(
+                request_id,
+                Err(ContextFailureKind::WorkerStopped),
+            );
+        }
+    }
+
+    fn toggle_context_entry(
+        &mut self,
+        key: codex_plus_manager_service::ContextEntryKey,
+        enabled: bool,
+    ) {
+        if self.state.provider.is_dirty() {
+            return;
+        }
+        let Some((request_id, request)) = self.state.context.begin_toggle(key, enabled) else {
+            return;
+        };
+        if self
+            .context_dispatcher
+            .request_toggle(request_id, request)
+            .is_err()
+        {
+            self.context_worker_stopped = true;
+            self.state.apply_context_stored_mutation_response(
+                request_id,
+                Err(ContextFailureKind::WorkerStopped),
+            );
+        }
+    }
+
+    fn delete_context_entry(&mut self) {
+        if self.state.provider.is_dirty() {
+            return;
+        }
+        let Some((request_id, request)) = self.state.context.begin_delete() else {
+            return;
+        };
+        if self
+            .context_dispatcher
+            .request_delete(request_id, request)
+            .is_err()
+        {
+            self.context_worker_stopped = true;
+            self.state.apply_context_stored_mutation_response(
+                request_id,
+                Err(ContextFailureKind::WorkerStopped),
+            );
+        }
+    }
+
+    fn preview_context_sync(&mut self) {
+        if self.state.provider.is_dirty() {
+            return;
+        }
+        let Some((request_id, request)) = self.state.context.begin_preview() else {
+            return;
+        };
+        if self
+            .context_dispatcher
+            .request_preview(request_id, request)
+            .is_err()
+        {
+            self.context_worker_stopped = true;
+            self.state
+                .context
+                .apply_preview_response(request_id, Err(ContextFailureKind::WorkerStopped));
+        }
+    }
+
+    fn sync_context_to_live(&mut self) {
+        if self.state.provider.is_dirty() {
+            return;
+        }
+        let Some((request_id, request)) = self.state.context.begin_sync() else {
+            return;
+        };
+        if self
+            .context_dispatcher
+            .request_sync(request_id, request)
+            .is_err()
+        {
+            self.context_worker_stopped = true;
+            self.state
+                .apply_context_sync_response(request_id, Err(ContextFailureKind::WorkerStopped));
         }
     }
 
@@ -533,6 +734,9 @@ impl NativeManagerApp {
                 && self.state.environment.inspection_phase == OperationPhase::Idle
             {
                 self.inspect_environment();
+            }
+            if route == Route::Context {
+                self.load_context_workspace();
             }
         }
         if std::mem::take(&mut self.pending_provider_reload) {
@@ -950,10 +1154,100 @@ impl NativeManagerApp {
         }
     }
 
+    fn reduce_context_responses(&mut self) {
+        loop {
+            match self.context_dispatcher.try_recv() {
+                Ok(Some(ContextResponse::Workspace { request_id, result })) => {
+                    let accepted = self.state.apply_context_workspace_response(
+                        request_id,
+                        result.map_err(|error| ContextFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.context.workspace_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(ContextResponse::Draft { request_id, result })) => {
+                    self.state.context.apply_draft_response(
+                        request_id,
+                        result.map_err(|error| ContextFailureKind::Service(error.kind())),
+                    );
+                }
+                Ok(Some(ContextResponse::StoredMutation { request_id, result })) => {
+                    let accepted = self.state.apply_context_stored_mutation_response(
+                        request_id,
+                        result.map_err(|error| ContextFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.context.mutation_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(ContextResponse::Preview { request_id, result })) => {
+                    self.state.context.apply_preview_response(
+                        request_id,
+                        result.map_err(|error| ContextFailureKind::Service(error.kind())),
+                    );
+                }
+                Ok(Some(ContextResponse::Sync { request_id, result })) => {
+                    let accepted = self.state.apply_context_sync_response(
+                        request_id,
+                        result.map_err(|error| ContextFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.context.sync_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    if !self.context_worker_stopped {
+                        self.context_worker_stopped = true;
+                        self.fail_running_context_operations();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn fail_running_context_operations(&mut self) {
+        if self.state.context.workspace_phase == OperationPhase::Running {
+            self.state.apply_context_workspace_response(
+                self.state.context.current_workspace_request_id,
+                Err(ContextFailureKind::WorkerStopped),
+            );
+        }
+        if self.state.context.draft_phase == OperationPhase::Running {
+            self.state.context.apply_draft_response(
+                self.state.context.current_draft_request_id,
+                Err(ContextFailureKind::WorkerStopped),
+            );
+        }
+        if self.state.context.mutation_phase == OperationPhase::Running {
+            self.state.apply_context_stored_mutation_response(
+                self.state.context.current_mutation_request_id,
+                Err(ContextFailureKind::WorkerStopped),
+            );
+        }
+        if self.state.context.preview_phase == OperationPhase::Running {
+            self.state.context.apply_preview_response(
+                self.state.context.current_preview_request_id,
+                Err(ContextFailureKind::WorkerStopped),
+            );
+        }
+        if self.state.context.sync_phase == OperationPhase::Running {
+            self.state.apply_context_sync_response(
+                self.state.context.current_sync_request_id,
+                Err(ContextFailureKind::WorkerStopped),
+            );
+        }
+    }
+
     fn refresh_pending_on_focus_regain(&mut self, ctx: &egui::Context) {
         let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
         if focused && !self.window_focused {
             self.load_pending_import();
+            if self.state.route == Route::Context {
+                self.load_context_workspace();
+            }
         }
         self.window_focused = focused;
     }
@@ -1044,6 +1338,78 @@ impl NativeManagerApp {
             PerfScriptAction::DismissPendingImport => {
                 Some(ShellAction::Import(ImportAction::DismissPending))
             }
+            PerfScriptAction::NavigateContext => Some(ShellAction::Navigate(Route::Context)),
+            PerfScriptAction::RefreshContext => Some(ShellAction::Refresh),
+            PerfScriptAction::SelectNextContextKind => {
+                let kind = match self.state.context.selected_kind {
+                    ContextKind::Mcp => ContextKind::Skill,
+                    ContextKind::Skill => ContextKind::Plugin,
+                    ContextKind::Plugin => ContextKind::Mcp,
+                };
+                Some(ShellAction::Context(ContextAction::SelectKind(kind)))
+            }
+            PerfScriptAction::CreateContextEntry => Some(ShellAction::Context(
+                ContextAction::OpenCreate(self.state.context.selected_kind),
+            )),
+            PerfScriptAction::CancelContextEditor => {
+                Some(ShellAction::Context(ContextAction::CancelEditor))
+            }
+            PerfScriptAction::OpenFirstContextEntry => self
+                .state
+                .context
+                .bundle
+                .as_ref()
+                .and_then(|bundle| {
+                    bundle
+                        .context
+                        .entries
+                        .iter()
+                        .find(|entry| entry.key.kind == self.state.context.selected_kind)
+                })
+                .map(|entry| ShellAction::Context(ContextAction::OpenEdit(entry.key.clone()))),
+            PerfScriptAction::ToggleFirstContextEntry => self
+                .state
+                .context
+                .bundle
+                .as_ref()
+                .and_then(|bundle| {
+                    bundle
+                        .context
+                        .entries
+                        .iter()
+                        .find(|entry| entry.key.kind == self.state.context.selected_kind)
+                })
+                .map(|entry| {
+                    ShellAction::Context(ContextAction::SetEnabled {
+                        key: entry.key.clone(),
+                        enabled: !entry.enabled,
+                    })
+                }),
+            PerfScriptAction::RequestDeleteFirstContextEntry => self
+                .state
+                .context
+                .bundle
+                .as_ref()
+                .and_then(|bundle| {
+                    bundle
+                        .context
+                        .entries
+                        .iter()
+                        .find(|entry| entry.key.kind == self.state.context.selected_kind)
+                })
+                .map(|entry| ShellAction::Context(ContextAction::RequestDelete(entry.key.clone()))),
+            PerfScriptAction::CancelContextDelete => {
+                Some(ShellAction::Context(ContextAction::CancelDelete))
+            }
+            PerfScriptAction::PreviewContextSync => {
+                Some(ShellAction::Context(ContextAction::PreviewSync))
+            }
+            PerfScriptAction::CancelContextSyncPreview => {
+                Some(ShellAction::Context(ContextAction::CancelSyncPreview))
+            }
+            PerfScriptAction::ConfirmContextSync => {
+                Some(ShellAction::Context(ContextAction::ConfirmSync))
+            }
         };
         if let Some(action) = shell_action {
             self.apply_action(ctx, action);
@@ -1058,6 +1424,7 @@ impl eframe::App for NativeManagerApp {
         self.reduce_activation_responses();
         self.reduce_import_responses();
         self.reduce_environment_responses();
+        self.reduce_context_responses();
         self.refresh_pending_on_focus_regain(ctx);
         if let Some(perf) = &mut self.perf {
             perf.drive(ctx);
@@ -1076,6 +1443,7 @@ impl eframe::App for NativeManagerApp {
             Some(&self.state.provider),
             Some(&self.state.provider_import),
             Some(&self.state.environment),
+            Some(&self.state.context),
         ) {
             self.apply_action(ui.ctx(), action);
         }

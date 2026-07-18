@@ -1,3 +1,4 @@
+mod context_tools;
 mod error;
 mod overview;
 mod provider;
@@ -10,6 +11,15 @@ mod provider_system;
 mod relay_environment;
 mod system;
 
+pub use context_tools::{
+    CompatContextDeleteRequest, CompatContextEntries, CompatContextEntryRequest, ContextBundle,
+    ContextEntryDraft, ContextEntryKey, ContextEntryLiveState, ContextEntrySummary, ContextKind,
+    ContextOwnershipOutcome, ContextSyncDiffSummary, ContextSyncGuard, ContextSyncKeys,
+    ContextSyncOutcome, ContextSyncPreview, ContextSyncScope, ContextToolsEnvironment,
+    ContextToolsError, ContextToolsErrorKind, ContextToolsService, ContextToolsSource,
+    ContextWorkspace, DeleteContextEntry, LoadContextEntryDraft, PreviewContextSync,
+    SaveContextEntry, SaveContextEntryMode, SetContextEntryEnabled, SyncContextToLive,
+};
 pub use error::{OverviewError, OverviewErrorKind};
 pub use overview::{
     LocatedResource, OverviewEnvironment, OverviewService, OverviewSnapshot, OverviewSource,

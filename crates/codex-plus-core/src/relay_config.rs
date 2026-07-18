@@ -2,12 +2,16 @@ use anyhow::Context;
 use fs2::FileExt;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 
+use crate::context_ownership::{
+    ContextEntryIdentity, ContextOwnershipManifest, ContextSyncDiff, ContextSyncPlan,
+    OwnedContextEntry, normalized_body_sha256,
+};
 use crate::settings::{RelayContextSelection, RelayProfile, RelayProtocol};
 
 const RELAY_PROVIDER: &str = "custom";
@@ -119,7 +123,7 @@ pub struct RelayProfileTestResult {
     pub response_preview: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexContextEntry {
     pub id: String,
@@ -128,6 +132,17 @@ pub struct CodexContextEntry {
     pub summary: String,
     pub toml_body: String,
     pub enabled: bool,
+}
+
+impl std::fmt::Debug for CodexContextEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CodexContextEntry")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -507,6 +522,23 @@ pub fn apply_relay_config_file_to_home(
     if config_contents.trim().is_empty() {
         anyhow::bail!("config.toml 内容不能为空");
     }
+    write_relay_config_file_to_home(home, config_contents)
+}
+
+pub fn apply_context_sync_config_file_to_home(
+    home: &Path,
+    config_contents: &str,
+) -> anyhow::Result<RelayApplyResult> {
+    let config_contents = config_contents
+        .strip_prefix('\u{feff}')
+        .unwrap_or(config_contents);
+    write_relay_config_file_to_home(home, config_contents)
+}
+
+fn write_relay_config_file_to_home(
+    home: &Path,
+    config_contents: &str,
+) -> anyhow::Result<RelayApplyResult> {
     std::fs::create_dir_all(home)?;
 
     let backup_path = write_codex_live_atomic(home, Some(config_contents), None, false)?;
@@ -860,6 +892,57 @@ pub fn list_context_entries_from_common_config(
     })
 }
 
+pub fn context_entry_body_from_common_config(
+    common_config: &str,
+    kind: &str,
+    id: &str,
+) -> anyhow::Result<Option<String>> {
+    let id = id.trim();
+    if id.is_empty() {
+        anyhow::bail!("上下文 id 不能为空");
+    }
+    let table_name = context_table_name(kind)?;
+    let normalized = normalize_duplicate_toml_text(common_config);
+    let doc = parse_context_toml_document(&normalized)?;
+    Ok(doc
+        .get(table_name)
+        .and_then(Item::as_table)
+        .and_then(|table| table.get(id))
+        .and_then(Item::as_table)
+        .map(table_body_to_string))
+}
+
+pub fn set_context_entry_enabled_in_common_config(
+    common_config: &str,
+    kind: &str,
+    id: &str,
+    enabled: bool,
+) -> anyhow::Result<String> {
+    let id = id.trim();
+    if id.is_empty() {
+        anyhow::bail!("上下文 id 不能为空");
+    }
+    let table_name = context_table_name(kind)?;
+    let normalized = normalize_duplicate_toml_text(common_config);
+    let mut doc = parse_context_toml_document(&normalized)?;
+    let entry = doc
+        .get_mut(table_name)
+        .and_then(Item::as_table_mut)
+        .and_then(|table| table.get_mut(id))
+        .and_then(Item::as_table_mut)
+        .ok_or_else(|| anyhow::anyhow!("上下文条目不存在"))?;
+    entry["enabled"] = toml_edit::value(enabled);
+    Ok(normalize_optional_toml(doc))
+}
+
+pub fn effective_context_config_for_profile(
+    context_config: &str,
+    profile: &RelayProfile,
+) -> anyhow::Result<String> {
+    filter_common_config_for_profile(context_config, profile)
+        .map_err(|_| anyhow::anyhow!("上下文 TOML 无效"))
+}
+
 pub fn upsert_context_entry_in_common_config(
     common_config: &str,
     kind: &str,
@@ -942,6 +1025,120 @@ pub fn sync_live_config_context_entries(
     remove_disabled_context_tables(context_doc.as_table_mut());
     merge_managed_context_tables(live_doc.as_table_mut(), context_doc.as_table());
     Ok(normalize_optional_toml(live_doc))
+}
+
+pub fn plan_owned_context_sync(
+    live_config: &str,
+    desired_context_config: &str,
+    previous: &ContextOwnershipManifest,
+) -> anyhow::Result<ContextSyncPlan> {
+    previous.validate()?;
+    let normalized_live = normalize_duplicate_toml_text(live_config);
+    let normalized_desired = normalize_duplicate_toml_text(desired_context_config);
+    let mut live_doc = parse_context_toml_document(&normalized_live)?;
+    let mut desired_doc = parse_context_toml_document(&normalized_desired)?;
+    remove_disabled_context_tables(desired_doc.as_table_mut());
+
+    let live_hashes = context_entry_hashes(&live_doc)?;
+    let desired_hashes = context_entry_hashes(&desired_doc)?;
+    let mut diff = ContextSyncDiff::default();
+
+    for (identity, desired_hash) in &desired_hashes {
+        match live_hashes.get(identity) {
+            None => diff.added.push(identity.clone()),
+            Some(live_hash) if live_hash == desired_hash => {
+                diff.unchanged.push(identity.clone());
+            }
+            Some(_) => diff.updated.push(identity.clone()),
+        }
+    }
+
+    for entry in &previous.entries {
+        if !desired_hashes.contains_key(&entry.identity)
+            && live_hashes.contains_key(&entry.identity)
+        {
+            diff.removed.push(entry.identity.clone());
+        }
+        remove_context_identity(live_doc.as_table_mut(), &entry.identity)?;
+    }
+
+    merge_managed_context_tables(live_doc.as_table_mut(), desired_doc.as_table());
+    sort_context_sync_diff(&mut diff);
+
+    let mut next_entries = desired_hashes
+        .into_iter()
+        .map(|(identity, body_sha256)| OwnedContextEntry {
+            identity,
+            body_sha256,
+        })
+        .collect::<Vec<_>>();
+    next_entries.sort_by(|left, right| left.identity.cmp(&right.identity));
+    let next_manifest = ContextOwnershipManifest {
+        version: crate::context_ownership::CONTEXT_OWNERSHIP_VERSION,
+        entries: next_entries,
+    };
+    next_manifest.validate()?;
+
+    Ok(ContextSyncPlan {
+        updated_live_config: normalize_optional_toml(live_doc),
+        next_manifest,
+        diff,
+    })
+}
+
+fn context_entry_hashes(
+    doc: &DocumentMut,
+) -> anyhow::Result<BTreeMap<ContextEntryIdentity, String>> {
+    let mut hashes = BTreeMap::new();
+    for (table_name, kind) in [
+        ("mcp_servers", "mcp"),
+        ("skills", "skill"),
+        ("plugins", "plugin"),
+    ] {
+        let Some(entries) = doc.get(table_name).and_then(Item::as_table) else {
+            continue;
+        };
+        for (id, item) in entries {
+            let table = item
+                .as_table()
+                .ok_or_else(|| anyhow::anyhow!("上下文条目必须是 TOML 表"))?;
+            let identity = ContextEntryIdentity {
+                kind: kind.to_string(),
+                id: id.to_string(),
+            };
+            hashes.insert(
+                identity,
+                normalized_body_sha256(&table_body_to_string(table)),
+            );
+        }
+    }
+    Ok(hashes)
+}
+
+fn remove_context_identity(
+    live: &mut Table,
+    identity: &ContextEntryIdentity,
+) -> anyhow::Result<()> {
+    let table_name = context_table_name(&identity.kind)?;
+    let remove_parent = live
+        .get_mut(table_name)
+        .and_then(Item::as_table_mut)
+        .map(|entries| {
+            entries.remove(&identity.id);
+            entries.is_empty()
+        })
+        .unwrap_or(false);
+    if remove_parent {
+        live.remove(table_name);
+    }
+    Ok(())
+}
+
+fn sort_context_sync_diff(diff: &mut ContextSyncDiff) {
+    diff.added.sort();
+    diff.updated.sort();
+    diff.removed.sort();
+    diff.unchanged.sort();
 }
 
 fn preserve_unmanaged_live_context_entries(
@@ -1277,6 +1474,10 @@ fn parse_toml_document(contents: &str) -> anyhow::Result<DocumentMut> {
             .parse::<DocumentMut>()
             .map_err(|error| anyhow::anyhow!("config.toml TOML 解析失败：{error}"))
     }
+}
+
+fn parse_context_toml_document(contents: &str) -> anyhow::Result<DocumentMut> {
+    parse_toml_document(contents).map_err(|_| anyhow::anyhow!("上下文 TOML 无效"))
 }
 
 fn remove_provider_specific_common_keys(table: &mut dyn TableLike) {

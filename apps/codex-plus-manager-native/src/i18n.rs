@@ -121,10 +121,62 @@ pub enum TextKey {
     EnvironmentWorkerStopped,
     ImportWorkerStopped,
     RetryInspection,
+    ToolsPlugins,
+    ToolsPluginsSubtitle,
+    ActiveProvider,
+    NoActiveProvider,
+    McpServers,
+    Skills,
+    Plugins,
+    CreateContextEntry,
+    EditContextEntry,
+    DeleteContextEntry,
+    ContextId,
+    ContextKindLabel,
+    TomlBody,
+    RevealToml,
+    HideToml,
+    SaveEntry,
+    ConfirmDelete,
+    SyncContext,
+    PreviewLiveSync,
+    ConfirmSync,
+    Added,
+    Updated,
+    Unchanged,
+    StoredOnly,
+    LiveMatching,
+    LiveDifferent,
+    PendingRemoval,
+    NoContextEntries,
+    UnmanagedLiveEntries,
+    ContextSynced,
+    ContextSyncPartial,
+    ContextNoChanges,
+    ContextLoadFailed,
+    ContextWorkerStopped,
+    ContextProviderConflict,
+    ContextLiveConflict,
+    ContextOwnershipConflict,
+    ContextInvalidId,
+    ContextInvalidToml,
+    ContextEntryNotFound,
+    ContextEntryExists,
+    ContextConfirmationMismatch,
+    ContextNoActiveProvider,
+    ContextActiveProviderInvalid,
+    ContextLockFailed,
+    ContextSaveFailed,
+    ContextLiveWriteFailed,
+    ContextOwnershipWriteFailed,
+    ContextGenericFailure,
+    LiveUpToDate,
+    LiveSyncNeeded,
+    EnableContextEntry,
 }
 
 impl TextKey {
-    pub const ALL: [Self; 106] = [
+    pub const ALL: &'static [Self] = &[
         Self::AppName,
         Self::Overview,
         Self::Providers,
@@ -231,6 +283,58 @@ impl TextKey {
         Self::EnvironmentWorkerStopped,
         Self::ImportWorkerStopped,
         Self::RetryInspection,
+        Self::ToolsPlugins,
+        Self::ToolsPluginsSubtitle,
+        Self::ActiveProvider,
+        Self::NoActiveProvider,
+        Self::McpServers,
+        Self::Skills,
+        Self::Plugins,
+        Self::CreateContextEntry,
+        Self::EditContextEntry,
+        Self::DeleteContextEntry,
+        Self::ContextId,
+        Self::ContextKindLabel,
+        Self::TomlBody,
+        Self::RevealToml,
+        Self::HideToml,
+        Self::SaveEntry,
+        Self::ConfirmDelete,
+        Self::SyncContext,
+        Self::PreviewLiveSync,
+        Self::ConfirmSync,
+        Self::Added,
+        Self::Updated,
+        Self::Unchanged,
+        Self::StoredOnly,
+        Self::LiveMatching,
+        Self::LiveDifferent,
+        Self::PendingRemoval,
+        Self::NoContextEntries,
+        Self::UnmanagedLiveEntries,
+        Self::ContextSynced,
+        Self::ContextSyncPartial,
+        Self::ContextNoChanges,
+        Self::ContextLoadFailed,
+        Self::ContextWorkerStopped,
+        Self::ContextProviderConflict,
+        Self::ContextLiveConflict,
+        Self::ContextOwnershipConflict,
+        Self::ContextInvalidId,
+        Self::ContextInvalidToml,
+        Self::ContextEntryNotFound,
+        Self::ContextEntryExists,
+        Self::ContextConfirmationMismatch,
+        Self::ContextNoActiveProvider,
+        Self::ContextActiveProviderInvalid,
+        Self::ContextLockFailed,
+        Self::ContextSaveFailed,
+        Self::ContextLiveWriteFailed,
+        Self::ContextOwnershipWriteFailed,
+        Self::ContextGenericFailure,
+        Self::LiveUpToDate,
+        Self::LiveSyncNeeded,
+        Self::EnableContextEntry,
     ];
 }
 
@@ -239,7 +343,7 @@ struct CatalogEntry {
     en: &'static str,
 }
 
-const CATALOG: [CatalogEntry; 106] = [
+const CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         zh: "Codex++",
         en: "Codex++",
@@ -664,6 +768,214 @@ const CATALOG: [CatalogEntry; 106] = [
         zh: "重新检查",
         en: "Inspect again",
     },
+    CatalogEntry {
+        zh: "工具与插件",
+        en: "Tools and Plugins",
+    },
+    CatalogEntry {
+        zh: "管理 MCP、技能与插件",
+        en: "Manage MCP servers, skills, and plugins",
+    },
+    CatalogEntry {
+        zh: "当前供应商",
+        en: "Active provider",
+    },
+    CatalogEntry {
+        zh: "没有可用的当前供应商",
+        en: "No active provider",
+    },
+    CatalogEntry {
+        zh: "MCP",
+        en: "MCP",
+    },
+    CatalogEntry {
+        zh: "技能",
+        en: "Skills",
+    },
+    CatalogEntry {
+        zh: "插件",
+        en: "Plugins",
+    },
+    CatalogEntry {
+        zh: "新建上下文条目",
+        en: "Create context entry",
+    },
+    CatalogEntry {
+        zh: "编辑上下文条目",
+        en: "Edit context entry",
+    },
+    CatalogEntry {
+        zh: "删除上下文条目",
+        en: "Delete context entry",
+    },
+    CatalogEntry {
+        zh: "上下文 ID",
+        en: "Context ID",
+    },
+    CatalogEntry {
+        zh: "类型",
+        en: "Kind",
+    },
+    CatalogEntry {
+        zh: "TOML 正文",
+        en: "TOML body",
+    },
+    CatalogEntry {
+        zh: "显示 TOML",
+        en: "Reveal TOML",
+    },
+    CatalogEntry {
+        zh: "隐藏 TOML",
+        en: "Hide TOML",
+    },
+    CatalogEntry {
+        zh: "保存条目",
+        en: "Save entry",
+    },
+    CatalogEntry {
+        zh: "确认删除",
+        en: "Confirm delete",
+    },
+    CatalogEntry {
+        zh: "同步到 Codex",
+        en: "Sync to Codex",
+    },
+    CatalogEntry {
+        zh: "预览实时同步",
+        en: "Preview live sync",
+    },
+    CatalogEntry {
+        zh: "确认同步",
+        en: "Confirm sync",
+    },
+    CatalogEntry {
+        zh: "新增",
+        en: "Added",
+    },
+    CatalogEntry {
+        zh: "更新",
+        en: "Updated",
+    },
+    CatalogEntry {
+        zh: "未变化",
+        en: "Unchanged",
+    },
+    CatalogEntry {
+        zh: "仅存储",
+        en: "Stored only",
+    },
+    CatalogEntry {
+        zh: "与实时配置一致",
+        en: "Matches live",
+    },
+    CatalogEntry {
+        zh: "与实时配置不同",
+        en: "Differs from live",
+    },
+    CatalogEntry {
+        zh: "等待从实时配置移除",
+        en: "Pending removal",
+    },
+    CatalogEntry {
+        zh: "此类型还没有条目",
+        en: "No entries for this kind",
+    },
+    CatalogEntry {
+        zh: "未托管的实时条目",
+        en: "Unmanaged live entries",
+    },
+    CatalogEntry {
+        zh: "上下文已同步到 Codex。",
+        en: "Context synced to Codex.",
+    },
+    CatalogEntry {
+        zh: "实时配置已更新，但所有权元数据需要修复。",
+        en: "Live settings updated; ownership metadata needs repair.",
+    },
+    CatalogEntry {
+        zh: "存储配置与实时配置已一致。",
+        en: "Stored and live settings already match.",
+    },
+    CatalogEntry {
+        zh: "无法加载上下文工具。",
+        en: "Unable to load context tools.",
+    },
+    CatalogEntry {
+        zh: "上下文工具后台服务已停止。",
+        en: "The context tools worker has stopped.",
+    },
+    CatalogEntry {
+        zh: "供应商设置已变化，请刷新上下文工具。",
+        en: "Provider settings changed. Refresh context tools.",
+    },
+    CatalogEntry {
+        zh: "实时设置已变化，请重新预览同步。",
+        en: "Live settings changed. Preview the sync again.",
+    },
+    CatalogEntry {
+        zh: "所有权元数据已变化，请重新预览同步。",
+        en: "Ownership metadata changed. Preview the sync again.",
+    },
+    CatalogEntry {
+        zh: "上下文 ID 无效。",
+        en: "The context ID is invalid.",
+    },
+    CatalogEntry {
+        zh: "TOML 正文无效。",
+        en: "The TOML body is invalid.",
+    },
+    CatalogEntry {
+        zh: "找不到上下文条目。",
+        en: "The context entry was not found.",
+    },
+    CatalogEntry {
+        zh: "上下文条目已存在。",
+        en: "The context entry already exists.",
+    },
+    CatalogEntry {
+        zh: "删除确认与条目不匹配。",
+        en: "The delete confirmation does not match the entry.",
+    },
+    CatalogEntry {
+        zh: "没有可同步的当前供应商。",
+        en: "There is no active provider to sync.",
+    },
+    CatalogEntry {
+        zh: "当前供应商配置无效。",
+        en: "The active provider is invalid.",
+    },
+    CatalogEntry {
+        zh: "无法锁定上下文配置。",
+        en: "Unable to lock context settings.",
+    },
+    CatalogEntry {
+        zh: "无法保存上下文设置。",
+        en: "Unable to save context settings.",
+    },
+    CatalogEntry {
+        zh: "无法写入实时上下文设置。",
+        en: "Unable to write live context settings.",
+    },
+    CatalogEntry {
+        zh: "无法写入上下文所有权元数据。",
+        en: "Unable to write context ownership metadata.",
+    },
+    CatalogEntry {
+        zh: "上下文操作失败。",
+        en: "The context operation failed.",
+    },
+    CatalogEntry {
+        zh: "实时配置已同步",
+        en: "Live settings up to date",
+    },
+    CatalogEntry {
+        zh: "需要同步实时配置",
+        en: "Live sync needed",
+    },
+    CatalogEntry {
+        zh: "启用上下文条目",
+        en: "Enable context entry",
+    },
 ];
 
 pub fn text(locale: Locale, key: TextKey) -> &'static str {
@@ -681,7 +993,7 @@ mod tests {
     #[test]
     fn every_native_manager_key_has_both_locales() {
         assert_eq!(TextKey::ALL.len(), CATALOG.len());
-        for key in TextKey::ALL {
+        for &key in TextKey::ALL {
             assert!(
                 !text(Locale::ZhCn, key).trim().is_empty(),
                 "missing zh: {key:?}"

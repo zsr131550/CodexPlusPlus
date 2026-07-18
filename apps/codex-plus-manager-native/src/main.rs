@@ -8,8 +8,8 @@ use codex_plus_manager_native::app::{NativeManagerApp, NativeManagerSources};
 use codex_plus_manager_native::fonts;
 use codex_plus_manager_native::perf::PerfRecorder;
 use codex_plus_manager_service::{
-    ProviderImportService, ProviderService, RelayEnvironmentService, SystemOverviewSource,
-    SystemProviderEnvironment,
+    ContextToolsService, ProviderImportService, ProviderService, RelayEnvironmentService,
+    SystemOverviewSource, SystemProviderEnvironment,
 };
 use eframe::egui;
 
@@ -54,6 +54,7 @@ fn main() -> eframe::Result {
             let environment = SystemProviderEnvironment::for_native_process();
             let provider_service = Arc::new(ProviderService::new(environment.clone()));
             let import_service = Arc::new(ProviderImportService::new(environment.clone()));
+            let context_service = Arc::new(ContextToolsService::new(environment.clone()));
             let environment_service = Arc::new(RelayEnvironmentService::new(environment));
             Ok(Box::new(NativeManagerApp::new(
                 creation,
@@ -64,6 +65,7 @@ fn main() -> eframe::Result {
                     activation: provider_service,
                     provider_import: import_service,
                     environment: environment_service,
+                    context: context_service,
                 },
                 perf,
             )))

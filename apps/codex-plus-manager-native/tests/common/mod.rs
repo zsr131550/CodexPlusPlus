@@ -132,6 +132,7 @@ pub fn provider_state() -> ProviderViewState {
     state
 }
 
+#[allow(dead_code)]
 pub fn model(locale: Locale, theme: ThemeMode) -> ShellViewModel {
     ShellViewModel {
         route: Route::Overview,

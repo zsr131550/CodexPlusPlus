@@ -15,6 +15,7 @@ use crate::{
 pub struct SystemProviderEnvironment {
     settings: SettingsStore,
     codex_home: PathBuf,
+    context_ownership_path: PathBuf,
     ccs_db_path: PathBuf,
     pending_import_path: PathBuf,
     backup_dir: PathBuf,
@@ -51,15 +52,25 @@ impl SystemProviderEnvironment {
         backup_dir: PathBuf,
         process_only_env_cleanup: bool,
     ) -> Self {
+        let context_ownership_path = settings_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("context-live-ownership.json");
         Self {
             settings: SettingsStore::new(settings_path),
             codex_home,
+            context_ownership_path,
             ccs_db_path,
             pending_import_path,
             backup_dir,
             process_only_env_cleanup,
             runtime: Arc::new(provider_runtime()),
         }
+    }
+
+    pub fn with_context_ownership_path(mut self, path: PathBuf) -> Self {
+        self.context_ownership_path = path;
+        self
     }
 
     pub fn for_native_process() -> Self {
@@ -72,6 +83,7 @@ impl SystemProviderEnvironment {
         let ccs_db_path = env_path("CODEX_PLUS_NATIVE_CCS_DB_PATH");
         let pending_import_path = env_path("CODEX_PLUS_NATIVE_PENDING_IMPORT_PATH");
         let backup_dir = env_path("CODEX_PLUS_NATIVE_BACKUP_DIR");
+        let context_ownership_path = env_path("CODEX_PLUS_NATIVE_CONTEXT_OWNERSHIP_PATH");
         let process_only_env_cleanup =
             std::env::var("CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY").is_ok_and(|value| value == "1");
         if settings_path.is_none()
@@ -79,6 +91,7 @@ impl SystemProviderEnvironment {
             && ccs_db_path.is_none()
             && pending_import_path.is_none()
             && backup_dir.is_none()
+            && context_ownership_path.is_none()
         {
             return Self::default();
         }
@@ -89,14 +102,17 @@ impl SystemProviderEnvironment {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        Self::for_manager_paths(
+        let environment = Self::for_manager_paths(
             settings_path.clone(),
             codex_home.unwrap_or_else(|| isolated_codex_home_for_settings(&settings_path)),
             ccs_db_path.unwrap_or_else(|| state_dir.join("cc-switch.db")),
             pending_import_path.unwrap_or_else(|| state_dir.join("pending-provider-import.json")),
             backup_dir.unwrap_or_else(|| state_dir.join("backups")),
             process_only_env_cleanup,
-        )
+        );
+        context_ownership_path.map_or(environment.clone(), |path| {
+            environment.with_context_ownership_path(path)
+        })
     }
 }
 
@@ -105,6 +121,7 @@ impl Default for SystemProviderEnvironment {
         Self {
             settings: SettingsStore::default(),
             codex_home: codex_plus_core::relay_config::default_codex_home_dir(),
+            context_ownership_path: codex_plus_core::paths::default_context_ownership_path(),
             ccs_db_path: codex_plus_core::ccs_import::default_ccs_db_path(),
             pending_import_path: codex_plus_core::paths::default_pending_provider_import_path(),
             backup_dir: codex_plus_core::paths::default_app_state_dir().join("backups"),
@@ -207,6 +224,24 @@ impl ProviderActivationEnvironment for SystemProviderEnvironment {
 
     fn codex_home(&self) -> &Path {
         &self.codex_home
+    }
+}
+
+impl crate::ContextToolsEnvironment for SystemProviderEnvironment {
+    fn load_context_ownership(
+        &self,
+    ) -> anyhow::Result<codex_plus_core::context_ownership::ContextOwnershipManifest> {
+        codex_plus_core::context_ownership::load_context_ownership_at(&self.context_ownership_path)
+    }
+
+    fn save_context_ownership(
+        &self,
+        manifest: &codex_plus_core::context_ownership::ContextOwnershipManifest,
+    ) -> anyhow::Result<()> {
+        codex_plus_core::context_ownership::save_context_ownership_at(
+            &self.context_ownership_path,
+            manifest,
+        )
     }
 }
 

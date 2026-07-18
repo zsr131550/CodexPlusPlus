@@ -2,10 +2,12 @@ use std::sync::Arc;
 
 use codex_plus_manager_service::OverviewSnapshot;
 
+pub mod context;
 pub mod environment;
 pub mod import;
 pub mod provider;
 
+use context::{ContextFailureKind, ContextViewState};
 use environment::EnvironmentViewState;
 use import::ImportViewState;
 use provider::ProviderViewState;
@@ -16,6 +18,7 @@ pub enum Route {
     Overview,
     Providers,
     Environment,
+    Context,
     About,
 }
 
@@ -88,9 +91,63 @@ pub struct AppState {
     pub provider: ProviderViewState,
     pub provider_import: ImportViewState,
     pub environment: EnvironmentViewState,
+    pub context: ContextViewState,
 }
 
 impl AppState {
+    pub fn apply_context_workspace_response(
+        &mut self,
+        request_id: u64,
+        result: Result<Arc<codex_plus_manager_service::ContextBundle>, ContextFailureKind>,
+    ) -> bool {
+        let result = reject_context_success_when_provider_is_dirty(&self.provider, result);
+        let provider = result
+            .as_ref()
+            .ok()
+            .map(|bundle| Arc::new(bundle.provider.clone()));
+        let accepted = self.context.apply_workspace_response(request_id, result);
+        if accepted && let Some(provider) = provider {
+            self.install_context_provider_workspace(provider);
+        }
+        accepted
+    }
+
+    pub fn apply_context_stored_mutation_response(
+        &mut self,
+        request_id: u64,
+        result: Result<Arc<codex_plus_manager_service::ContextBundle>, ContextFailureKind>,
+    ) -> bool {
+        let result = reject_context_success_when_provider_is_dirty(&self.provider, result);
+        let provider = result
+            .as_ref()
+            .ok()
+            .map(|bundle| Arc::new(bundle.provider.clone()));
+        let accepted = self
+            .context
+            .apply_stored_mutation_response(request_id, result);
+        if accepted && let Some(provider) = provider {
+            self.install_context_provider_workspace(provider);
+        }
+        accepted
+    }
+
+    pub fn apply_context_sync_response(
+        &mut self,
+        request_id: u64,
+        result: Result<Arc<codex_plus_manager_service::ContextSyncOutcome>, ContextFailureKind>,
+    ) -> bool {
+        let result = reject_context_success_when_provider_is_dirty(&self.provider, result);
+        let provider = result
+            .as_ref()
+            .ok()
+            .map(|outcome| Arc::new(outcome.bundle.provider.clone()));
+        let accepted = self.context.apply_sync_response(request_id, result);
+        if accepted && let Some(provider) = provider {
+            self.install_context_provider_workspace(provider);
+        }
+        accepted
+    }
+
     pub fn apply_imported_provider_workspace(
         &mut self,
         workspace: Arc<codex_plus_manager_service::ProviderWorkspace>,
@@ -100,6 +157,27 @@ impl AppState {
         }
         let request_id = self.provider.begin_load();
         self.provider.apply_load_response(request_id, Ok(workspace))
+    }
+
+    fn install_context_provider_workspace(
+        &mut self,
+        workspace: Arc<codex_plus_manager_service::ProviderWorkspace>,
+    ) {
+        let request_id = self.provider.begin_load();
+        self.provider.apply_load_response(request_id, Ok(workspace));
+    }
+}
+
+fn reject_context_success_when_provider_is_dirty<T>(
+    provider: &ProviderViewState,
+    result: Result<T, ContextFailureKind>,
+) -> Result<T, ContextFailureKind> {
+    if provider.is_dirty() && result.is_ok() {
+        Err(ContextFailureKind::Service(
+            codex_plus_manager_service::ContextToolsErrorKind::ProviderConflict,
+        ))
+    } else {
+        result
     }
 }
 

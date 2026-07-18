@@ -13,15 +13,16 @@ use codex_plus_core::status::LaunchStatus;
 use codex_plus_core::user_scripts::UserScriptManager;
 use codex_plus_core::zed_remote::{ZedOpenStrategy, ZedRemoteProject};
 use codex_plus_manager_service::{
-    ConfirmPendingImport, DiagnoseProviderProfile, DismissPendingImport, DoctorCheckStatus,
-    DoctorDetailKind, DoctorOutcome, DoctorRecommendation, FetchProviderModels, ImportCcsProviders,
-    OverviewSnapshot, OverviewSource, ProviderDoctorCheck as ServiceProviderDoctorCheck,
-    ProviderDoctorCheckId, ProviderDoctorReport, ProviderImportService, ProviderImportSource,
-    ProviderModelsResult, ProviderNetworkError, ProviderNetworkFailureKind,
-    ProviderProfile as ServiceProviderProfile, ProviderService, ProviderSource,
-    ProviderTestOutcome, ProviderTestResult, RelayEnvironmentService, RelayEnvironmentSource,
-    RemoveEnvironmentConflicts, ResourcePresence, SystemOverviewSource, SystemProviderEnvironment,
-    TestProviderProfile, UpdateCheckState,
+    CompatContextDeleteRequest, CompatContextEntryRequest, ConfirmPendingImport,
+    ContextToolsEnvironment, ContextToolsService, DiagnoseProviderProfile, DismissPendingImport,
+    DoctorCheckStatus, DoctorDetailKind, DoctorOutcome, DoctorRecommendation, FetchProviderModels,
+    ImportCcsProviders, OverviewSnapshot, OverviewSource,
+    ProviderDoctorCheck as ServiceProviderDoctorCheck, ProviderDoctorCheckId, ProviderDoctorReport,
+    ProviderImportService, ProviderImportSource, ProviderModelsResult, ProviderNetworkError,
+    ProviderNetworkFailureKind, ProviderProfile as ServiceProviderProfile, ProviderService,
+    ProviderSource, ProviderTestOutcome, ProviderTestResult, RelayEnvironmentService,
+    RelayEnvironmentSource, RemoveEnvironmentConflicts, ResourcePresence, SystemOverviewSource,
+    SystemProviderEnvironment, TestProviderProfile, UpdateCheckState,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -276,13 +277,21 @@ pub struct BackfillRelayProfileRequest {
     pub profile_id: String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextSettingsRequest {
     pub settings: BackendSettings,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+impl std::fmt::Debug for ContextSettingsRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContextSettingsRequest")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextEntryRequest {
     pub settings: BackendSettings,
@@ -291,12 +300,34 @@ pub struct ContextEntryRequest {
     pub toml_body: String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+impl std::fmt::Debug for ContextEntryRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContextEntryRequest")
+            .field("kind", &self.kind)
+            .field("id", &self.id)
+            .field("body_present", &!self.toml_body.is_empty())
+            .field("body_length", &self.toml_body.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextDeleteRequest {
     pub settings: BackendSettings,
     pub kind: String,
     pub id: String,
+}
+
+impl std::fmt::Debug for ContextDeleteRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContextDeleteRequest")
+            .field("kind", &self.kind)
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -2071,20 +2102,19 @@ pub fn backfill_relay_profile_from_live(
 pub fn list_context_entries(
     request: ContextSettingsRequest,
 ) -> CommandResult<ContextEntriesPayload> {
-    match codex_plus_core::relay_config::list_context_entries_from_common_config(
-        &request.settings.relay_context_config_contents,
-    ) {
-        Ok(entries) => ok(
+    let fallback = request.settings.clone();
+    match system_context_tools_source().list_compat(request.settings) {
+        Ok(result) => ok(
             "工具与插件列表已读取。",
             ContextEntriesPayload {
-                settings: request.settings,
-                entries,
+                settings: result.settings,
+                entries: result.entries,
             },
         ),
         Err(error) => failed(
             &format!("读取工具与插件列表失败：{error}"),
             ContextEntriesPayload {
-                settings: request.settings,
+                settings: fallback,
                 entries: empty_context_entries(),
             },
         ),
@@ -2093,10 +2123,13 @@ pub fn list_context_entries(
 
 #[tauri::command]
 pub fn read_live_context_entries() -> CommandResult<LiveContextEntriesPayload> {
-    let home = codex_plus_core::relay_config::default_codex_home_dir();
-    let config_path = home.join("config.toml");
-    let config = read_optional_text_file(&config_path).unwrap_or_default();
-    match codex_plus_core::relay_config::list_context_entries_from_common_config(&config) {
+    read_live_context_entries_with_service(system_context_tools_source())
+}
+
+fn read_live_context_entries_with_service<E: ContextToolsEnvironment>(
+    service: &ContextToolsService<E>,
+) -> CommandResult<LiveContextEntriesPayload> {
+    match service.read_live_compat() {
         Ok(entries) => ok(
             "live 工具与插件已读取。",
             LiveContextEntriesPayload { entries },
@@ -2112,21 +2145,24 @@ pub fn read_live_context_entries() -> CommandResult<LiveContextEntriesPayload> {
 
 #[tauri::command]
 pub fn upsert_context_entry(request: ContextEntryRequest) -> CommandResult<ContextEntriesPayload> {
-    let mut settings = request.settings;
-    match codex_plus_core::relay_config::upsert_context_entry_in_common_config(
-        &settings.relay_context_config_contents,
-        &request.kind,
-        &request.id,
-        &request.toml_body,
-    ) {
-        Ok(common) => {
-            settings.relay_context_config_contents = common;
-            list_context_entries(ContextSettingsRequest { settings })
-        }
+    let fallback = request.settings.clone();
+    match system_context_tools_source().upsert_compat(CompatContextEntryRequest {
+        settings: request.settings,
+        kind: request.kind,
+        id: request.id,
+        toml_body: request.toml_body,
+    }) {
+        Ok(result) => ok(
+            "工具与插件列表已读取。",
+            ContextEntriesPayload {
+                settings: result.settings,
+                entries: result.entries,
+            },
+        ),
         Err(error) => failed(
             &format!("保存工具与插件失败：{error}"),
             ContextEntriesPayload {
-                settings,
+                settings: fallback,
                 entries: empty_context_entries(),
             },
         ),
@@ -2137,58 +2173,20 @@ pub fn upsert_context_entry(request: ContextEntryRequest) -> CommandResult<Conte
 pub fn sync_live_context_entries(
     request: ContextSettingsRequest,
 ) -> CommandResult<LiveContextEntriesPayload> {
-    let home = codex_plus_core::relay_config::default_codex_home_dir();
-    let config_path = home.join("config.toml");
-    let current_config = match read_optional_text_file(&config_path) {
-        Ok(config) => config,
-        Err(error) => {
-            return failed(
-                &format!("读取 live config.toml 失败：{error}"),
-                LiveContextEntriesPayload {
-                    entries: empty_context_entries(),
-                },
-            );
-        }
-    };
-    let updated_config = match codex_plus_core::relay_config::sync_live_config_context_entries(
-        &current_config,
-        &request.settings.relay_context_config_contents,
-    ) {
-        Ok(config) => config,
-        Err(error) => {
-            return failed(
-                &format!("同步 live 工具与插件失败：{error}"),
-                LiveContextEntriesPayload {
-                    entries: empty_context_entries(),
-                },
-            );
-        }
-    };
-    if let Some(parent) = config_path.parent() {
-        if let Err(error) = std::fs::create_dir_all(parent) {
-            return failed(
-                &format!("创建 Codex 配置目录失败：{error}"),
-                LiveContextEntriesPayload {
-                    entries: empty_context_entries(),
-                },
-            );
-        }
-    }
-    if let Err(error) = std::fs::write(&config_path, &updated_config) {
-        return failed(
-            &format!("写入 live config.toml 失败：{error}"),
-            LiveContextEntriesPayload {
-                entries: empty_context_entries(),
-            },
-        );
-    }
-    match codex_plus_core::relay_config::list_context_entries_from_common_config(&updated_config) {
+    sync_live_context_entries_with_service(system_context_tools_source(), request)
+}
+
+fn sync_live_context_entries_with_service<E: ContextToolsEnvironment>(
+    service: &ContextToolsService<E>,
+    request: ContextSettingsRequest,
+) -> CommandResult<LiveContextEntriesPayload> {
+    match service.sync_all_global_compat(&request.settings) {
         Ok(entries) => ok(
             "live 工具与插件已同步。",
             LiveContextEntriesPayload { entries },
         ),
         Err(error) => failed(
-            &format!("读取同步后的 live 工具与插件失败：{error}"),
+            &format!("同步 live 工具与插件失败：{error}"),
             LiveContextEntriesPayload {
                 entries: empty_context_entries(),
             },
@@ -2198,20 +2196,23 @@ pub fn sync_live_context_entries(
 
 #[tauri::command]
 pub fn delete_context_entry(request: ContextDeleteRequest) -> CommandResult<ContextEntriesPayload> {
-    let mut settings = request.settings;
-    match codex_plus_core::relay_config::delete_context_entry_from_common_config(
-        &settings.relay_context_config_contents,
-        &request.kind,
-        &request.id,
-    ) {
-        Ok(common) => {
-            settings.relay_context_config_contents = common;
-            list_context_entries(ContextSettingsRequest { settings })
-        }
+    let fallback = request.settings.clone();
+    match system_context_tools_source().delete_compat(CompatContextDeleteRequest {
+        settings: request.settings,
+        kind: request.kind,
+        id: request.id,
+    }) {
+        Ok(result) => ok(
+            "工具与插件列表已读取。",
+            ContextEntriesPayload {
+                settings: result.settings,
+                entries: result.entries,
+            },
+        ),
         Err(error) => failed(
             &format!("删除工具与插件失败：{error}"),
             ContextEntriesPayload {
-                settings,
+                settings: fallback,
                 entries: empty_context_entries(),
             },
         ),
@@ -3149,6 +3150,11 @@ fn system_relay_environment_source() -> &'static RelayEnvironmentService<SystemP
 {
     static SOURCE: OnceLock<RelayEnvironmentService<SystemProviderEnvironment>> = OnceLock::new();
     SOURCE.get_or_init(|| RelayEnvironmentService::new(system_provider_environment().clone()))
+}
+
+fn system_context_tools_source() -> &'static ContextToolsService<SystemProviderEnvironment> {
+    static SOURCE: OnceLock<ContextToolsService<SystemProviderEnvironment>> = OnceLock::new();
+    SOURCE.get_or_init(|| ContextToolsService::new(system_provider_environment().clone()))
 }
 
 fn system_provider_environment() -> &'static SystemProviderEnvironment {
@@ -4374,6 +4380,120 @@ model_reasoning_effort = "high"
                 .settings
                 .relay_context_config_contents
                 .contains("[mcp_servers.context7]")
+        );
+    }
+
+    #[test]
+    fn context_entry_commands_preserve_payload_shape_fallback_and_redaction() {
+        let secret = "tauri-context-secret-sentinel";
+        let request = ContextEntryRequest {
+            settings: BackendSettings::default(),
+            kind: "plugin".to_string(),
+            id: "browser".to_string(),
+            toml_body: format!("token = \"{secret}\"\n"),
+        };
+        assert!(!format!("{request:?}").contains(secret));
+
+        let result = upsert_context_entry(request);
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(result.status, "ok");
+        assert_eq!(
+            json["entries"]["plugins"][0]["tomlBody"],
+            format!("token = \"{secret}\"\n")
+        );
+        assert!(json["entries"]["plugins"][0].get("toml_body").is_none());
+
+        let invalid = upsert_context_entry(ContextEntryRequest {
+            settings: BackendSettings::default(),
+            kind: "mcp".to_string(),
+            id: "broken".to_string(),
+            toml_body: "command = [".to_string(),
+        });
+        assert_eq!(invalid.status, "failed");
+        assert!(invalid.payload.entries.mcp_servers.is_empty());
+        assert!(
+            invalid
+                .payload
+                .settings
+                .relay_context_config_contents
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn context_entry_transform_commands_do_not_persist_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let store = SettingsStore::new(settings_path.clone());
+        store.save(&BackendSettings::default()).unwrap();
+        let bytes_before = std::fs::read(&settings_path).unwrap();
+
+        let upsert = upsert_context_entry(ContextEntryRequest {
+            settings: BackendSettings::default(),
+            kind: "skill".to_string(),
+            id: "writer".to_string(),
+            toml_body: "enabled = true\n".to_string(),
+        });
+        let deleted = delete_context_entry(ContextDeleteRequest {
+            settings: upsert.payload.settings,
+            kind: "skill".to_string(),
+            id: "writer".to_string(),
+        });
+
+        assert_eq!(upsert.status, "ok");
+        assert_eq!(deleted.status, "ok");
+        assert_eq!(std::fs::read(&settings_path).unwrap(), bytes_before);
+    }
+
+    #[test]
+    fn context_live_adapter_uses_isolated_service_and_global_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let home = temp.path().join("codex");
+        std::fs::create_dir(&home).unwrap();
+        let settings = BackendSettings {
+            active_relay_id: "relay-a".to_string(),
+            relay_profiles_enabled: true,
+            relay_profiles: vec![RelayProfile {
+                id: "relay-a".to_string(),
+                context_selection_initialized: true,
+                context_selection: codex_plus_core::settings::RelayContextSelection::default(),
+                ..RelayProfile::default()
+            }],
+            relay_context_config_contents: r#"[plugins.browser]
+enabled = true
+token = "global"
+"#
+            .to_string(),
+            ..BackendSettings::default()
+        };
+        SettingsStore::new(settings_path.clone())
+            .save(&settings)
+            .unwrap();
+        std::fs::write(home.join("config.toml"), "model = \"gpt\"\n").unwrap();
+        let service = codex_plus_manager_service::ContextToolsService::new(
+            SystemProviderEnvironment::for_paths(settings_path, home.clone()),
+        );
+
+        let synced = sync_live_context_entries_with_service(
+            &service,
+            ContextSettingsRequest {
+                settings: settings.clone(),
+            },
+        );
+        assert_eq!(synced.status, "ok");
+        assert_eq!(synced.payload.entries.plugins[0].id, "browser");
+        assert!(
+            std::fs::read_to_string(home.join("config.toml"))
+                .unwrap()
+                .contains("[plugins.browser]")
+        );
+
+        let read = read_live_context_entries_with_service(&service);
+        assert_eq!(read.status, "ok");
+        assert_eq!(
+            read.payload.entries.plugins[0].toml_body,
+            "enabled = true\ntoken = \"global\"\n"
         );
     }
 

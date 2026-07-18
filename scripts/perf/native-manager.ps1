@@ -11,6 +11,42 @@ $FirstFrameLimitMs = 1500.0
 $CpuP95LimitMs = 16.7
 $MaximumStallLimitMs = 50.0
 $PrivateMemoryLimitBytes = 157286400L
+$ExpectedScriptActions = @(
+    'navigate_providers',
+    'select_next_provider',
+    'edit_provider_name',
+    'discard_provider',
+    'refresh_live',
+    'open_live_tab',
+    'request_clear_live',
+    'cancel_live_confirmation',
+    'request_clear_live',
+    'confirm_live_mutation',
+    'toggle_provider_list',
+    'navigate_environment',
+    'refresh_environment',
+    'select_environment_conflict',
+    'request_environment_cleanup',
+    'cancel_environment_cleanup',
+    'navigate_providers',
+    'open_ccs_import',
+    'close_ccs_import',
+    'navigate_overview',
+    'navigate_context',
+    'refresh_context',
+    'select_next_context_kind',
+    'create_context_entry',
+    'cancel_context_editor',
+    'open_first_context_entry',
+    'cancel_context_editor',
+    'toggle_first_context_entry',
+    'request_delete_first_context_entry',
+    'cancel_context_delete',
+    'preview_context_sync',
+    'cancel_context_sync_preview',
+    'preview_context_sync',
+    'confirm_context_sync'
+)
 
 $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $BinaryPath = Join-Path $RepositoryRoot 'target\release\codex-plus-plus-manager-native.exe'
@@ -20,7 +56,7 @@ $RunDirectory = Join-Path $PerfRoot ((Get-Date -Format 'yyyyMMdd-HHmmss-fff') + 
 function Invoke-CargoBuild {
     Push-Location $RepositoryRoot
     try {
-        & cargo build -p codex-plus-manager-native --release
+        & cargo build -p codex-plus-manager-native --release --jobs 1
         if ($LASTEXITCODE -ne 0) {
             throw "cargo build failed with exit code $LASTEXITCODE"
         }
@@ -100,13 +136,25 @@ function New-ProviderSettingsFixture {
         $First[$Key] = $ProfileDefaults[$Key]
         $Second[$Key] = $ProfileDefaults[$Key]
     }
+    $ContextConfig = @'
+[mcp_servers.alpha]
+command = "context-fixture"
+enabled = true
+
+[skills.review]
+path = "C:/fixture/review"
+enabled = true
+
+[plugins.lint]
+enabled = true
+'@
     $Settings = [ordered]@{
         relayProfilesEnabled = $true
         activeRelayId = 'perf-provider-a'
         relayProfiles = @($First, $Second)
         aggregateRelayProfiles = @()
         relayCommonConfigContents = ''
-        relayContextConfigContents = ''
+        relayContextConfigContents = $ContextConfig
         relayTestModel = 'perf-model'
     }
     $Json = $Settings | ConvertTo-Json -Depth 8
@@ -180,6 +228,7 @@ function Invoke-NativeSample {
     $CcsDbPath = Join-Path $SampleDirectory 'cc-switch.db'
     $PendingImportPath = Join-Path $SampleDirectory 'pending-provider-import.json'
     $BackupDirectory = Join-Path $SampleDirectory 'backups'
+    $ContextOwnershipPath = Join-Path $SampleDirectory 'context-live-ownership.json'
     New-Item -ItemType Directory -Path $SampleDirectory | Out-Null
     New-ProviderSettingsFixture -Path $SettingsPath
     New-CodexHomeFixture -Path $CodexHome
@@ -195,6 +244,7 @@ function Invoke-NativeSample {
     $env:CODEX_PLUS_NATIVE_CCS_DB_PATH = $CcsDbPath
     $env:CODEX_PLUS_NATIVE_PENDING_IMPORT_PATH = $PendingImportPath
     $env:CODEX_PLUS_NATIVE_BACKUP_DIR = $BackupDirectory
+    $env:CODEX_PLUS_NATIVE_CONTEXT_OWNERSHIP_PATH = $ContextOwnershipPath
     $env:CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY = '1'
     $env:OPENAI_CODEX_PLUS_PERF_SENTINEL = 'present'
 
@@ -243,10 +293,55 @@ function Invoke-NativeSample {
             ScriptActions = @($Report.script_actions | ForEach-Object { [string] $_ })
             PrivateMemoryBytes = $PrivateMemoryBytes
             ReportPath = $ReportPath
+            SettingsPath = $SettingsPath
+            LiveConfigPath = Join-Path $CodexHome 'config.toml'
+            ContextOwnershipPath = $ContextOwnershipPath
         }
     }
     finally {
         Stop-OwnedProcess -Process $Process
+    }
+}
+
+function Assert-ContextWorkflowResult {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Sample
+    )
+
+    $Settings = Get-Content -LiteralPath $Sample.SettingsPath -Raw | ConvertFrom-Json
+    if ($Settings.relayContextConfigContents -notmatch '(?ms)^\[skills\.review\].*?^enabled\s*=\s*false\s*$') {
+        throw 'the real-window context toggle did not persist the disabled skill'
+    }
+
+    $LiveConfig = Get-Content -LiteralPath $Sample.LiveConfigPath -Raw
+    if ($LiveConfig -notmatch '(?m)^\[mcp_servers\.alpha\]\s*$') {
+        throw 'the real-window context sync did not install mcp:alpha'
+    }
+    if ($LiveConfig -notmatch '(?m)^\[plugins\.lint\]\s*$') {
+        throw 'the real-window context sync did not install plugin:lint'
+    }
+    if ($LiveConfig -match '(?m)^\[skills\.review\]\s*$') {
+        throw 'the real-window context sync installed a disabled skill'
+    }
+
+    if (-not (Test-Path -LiteralPath $Sample.ContextOwnershipPath -PathType Leaf)) {
+        throw 'the real-window context sync did not write an ownership manifest'
+    }
+    $Ownership = Get-Content -LiteralPath $Sample.ContextOwnershipPath -Raw | ConvertFrom-Json
+    $OwnedKeys = @($Ownership.entries | ForEach-Object {
+        "$($_.identity.kind):$($_.identity.id)"
+    })
+    if (($OwnedKeys -join ',') -ne 'mcp:alpha,plugin:lint') {
+        throw "unexpected real-window context ownership keys: $($OwnedKeys -join ',')"
+    }
+    foreach ($Entry in @($Ownership.entries)) {
+        if ([string]$Entry.bodySha256 -notmatch '^[0-9a-f]{64}$') {
+            throw 'the context ownership manifest contains an invalid body hash'
+        }
+        if ((@($Entry.PSObject.Properties.Name | Sort-Object) -join ',') -ne 'bodySha256,identity') {
+            throw 'the context ownership manifest contains unexpected entry fields'
+        }
     }
 }
 
@@ -290,6 +385,7 @@ foreach ($Name in @(
     'CODEX_PLUS_NATIVE_CCS_DB_PATH',
     'CODEX_PLUS_NATIVE_PENDING_IMPORT_PATH',
     'CODEX_PLUS_NATIVE_BACKUP_DIR',
+    'CODEX_PLUS_NATIVE_CONTEXT_OWNERSHIP_PATH',
     'CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY',
     'OPENAI_CODEX_PLUS_PERF_SENTINEL'
 )) {
@@ -320,12 +416,16 @@ try {
     if ($CpuSamples.Count -eq 0) {
         throw 'the 30-second sample did not contain CPU frame samples'
     }
-    if ($InputSamples.Count -ne 23) {
-        throw "expected 23 scripted input samples, got $($InputSamples.Count)"
+    if ($InputSamples.Count -ne $ExpectedScriptActions.Count) {
+        throw "expected $($ExpectedScriptActions.Count) scripted input samples, got $($InputSamples.Count)"
     }
-    if ($IdleSample.ScriptActions.Count -ne 23) {
-        throw "expected 23 scripted actions, got $($IdleSample.ScriptActions.Count)"
+    if ($IdleSample.ScriptActions.Count -ne $ExpectedScriptActions.Count) {
+        throw "expected $($ExpectedScriptActions.Count) scripted actions, got $($IdleSample.ScriptActions.Count)"
     }
+    if (($IdleSample.ScriptActions -join "`n") -ne ($ExpectedScriptActions -join "`n")) {
+        throw 'scripted action sequence did not match the named performance scenario'
+    }
+    Assert-ContextWorkflowResult -Sample $IdleSample
     if ($null -eq $IdleSample.PrivateMemoryBytes) {
         throw 'the 30-second sample did not record private memory'
     }

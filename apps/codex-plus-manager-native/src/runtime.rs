@@ -3,6 +3,7 @@ use std::thread;
 
 use codex_plus_manager_service::{OverviewError, OverviewSnapshot, OverviewSource};
 
+pub mod context;
 pub mod environment;
 pub mod import;
 pub mod provider;

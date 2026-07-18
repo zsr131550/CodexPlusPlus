@@ -542,7 +542,7 @@ impl<E: ProviderActivationEnvironment> ProviderActivationSource for ProviderServ
     }
 }
 
-fn read_live_files(
+pub(crate) fn read_live_files(
     home: &Path,
 ) -> Result<(ProviderLiveFiles, ProviderLiveRevision), ProviderActivationError> {
     let config_path = home.join("config.toml");
