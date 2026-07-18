@@ -1,7 +1,9 @@
 use anyhow::Context;
+use fs2::FileExt;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
@@ -56,6 +58,58 @@ pub struct RelayApplyResult {
     pub config_path: String,
     pub backup_path: Option<String>,
     pub configured: bool,
+}
+
+pub struct RelayLiveLock {
+    file: File,
+}
+
+impl Drop for RelayLiveLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct RelayLiveFilesSnapshot {
+    config: Option<Vec<u8>>,
+    auth: Option<Vec<u8>>,
+}
+
+pub fn acquire_relay_live_read_lock(home: &Path) -> anyhow::Result<RelayLiveLock> {
+    acquire_relay_live_lock(home, false)
+}
+
+pub fn acquire_relay_live_mutation_lock(home: &Path) -> anyhow::Result<RelayLiveLock> {
+    acquire_relay_live_lock(home, true)
+}
+
+fn acquire_relay_live_lock(home: &Path, exclusive: bool) -> anyhow::Result<RelayLiveLock> {
+    let lock_path = relay_live_lock_path(home);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open relay live lock {}", lock_path.display()))?;
+    if exclusive {
+        FileExt::lock_exclusive(&file)
+    } else {
+        FileExt::lock_shared(&file)
+    }
+    .with_context(|| format!("failed to lock relay live files for {}", home.display()))?;
+    Ok(RelayLiveLock { file })
+}
+
+fn relay_live_lock_path(home: &Path) -> PathBuf {
+    let mut path = home.as_os_str().to_os_string();
+    path.push(".codex-plus-live.lock");
+    PathBuf::from(path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,6 +510,28 @@ pub fn apply_relay_config_file_to_home(
     std::fs::create_dir_all(home)?;
 
     let backup_path = write_codex_live_atomic(home, Some(config_contents), None, false)?;
+
+    let status = relay_config_status_from_home(home);
+    Ok(RelayApplyResult {
+        config_path: status.config_path,
+        backup_path,
+        configured: status.configured,
+    })
+}
+
+pub fn apply_relay_auth_file_to_home(
+    home: &Path,
+    auth_contents: &str,
+) -> anyhow::Result<RelayApplyResult> {
+    let auth_contents = auth_contents
+        .strip_prefix('\u{feff}')
+        .unwrap_or(auth_contents);
+    if auth_contents.trim().is_empty() {
+        anyhow::bail!("auth.json 内容不能为空");
+    }
+    std::fs::create_dir_all(home)?;
+
+    let backup_path = write_codex_live_atomic(home, None, Some(auth_contents.as_bytes()), false)?;
 
     let status = relay_config_status_from_home(home);
     Ok(RelayApplyResult {
@@ -2285,6 +2361,25 @@ fn read_optional_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+pub(crate) fn capture_relay_live_files(home: &Path) -> anyhow::Result<RelayLiveFilesSnapshot> {
+    Ok(RelayLiveFilesSnapshot {
+        config: read_optional_bytes(&home.join("config.toml"))?,
+        auth: read_optional_bytes(&home.join("auth.json"))?,
+    })
+}
+
+pub(crate) fn restore_relay_live_files(
+    home: &Path,
+    snapshot: &RelayLiveFilesSnapshot,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(home)?;
+    let auth_result = restore_optional_file(&home.join("auth.json"), snapshot.auth.as_deref());
+    let config_result =
+        restore_optional_file(&home.join("config.toml"), snapshot.config.as_deref());
+    auth_result?;
+    config_result
 }
 
 fn restore_optional_file(path: &Path, contents: Option<&[u8]>) -> anyhow::Result<()> {

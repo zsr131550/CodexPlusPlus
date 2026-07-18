@@ -1,4 +1,4 @@
-use codex_plus_core::relay_switch::switch_relay_profile_in_home;
+use codex_plus_core::relay_switch::{RelayRollbackOutcome, switch_relay_profile_in_home};
 use codex_plus_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, AggregateRelayStrategy, BackendSettings,
     LaunchMode, RelayMode, RelayProfile, SettingsStore,
@@ -53,6 +53,72 @@ base_url = "https://a.example/v1"
 
     assert!(error.to_string().contains("auth.json"));
     assert_eq!(store.load().unwrap().active_relay_id, "a");
+}
+
+#[test]
+fn switch_restores_settings_and_live_files_when_postcondition_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex");
+    std::fs::create_dir(&home).unwrap();
+    let original_config = br#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://a.example/v1"
+"#;
+    let original_auth = br#"{"OPENAI_API_KEY":"sk-a"}"#;
+    std::fs::write(home.join("config.toml"), original_config).unwrap();
+    std::fs::write(home.join("auth.json"), original_auth).unwrap();
+
+    let store = SettingsStore::new(temp.path().join("settings.json"));
+    let original = BackendSettings {
+        active_relay_id: "a".to_string(),
+        relay_profiles: vec![
+            pure_profile("a", "https://a.example/v1", "sk-a"),
+            RelayProfile {
+                id: "b".to_string(),
+                name: "B".to_string(),
+                relay_mode: RelayMode::PureApi,
+                config_contents: "model_provider = \"custom\"\n".to_string(),
+                auth_contents: r#"{"OPENAI_API_KEY":"sk-b"}"#.to_string(),
+                ..RelayProfile::default()
+            },
+        ],
+        ..BackendSettings::default()
+    };
+    store.save(&original).unwrap();
+    let original_stored = store.load().unwrap();
+    let next = BackendSettings {
+        active_relay_id: "b".to_string(),
+        relay_profiles: original_stored.relay_profiles.clone(),
+        ..BackendSettings::default()
+    };
+
+    let error = switch_relay_profile_in_home(&store, &home, next, "a")
+        .expect_err("missing provider base URL should fail the postcondition");
+
+    assert!(error.to_string().contains("custom provider"));
+    assert_eq!(error.rollback_outcome(), RelayRollbackOutcome::Verified);
+    let backup = std::path::Path::new(error.backup_path().expect("live write should be backed up"));
+    assert_eq!(
+        std::fs::read(backup.join("config.toml")).unwrap(),
+        original_config
+    );
+    assert_eq!(
+        std::fs::read(backup.join("auth.json")).unwrap(),
+        original_auth
+    );
+    assert_eq!(store.load().unwrap(), original_stored);
+    assert_eq!(
+        std::fs::read(home.join("config.toml")).unwrap(),
+        original_config
+    );
+    assert_eq!(
+        std::fs::read(home.join("auth.json")).unwrap(),
+        original_auth
+    );
 }
 
 #[test]
@@ -155,6 +221,79 @@ fn switch_to_aggregate_relay_allows_empty_config_snapshot() {
     assert!(result.configured);
     assert_eq!(store.load().unwrap().active_relay_id, "agg");
     assert!(live.contains(r#"base_url = "http://127.0.0.1:57321/v1""#));
+}
+
+#[test]
+fn switching_away_from_aggregate_preserves_aggregate_profile_and_routing() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex");
+    std::fs::create_dir(&home).unwrap();
+    let store = SettingsStore::new(temp.path().join("settings.json"));
+    let api = pure_profile("api", "https://api.example/v1", "sk-api");
+    let aggregate = RelayProfile {
+        id: "agg".to_string(),
+        name: "Aggregate".to_string(),
+        relay_mode: RelayMode::Aggregate,
+        ..RelayProfile::default()
+    };
+    let official = RelayProfile {
+        id: "official".to_string(),
+        name: "Official".to_string(),
+        relay_mode: RelayMode::Official,
+        official_mix_api_key: false,
+        auth_contents: r#"{"auth_mode":"chatgpt","tokens":{"access_token":"official"}}"#
+            .to_string(),
+        ..RelayProfile::default()
+    };
+    let routing = AggregateRelayProfile {
+        id: "agg".to_string(),
+        name: "Aggregate".to_string(),
+        strategy: AggregateRelayStrategy::Failover,
+        members: vec![AggregateRelayMember {
+            relay_id: "api".to_string(),
+            weight: 1,
+        }],
+    };
+    let initial = BackendSettings {
+        active_relay_id: "api".to_string(),
+        relay_profiles: vec![api.clone(), aggregate.clone(), official.clone()],
+        aggregate_relay_profiles: vec![routing.clone()],
+        ..BackendSettings::default()
+    };
+    store.save(&initial).unwrap();
+
+    let aggregate_settings = BackendSettings {
+        active_relay_id: "agg".to_string(),
+        active_aggregate_relay_id: "agg".to_string(),
+        relay_profiles: vec![api.clone(), aggregate.clone(), official.clone()],
+        aggregate_relay_profiles: vec![routing.clone()],
+        ..BackendSettings::default()
+    };
+    switch_relay_profile_in_home(&store, &home, aggregate_settings, "api").unwrap();
+
+    let official_settings = BackendSettings {
+        active_relay_id: "official".to_string(),
+        relay_profiles: vec![api, aggregate, official],
+        aggregate_relay_profiles: vec![routing.clone()],
+        ..BackendSettings::default()
+    };
+    switch_relay_profile_in_home(&store, &home, official_settings, "agg").unwrap();
+
+    let stored = store.load().unwrap();
+    let aggregate = stored
+        .relay_profiles
+        .iter()
+        .find(|profile| profile.id == "agg")
+        .unwrap();
+    assert_eq!(aggregate.relay_mode, RelayMode::Aggregate);
+    assert_eq!(stored.aggregate_relay_profiles, vec![routing]);
+    assert_eq!(stored.active_relay_id, "official");
+    assert!(stored.active_aggregate_relay_id.is_empty());
+    assert!(
+        std::fs::read_to_string(home.join("auth.json"))
+            .unwrap()
+            .contains("official")
+    );
 }
 
 #[test]

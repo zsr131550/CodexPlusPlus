@@ -1,6 +1,7 @@
 use codex_plus_core::codex_sqlite::codex_session_db_path_from_home;
 use codex_plus_core::relay_config::{
-    apply_pure_api_config_to_home, apply_relay_config_file_to_home, apply_relay_config_to_home,
+    acquire_relay_live_mutation_lock, acquire_relay_live_read_lock, apply_pure_api_config_to_home,
+    apply_relay_auth_file_to_home, apply_relay_config_file_to_home, apply_relay_config_to_home,
     apply_relay_files_to_home, apply_relay_files_to_home_with_common,
     apply_relay_profile_files_to_home_with_context, apply_relay_profile_to_home_with_switch_rules,
     apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard,
@@ -1394,6 +1395,89 @@ fn apply_relay_config_file_accepts_utf8_bom_config() {
     assert!(result.configured);
     assert!(config.contains(r#"model_provider = "custom""#));
     assert!(config.contains("http://127.0.0.1:57321/v1"));
+}
+
+#[test]
+fn apply_relay_auth_file_is_atomic_backed_up_and_preserves_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let config = b"model = \"keep-me\"\n";
+    let old_auth = br#"{"OPENAI_API_KEY":"old"}"#;
+    let new_auth = r#"{"OPENAI_API_KEY":"new"}"#;
+    std::fs::write(home.join("config.toml"), config).unwrap();
+    std::fs::write(home.join("auth.json"), old_auth).unwrap();
+
+    let result = apply_relay_auth_file_to_home(home, new_auth).unwrap();
+
+    assert_eq!(std::fs::read(home.join("config.toml")).unwrap(), config);
+    assert_eq!(
+        std::fs::read_to_string(home.join("auth.json")).unwrap(),
+        new_auth
+    );
+    let backup = result
+        .backup_path
+        .expect("existing live files should be backed up");
+    assert_eq!(
+        std::fs::read(std::path::Path::new(&backup).join("config.toml")).unwrap(),
+        config
+    );
+    assert_eq!(
+        std::fs::read(std::path::Path::new(&backup).join("auth.json")).unwrap(),
+        old_auth
+    );
+}
+
+#[test]
+fn apply_relay_auth_file_rejects_invalid_json_without_writing() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let config = b"model = \"keep-me\"\n";
+    let old_auth = br#"{"OPENAI_API_KEY":"old"}"#;
+    std::fs::write(home.join("config.toml"), config).unwrap();
+    std::fs::write(home.join("auth.json"), old_auth).unwrap();
+
+    let error = apply_relay_auth_file_to_home(home, "{").unwrap_err();
+
+    assert!(error.to_string().contains("JSON"));
+    assert_eq!(std::fs::read(home.join("config.toml")).unwrap(), config);
+    assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), old_auth);
+    assert!(!home.join("backups").exists());
+}
+
+#[test]
+fn relay_live_lock_allows_shared_reads_and_blocks_mutations() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex");
+    let first_read = acquire_relay_live_read_lock(&home).unwrap();
+    let second_read = acquire_relay_live_read_lock(&home).unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+    let worker_home = home.clone();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let _guard = acquire_relay_live_mutation_lock(&worker_home).unwrap();
+        acquired_tx.send(()).unwrap();
+    });
+
+    started_rx.recv().unwrap();
+    assert!(
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err(),
+        "exclusive mutation must wait for every shared reader"
+    );
+    drop(first_read);
+    assert!(
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err(),
+        "exclusive mutation must still wait for the second shared reader"
+    );
+    drop(second_read);
+    acquired_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("exclusive mutation should continue after readers release");
+    worker.join().unwrap();
 }
 
 #[test]

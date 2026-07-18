@@ -458,7 +458,8 @@ pub fn load_settings() -> CommandResult<SettingsPayload> {
 #[tauri::command]
 pub fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload> {
     let settings = normalize_settings_before_save(settings);
-    match SettingsStore::default().save(&settings) {
+    let home = codex_plus_core::relay_config::default_codex_home_dir();
+    match with_relay_live_mutation_lock(&home, || SettingsStore::default().save(&settings)) {
         Ok(()) => settings_payload("设置已保存。", "设置保存后重新读取失败"),
         Err(error) => failed(
             &format!("保存设置失败：{error}"),
@@ -504,6 +505,15 @@ pub fn import_ccs_providers() -> CommandResult<SettingsPayload> {
         Err(error) => {
             let payload = settings_payload_value().unwrap_or_else(|(_, payload)| payload);
             return failed(&format!("读取 cc-switch 供应商配置失败：{error}"), payload);
+        }
+    };
+
+    let home = codex_plus_core::relay_config::default_codex_home_dir();
+    let _live_guard = match codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let payload = settings_payload_value().unwrap_or_else(|(_, payload)| payload);
+            return failed(&format!("获取供应商 live 写锁失败：{error}"), payload);
         }
     };
 
@@ -566,6 +576,14 @@ pub fn load_pending_provider_import() -> CommandResult<PendingProviderImportPayl
 
 #[tauri::command]
 pub fn confirm_pending_provider_import() -> CommandResult<SettingsPayload> {
+    let home = codex_plus_core::relay_config::default_codex_home_dir();
+    let _live_guard = match codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let payload = settings_payload_value().unwrap_or_else(|(_, payload)| payload);
+            return failed(&format!("获取供应商 live 写锁失败：{error}"), payload);
+        }
+    };
     match codex_plus_core::provider_import::confirm_pending_provider_import() {
         Ok(Some(result)) => {
             let message = if result.imported {
@@ -1174,6 +1192,11 @@ fn persist_provider_sync_selection(provider: &str) {
     if trimmed.is_empty() {
         return;
     }
+    let home = codex_plus_core::relay_config::default_codex_home_dir();
+    let Ok(_live_guard) = codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home)
+    else {
+        return;
+    };
     let store = SettingsStore::default();
     let mut settings = store.load().unwrap_or_default();
     settings.provider_sync_last_selected_provider = trimmed.to_string();
@@ -1665,7 +1688,8 @@ pub fn copy_diagnostics() -> CommandResult<DiagnosticsPayload> {
 #[tauri::command]
 pub fn reset_settings() -> CommandResult<SettingsPayload> {
     let settings = BackendSettings::default();
-    match SettingsStore::default().save(&settings) {
+    let home = codex_plus_core::relay_config::default_codex_home_dir();
+    match with_relay_live_mutation_lock(&home, || SettingsStore::default().save(&settings)) {
         Ok(()) => settings_payload("设置已重置为默认值。", "设置重置后重新读取失败"),
         Err(error) => failed(
             &format!("重置设置失败：{error}"),
@@ -1682,6 +1706,16 @@ pub fn reset_settings() -> CommandResult<SettingsPayload> {
 
 #[tauri::command]
 pub fn reset_image_overlay_settings() -> CommandResult<SettingsPayload> {
+    let home = codex_plus_core::relay_config::default_codex_home_dir();
+    let _live_guard = match codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home) {
+        Ok(guard) => guard,
+        Err(error) => {
+            return failed(
+                &format!("获取供应商 live 写锁失败：{error}"),
+                settings_payload_value().unwrap_or_else(|(_, payload)| payload),
+            );
+        }
+    };
     let store = SettingsStore::default();
     let mut settings = store.load().unwrap_or_default();
     let defaults = BackendSettings::default();
@@ -1707,7 +1741,18 @@ pub fn reset_image_overlay_settings() -> CommandResult<SettingsPayload> {
 
 #[tauri::command]
 pub fn relay_status() -> CommandResult<RelayPayload> {
-    let status = codex_plus_core::relay_config::default_relay_status();
+    let home = codex_plus_core::relay_config::default_codex_home_dir();
+    let status = match with_relay_live_read_lock(&home, || {
+        Ok(codex_plus_core::relay_config::relay_status_from_home(&home))
+    }) {
+        Ok(status) => status,
+        Err(error) => {
+            return failed(
+                &format!("读取供应商 live 状态失败：{error}"),
+                relay_payload(unavailable_relay_status(&home), None),
+            );
+        }
+    };
     let message = if status.authenticated {
         "已检测到 ChatGPT 登录状态。"
     } else {
@@ -1719,7 +1764,7 @@ pub fn relay_status() -> CommandResult<RelayPayload> {
 #[tauri::command]
 pub fn read_relay_files() -> CommandResult<RelayFilesPayload> {
     let home = codex_plus_core::relay_config::default_codex_home_dir();
-    match relay_files_payload_from_home(&home) {
+    match with_relay_live_read_lock(&home, || relay_files_payload_from_home(&home)) {
         Ok(payload) => ok("配置文件内容已读取。", payload),
         Err(error) => failed(
             &format!("读取配置文件失败：{error}"),
@@ -1786,18 +1831,20 @@ pub fn remove_env_conflicts(
 #[tauri::command]
 pub fn save_relay_file(request: SaveRelayFileRequest) -> CommandResult<RelayFilesPayload> {
     let home = codex_plus_core::relay_config::default_codex_home_dir();
-    match save_relay_file_in_home(&home, &request.kind, &request.contents)
-        .and_then(|_| relay_files_payload_from_home(&home))
-    {
+    match with_relay_live_mutation_lock(&home, || {
+        save_relay_file_in_home(&home, &request.kind, &request.contents)
+            .and_then(|_| relay_files_payload_from_home(&home))
+    }) {
         Ok(payload) => ok("配置文件已保存。", payload),
         Err(error) => failed(
             &format!("保存配置文件失败：{error}"),
-            relay_files_payload_from_home(&home).unwrap_or_else(|_| RelayFilesPayload {
-                config_path: home.join("config.toml").to_string_lossy().to_string(),
-                auth_path: home.join("auth.json").to_string_lossy().to_string(),
-                config_contents: String::new(),
-                auth_contents: String::new(),
-            }),
+            with_relay_live_read_lock(&home, || relay_files_payload_from_home(&home))
+                .unwrap_or_else(|_| RelayFilesPayload {
+                    config_path: home.join("config.toml").to_string_lossy().to_string(),
+                    auth_path: home.join("auth.json").to_string_lossy().to_string(),
+                    config_contents: String::new(),
+                    auth_contents: String::new(),
+                }),
         ),
     }
 }
@@ -1814,8 +1861,12 @@ pub struct RelayProfileSwitchRequest {
 pub fn switch_relay_profile(
     request: RelayProfileSwitchRequest,
 ) -> CommandResult<RelaySwitchPayload> {
+    let home = codex_plus_core::relay_config::default_codex_home_dir();
     let Ok(_guard) = relay_switch_mutex().lock() else {
-        let status = codex_plus_core::relay_config::default_relay_status();
+        let status = with_relay_live_read_lock(&home, || {
+            Ok(codex_plus_core::relay_config::relay_status_from_home(&home))
+        })
+        .unwrap_or_else(|_| unavailable_relay_status(&home));
         return failed(
             "供应商切换锁已损坏，请重启管理器后再试。",
             relay_switch_payload(
@@ -1825,7 +1876,19 @@ pub fn switch_relay_profile(
             ),
         );
     };
-    let home = codex_plus_core::relay_config::default_codex_home_dir();
+    let _live_guard = match codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home) {
+        Ok(guard) => guard,
+        Err(error) => {
+            return failed(
+                &format!("获取供应商 live 写锁失败：{error}"),
+                relay_switch_payload(
+                    SettingsStore::default().load().unwrap_or_default(),
+                    unavailable_relay_status(&home),
+                    None,
+                ),
+            );
+        }
+    };
     let store = SettingsStore::default();
     let previous_active_relay_id = request.previous_active_relay_id;
     let settings = normalize_settings_before_save(request.settings);
@@ -1891,6 +1954,15 @@ pub fn backfill_relay_profile_from_live(
 ) -> CommandResult<SettingsBackfillPayload> {
     let home = codex_plus_core::relay_config::default_codex_home_dir();
     let mut settings = request.settings;
+    let _live_guard = match codex_plus_core::relay_config::acquire_relay_live_read_lock(&home) {
+        Ok(guard) => guard,
+        Err(error) => {
+            return failed(
+                &format!("获取供应商 live 读锁失败：{error}"),
+                SettingsBackfillPayload { settings },
+            );
+        }
+    };
     let requested_profile_id = request.profile_id.clone();
     log_manager_event(
         "manager.backfill_relay_profile_from_live.start",
@@ -2218,6 +2290,15 @@ pub async fn diagnose_relay_profile(profile: RelayProfile) -> CommandResult<Prov
 #[tauri::command]
 pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
     let home = codex_plus_core::relay_config::default_codex_home_dir();
+    let _live_guard = match codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home) {
+        Ok(guard) => guard,
+        Err(error) => {
+            return failed(
+                &format!("获取供应商 live 写锁失败：{error}"),
+                relay_payload(unavailable_relay_status(&home), None),
+            );
+        }
+    };
     let settings = SettingsStore::default().load().unwrap_or_default();
     if !settings.relay_profiles_enabled {
         let status = codex_plus_core::relay_config::relay_status_from_home(&home);
@@ -2353,6 +2434,15 @@ fn apply_aggregate_relay_injection_to_home(home: &Path) -> CommandResult<RelayPa
 #[tauri::command]
 pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
     let home = codex_plus_core::relay_config::default_codex_home_dir();
+    let _live_guard = match codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home) {
+        Ok(guard) => guard,
+        Err(error) => {
+            return failed(
+                &format!("获取供应商 live 写锁失败：{error}"),
+                relay_payload(unavailable_relay_status(&home), None),
+            );
+        }
+    };
     let settings = SettingsStore::default().load().unwrap_or_default();
     if !settings.relay_profiles_enabled {
         let status = codex_plus_core::relay_config::relay_status_from_home(&home);
@@ -2454,6 +2544,15 @@ pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
 #[tauri::command]
 pub fn clear_relay_injection() -> CommandResult<RelayPayload> {
     let home = codex_plus_core::relay_config::default_codex_home_dir();
+    let _live_guard = match codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home) {
+        Ok(guard) => guard,
+        Err(error) => {
+            return failed(
+                &format!("获取供应商 live 写锁失败：{error}"),
+                relay_payload(unavailable_relay_status(&home), None),
+            );
+        }
+    };
     let settings = SettingsStore::default().load().unwrap_or_default();
     let relay = settings.active_relay_profile();
     log_manager_event("manager.clear_relay_injection.start", json!({}));
@@ -2602,6 +2701,34 @@ fn relay_switch_payload(
             .to_string(),
         user_scripts: user_script_inventory(),
     }
+}
+
+fn unavailable_relay_status(home: &Path) -> codex_plus_core::relay_config::RelayStatus {
+    codex_plus_core::relay_config::RelayStatus {
+        authenticated: false,
+        auth_source: "unavailable".to_string(),
+        account_label: None,
+        config_path: home.join("config.toml").to_string_lossy().to_string(),
+        configured: false,
+        requires_openai_auth: false,
+        has_bearer_token: false,
+    }
+}
+
+fn with_relay_live_read_lock<T>(
+    home: &Path,
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let _guard = codex_plus_core::relay_config::acquire_relay_live_read_lock(home)?;
+    operation()
+}
+
+fn with_relay_live_mutation_lock<T>(
+    home: &Path,
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let _guard = codex_plus_core::relay_config::acquire_relay_live_mutation_lock(home)?;
+    operation()
 }
 
 fn relay_switch_mutex() -> &'static Mutex<()> {
@@ -3418,6 +3545,80 @@ mod tests {
 
         assert!(!text.contains("sk-"));
         assert!(text.contains("hasBearerToken"));
+    }
+
+    #[test]
+    fn tauri_live_read_waits_for_native_mutation_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join("config.toml"), "model = \"before\"\n").unwrap();
+        let mutation_lock =
+            codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home).unwrap();
+        let worker_home = home.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(with_relay_live_read_lock(&worker_home, || {
+                    std::fs::read_to_string(worker_home.join("config.toml")).map_err(Into::into)
+                }))
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        assert!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        drop(mutation_lock);
+        assert_eq!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            "model = \"before\"\n"
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn tauri_live_mutation_waits_for_native_read_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        std::fs::create_dir(&home).unwrap();
+        let read_lock = codex_plus_core::relay_config::acquire_relay_live_read_lock(&home).unwrap();
+        let worker_home = home.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(with_relay_live_mutation_lock(&worker_home, || {
+                    std::fs::write(worker_home.join("auth.json"), "{}\n").map_err(Into::into)
+                }))
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        assert!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        assert!(!home.join("auth.json").exists());
+        drop(read_lock);
+        result_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.join("auth.json")).unwrap(),
+            "{}\n"
+        );
+        worker.join().unwrap();
     }
 
     #[test]

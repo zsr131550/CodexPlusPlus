@@ -1,6 +1,7 @@
 mod error;
 mod overview;
 mod provider;
+mod provider_activation;
 mod provider_error;
 mod provider_network;
 mod provider_presets;
@@ -17,6 +18,13 @@ pub use provider::{
     ProviderProfile, ProviderRevision, ProviderService, ProviderSource, ProviderValidationIssue,
     ProviderValidationKind, ProviderWorkspace, SaveProviderWorkspace, ValidationSeverity,
     validate_provider_document,
+};
+pub use provider_activation::{
+    ApplyActiveProvider, BackfillActiveProvider, ClearLiveProvider, ProviderActivationEnvironment,
+    ProviderActivationError, ProviderActivationErrorKind, ProviderActivationSource,
+    ProviderLiveFileKind, ProviderLiveFiles, ProviderLiveRevision, ProviderLiveWorkspace,
+    ProviderMutationGuard, ProviderMutationOutcome, ProviderRollbackOutcome, SaveLiveFile,
+    SwitchProvider,
 };
 pub use provider_error::{ProviderError, ProviderErrorKind};
 pub use provider_network::{

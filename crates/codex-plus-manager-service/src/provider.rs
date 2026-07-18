@@ -272,6 +272,7 @@ pub trait ProviderSource: Send + Sync + 'static {
     ) -> Result<ProviderDoctorReport, ProviderNetworkError>;
 }
 
+#[derive(Clone)]
 pub struct ProviderService<E> {
     environment: E,
 }
@@ -287,7 +288,7 @@ impl<E> ProviderService<E> {
 }
 
 impl<E: ProviderEnvironment> ProviderService<E> {
-    fn workspace_from_settings(
+    pub(crate) fn workspace_from_settings(
         &self,
         settings: &BackendSettings,
     ) -> Result<ProviderWorkspace, ProviderError> {

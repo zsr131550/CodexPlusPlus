@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use codex_plus_core::relay_config::{relay_profile_base_url, test_relay_profile};
@@ -7,30 +7,46 @@ use codex_plus_core::settings::{RelayProfile, RelayProtocol};
 use serde_json::Value;
 
 use crate::{
-    NetworkModelsResponse, NetworkTestResponse, ProviderEnvironment,
+    NetworkModelsResponse, NetworkTestResponse, ProviderActivationEnvironment, ProviderEnvironment,
     ProviderEnvironmentNetworkError, ProviderNetworkEnvironment, ProviderNetworkFailureKind,
 };
 
 #[derive(Clone)]
 pub struct SystemProviderEnvironment {
     settings: SettingsStore,
+    codex_home: PathBuf,
     runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl SystemProviderEnvironment {
     pub fn for_settings_path(path: PathBuf) -> Self {
+        let codex_home = isolated_codex_home_for_settings(&path);
+        Self::for_paths(path, codex_home)
+    }
+
+    pub fn for_paths(settings_path: PathBuf, codex_home: PathBuf) -> Self {
         Self {
-            settings: SettingsStore::new(path),
+            settings: SettingsStore::new(settings_path),
+            codex_home,
             runtime: Arc::new(provider_runtime()),
         }
     }
 
     pub fn for_native_process() -> Self {
-        std::env::var_os("CODEX_PLUS_NATIVE_SETTINGS_PATH")
+        let settings_path = std::env::var_os("CODEX_PLUS_NATIVE_SETTINGS_PATH")
             .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .map(Self::for_settings_path)
-            .unwrap_or_default()
+            .map(PathBuf::from);
+        let codex_home = std::env::var_os("CODEX_PLUS_NATIVE_CODEX_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        match (settings_path, codex_home) {
+            (None, None) => Self::default(),
+            (Some(settings_path), None) => Self::for_settings_path(settings_path),
+            (settings_path, Some(codex_home)) => Self::for_paths(
+                settings_path.unwrap_or_else(codex_plus_core::paths::default_settings_path),
+                codex_home,
+            ),
+        }
     }
 }
 
@@ -38,6 +54,7 @@ impl Default for SystemProviderEnvironment {
     fn default() -> Self {
         Self {
             settings: SettingsStore::default(),
+            codex_home: codex_plus_core::relay_config::default_codex_home_dir(),
             runtime: Arc::new(provider_runtime()),
         }
     }
@@ -123,6 +140,25 @@ impl ProviderEnvironment for SystemProviderEnvironment {
     where
         F: FnOnce(&BackendSettings) -> bool,
     {
+        let _lock =
+            codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&self.codex_home)?;
         self.settings.update_if(payload, predicate)
     }
+}
+
+impl ProviderActivationEnvironment for SystemProviderEnvironment {
+    fn settings_store(&self) -> &SettingsStore {
+        &self.settings
+    }
+
+    fn codex_home(&self) -> &Path {
+        &self.codex_home
+    }
+}
+
+fn isolated_codex_home_for_settings(settings_path: &Path) -> PathBuf {
+    settings_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("codex")
 }
