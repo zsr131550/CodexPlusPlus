@@ -11,10 +11,13 @@ use crate::state::marketplace::MarketplaceViewState;
 use crate::state::provider::OperationPhase;
 use crate::state::provider::{ProviderLoadPhase, ProviderViewState};
 use crate::state::sessions::SessionViewState;
+use crate::state::user_scripts::{ScriptsTab, UserScriptViewState};
 use crate::state::{OverviewFailureKind, OverviewPhase, Route};
 use crate::{icons, theme};
 
-use super::{about, context, environment, import, marketplace, overview, provider, sessions};
+use super::{
+    about, context, environment, import, marketplace, overview, provider, sessions, user_scripts,
+};
 
 pub const SIDEBAR_WIDTH: f32 = 176.0;
 pub const HEADER_HEIGHT: f32 = 58.0;
@@ -31,6 +34,7 @@ pub enum ShellAction {
     Import(import::ImportAction),
     Environment(environment::EnvironmentAction),
     Sessions(sessions::SessionAction),
+    UserScripts(user_scripts::UserScriptAction),
     Context(context::ContextAction),
     Marketplace(marketplace::MarketplaceAction),
 }
@@ -55,6 +59,7 @@ pub struct ShellFeatureStates<'a> {
     pub context: Option<&'a ContextViewState>,
     pub marketplace: Option<&'a MarketplaceViewState>,
     pub sessions: Option<&'a SessionViewState>,
+    pub user_scripts: Option<&'a UserScriptViewState>,
 }
 
 pub fn render_shell(
@@ -69,6 +74,7 @@ pub fn render_shell(
         context: context_state,
         marketplace: marketplace_state,
         sessions: sessions_state,
+        user_scripts: user_script_state,
     } = states;
     let mut actions = Vec::new();
 
@@ -106,6 +112,7 @@ pub fn render_shell(
                 environment_state,
                 context_state,
                 sessions_state,
+                user_script_state,
             )
         });
 
@@ -151,6 +158,17 @@ pub fn render_shell(
                     let mut session_actions = Vec::new();
                     sessions::render(ui, state, model.locale, &mut session_actions);
                     actions.extend(session_actions.into_iter().map(ShellAction::Sessions));
+                }
+            }
+            Route::Scripts => {
+                if let Some(state) = user_script_state {
+                    let mut user_script_actions = Vec::new();
+                    user_scripts::render(ui, state, model.locale, &mut user_script_actions);
+                    actions.extend(
+                        user_script_actions
+                            .into_iter()
+                            .map(ShellAction::UserScripts),
+                    );
                 }
             }
             Route::Context => {
@@ -253,6 +271,14 @@ fn render_sidebar(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<S
         text(model.locale, TextKey::Sessions),
         model.route == Route::Sessions,
         Route::Sessions,
+        actions,
+    );
+    navigation_button(
+        ui,
+        icons::file_code_2(),
+        text(model.locale, TextKey::Scripts),
+        model.route == Route::Scripts,
+        Route::Scripts,
         actions,
     );
     navigation_button(
@@ -388,6 +414,11 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
                     text(model.locale, TextKey::AppName),
                     text(model.locale, TextKey::Sessions)
                 ),
+                Route::Scripts => format!(
+                    "{} {}",
+                    text(model.locale, TextKey::AppName),
+                    text(model.locale, TextKey::Scripts)
+                ),
                 Route::Context => format!(
                     "{} {}",
                     text(model.locale, TextKey::AppName),
@@ -405,6 +436,7 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
                 Route::Providers => TextKey::ProvidersSubtitle,
                 Route::Environment => TextKey::EnvironmentSubtitle,
                 Route::Sessions => TextKey::SessionsSubtitle,
+                Route::Scripts => TextKey::ScriptsSubtitle,
                 Route::Context => TextKey::ToolsPluginsSubtitle,
                 Route::About => TextKey::AboutSubtitle,
             };
@@ -453,6 +485,7 @@ fn render_status(
     environment_state: Option<&EnvironmentViewState>,
     context_state: Option<&ContextViewState>,
     sessions_state: Option<&SessionViewState>,
+    user_script_state: Option<&UserScriptViewState>,
 ) {
     if model.route == Route::Providers {
         let phase = provider_state.map_or(ProviderLoadPhase::Idle, |state| state.load_phase);
@@ -538,6 +571,35 @@ fn render_status(
                 text(model.locale, TextKey::SessionLoadFailed),
                 theme::ERROR_COLOR,
             ),
+        };
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                color,
+                format!("{}: {status}", text(model.locale, TextKey::Status)),
+            );
+            render_status_metadata(ui, model);
+        });
+        return;
+    }
+
+    if model.route == Route::Scripts {
+        let tab = user_script_state.map_or(ScriptsTab::Market, |state| state.tab);
+        let phase = user_script_state.map_or(OperationPhase::Idle, |state| match tab {
+            ScriptsTab::Market => state.market_phase,
+            ScriptsTab::Local => state.local_phase,
+        });
+        let (status, color) = match phase {
+            OperationPhase::Idle | OperationPhase::Running => {
+                (text(model.locale, TextKey::Loading), theme::WARNING_COLOR)
+            }
+            OperationPhase::Ready => (text(model.locale, TextKey::Ready), theme::SUCCESS_COLOR),
+            OperationPhase::Error => {
+                let key = match tab {
+                    ScriptsTab::Market => TextKey::ScriptMarketLoadFailed,
+                    ScriptsTab::Local => TextKey::ScriptLocalLoadFailed,
+                };
+                (text(model.locale, key), theme::ERROR_COLOR)
+            }
         };
         ui.horizontal(|ui| {
             ui.colored_label(

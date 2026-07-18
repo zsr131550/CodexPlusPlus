@@ -1,6 +1,6 @@
 use eframe::egui;
 
-pub const ICON_FILES: [&str; 23] = [
+pub const ICON_FILES: [&str; 24] = [
     "layout-dashboard.svg",
     "info.svg",
     "refresh-cw.svg",
@@ -24,6 +24,7 @@ pub const ICON_FILES: [&str; 23] = [
     "pencil.svg",
     "wrench.svg",
     "message-circle.svg",
+    "file-code-2.svg",
 ];
 
 pub fn layout_dashboard() -> egui::ImageSource<'static> {
@@ -118,6 +119,10 @@ pub fn message_circle() -> egui::ImageSource<'static> {
     egui::include_image!("../assets/icons/message-circle.svg")
 }
 
+pub fn file_code_2() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/file-code-2.svg")
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -128,7 +133,7 @@ mod tests {
     #[test]
     fn declared_lucide_assets_exist_and_are_safe_standalone_svgs() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icons");
-        assert_eq!(ICON_FILES.len(), 23);
+        assert_eq!(ICON_FILES.len(), 24);
 
         for file in ICON_FILES {
             let path = root.join(file);

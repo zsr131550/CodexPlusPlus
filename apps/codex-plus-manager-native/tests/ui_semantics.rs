@@ -1,9 +1,11 @@
 use codex_plus_manager_native::i18n::{Locale, ThemeMode};
-use codex_plus_manager_native::state::{OverviewFailureKind, OverviewPhase};
+use codex_plus_manager_native::state::user_scripts::{UserScriptFailureKind, UserScriptViewState};
+use codex_plus_manager_native::state::{OverviewFailureKind, OverviewPhase, Route};
 use codex_plus_manager_native::theme;
 use codex_plus_manager_native::views::shell::{
     ShellAction, ShellFeatureStates, ShellViewModel, render_shell,
 };
+use codex_plus_manager_service::UserScriptErrorKind;
 use eframe::egui;
 use egui_kittest::{Harness, kittest::Queryable};
 
@@ -13,13 +15,18 @@ use common::{model, snapshot};
 
 struct TestShellState {
     model: ShellViewModel,
+    scripts: Option<UserScriptViewState>,
     emitted: Vec<ShellAction>,
 }
 
 fn render_test_shell(ui: &mut egui::Ui, state: &mut TestShellState) {
     egui_extras::install_image_loaders(ui.ctx());
     theme::apply(ui.ctx(), state.model.theme);
-    for action in render_shell(ui, &state.model, ShellFeatureStates::default()) {
+    let feature_states = ShellFeatureStates {
+        user_scripts: state.scripts.as_ref(),
+        ..ShellFeatureStates::default()
+    };
+    for action in render_shell(ui, &state.model, feature_states) {
         state.emitted.push(action.clone());
         match action {
             ShellAction::Navigate(route) => state.model.route = route,
@@ -30,6 +37,7 @@ fn render_test_shell(ui: &mut egui::Ui, state: &mut TestShellState) {
             ShellAction::Import(_)
             | ShellAction::Environment(_)
             | ShellAction::Sessions(_)
+            | ShellAction::UserScripts(_)
             | ShellAction::Context(_)
             | ShellAction::Marketplace(_) => {}
         }
@@ -44,6 +52,24 @@ fn harness(size: [f32; 2], model: ShellViewModel) -> Harness<'static, TestShellS
             render_test_shell,
             TestShellState {
                 model,
+                scripts: None,
+                emitted: Vec::new(),
+            },
+        )
+}
+
+fn harness_with_scripts(
+    size: [f32; 2],
+    model: ShellViewModel,
+    scripts: UserScriptViewState,
+) -> Harness<'static, TestShellState> {
+    Harness::builder()
+        .with_size(egui::vec2(size[0], size[1]))
+        .build_ui_state(
+            render_test_shell,
+            TestShellState {
+                model,
+                scripts: Some(scripts),
                 emitted: Vec::new(),
             },
         )
@@ -75,6 +101,49 @@ fn chinese_shell_navigates_to_about_and_switches_language_live() {
                 egui::Pos2::ZERO,
                 egui::vec2(1180.0, 820.0),
             ))
+    );
+}
+
+#[test]
+fn shell_navigates_to_the_native_scripts_route() {
+    let mut harness = harness([960.0, 720.0], model(Locale::En, ThemeMode::Dark));
+
+    harness.get_by_label("Scripts").click();
+    harness.run();
+
+    assert!(
+        harness
+            .state()
+            .emitted
+            .contains(&ShellAction::Navigate(Route::Scripts))
+    );
+    assert!(harness.get_by_label("Codex++ Scripts").rect().is_positive());
+}
+
+#[test]
+fn scripts_header_uses_the_active_tab_failure_copy() {
+    let mut scripts = UserScriptViewState::default();
+    let request_id = scripts.begin_market_refresh();
+    scripts.apply_market_response(
+        request_id,
+        Err(UserScriptFailureKind::Service(
+            UserScriptErrorKind::MarketRefreshFailed,
+        )),
+    );
+    let mut shell = model(Locale::En, ThemeMode::Dark);
+    shell.route = Route::Scripts;
+    let harness = harness_with_scripts([960.0, 720.0], shell, scripts);
+
+    assert!(
+        harness
+            .get_by_label("Status: Script market load failed")
+            .rect()
+            .is_positive()
+    );
+    assert!(
+        harness
+            .query_by_label("Status: Local scripts load failed")
+            .is_none()
     );
 }
 

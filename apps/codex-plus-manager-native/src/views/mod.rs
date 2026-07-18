@@ -7,3 +7,4 @@ pub mod overview;
 pub mod provider;
 pub mod sessions;
 pub mod shell;
+pub mod user_scripts;
