@@ -173,6 +173,47 @@ pub enum TextKey {
     LiveUpToDate,
     LiveSyncNeeded,
     EnableContextEntry,
+    Sessions,
+    SessionsSubtitle,
+    SearchSessions,
+    AllSessions,
+    ActiveSessions,
+    ArchivedSessions,
+    SelectAllFiltered,
+    ClearSelection,
+    SelectedSessions,
+    DeleteSelectedSessions,
+    ConfirmSessionDeletion,
+    DeleteBackupWarning,
+    NoSessions,
+    SessionLoadFailed,
+    SessionWorkerStopped,
+    SessionConflict,
+    SessionConfirmationMismatch,
+    SessionDeleteFailed,
+    SessionDeleteComplete,
+    SessionDeletePartial,
+    Databases,
+    ReadIssues,
+    HistoricalSessionRepair,
+    ProviderTarget,
+    AutomaticRepair,
+    RunProviderRepair,
+    ProviderRepairComplete,
+    ProviderRepairFailed,
+    ProviderSyncLoadFailed,
+    ProviderSyncConflict,
+    ProviderSyncConfirmationMismatch,
+    SessionFiles,
+    SqliteRows,
+    BackupEvidence,
+    PreviousPage,
+    NextPage,
+    Page,
+    Archived,
+    RefreshSessions,
+    ConfirmProviderRepair,
+    ProviderRepairWarning,
 }
 
 impl TextKey {
@@ -335,6 +376,47 @@ impl TextKey {
         Self::LiveUpToDate,
         Self::LiveSyncNeeded,
         Self::EnableContextEntry,
+        Self::Sessions,
+        Self::SessionsSubtitle,
+        Self::SearchSessions,
+        Self::AllSessions,
+        Self::ActiveSessions,
+        Self::ArchivedSessions,
+        Self::SelectAllFiltered,
+        Self::ClearSelection,
+        Self::SelectedSessions,
+        Self::DeleteSelectedSessions,
+        Self::ConfirmSessionDeletion,
+        Self::DeleteBackupWarning,
+        Self::NoSessions,
+        Self::SessionLoadFailed,
+        Self::SessionWorkerStopped,
+        Self::SessionConflict,
+        Self::SessionConfirmationMismatch,
+        Self::SessionDeleteFailed,
+        Self::SessionDeleteComplete,
+        Self::SessionDeletePartial,
+        Self::Databases,
+        Self::ReadIssues,
+        Self::HistoricalSessionRepair,
+        Self::ProviderTarget,
+        Self::AutomaticRepair,
+        Self::RunProviderRepair,
+        Self::ProviderRepairComplete,
+        Self::ProviderRepairFailed,
+        Self::ProviderSyncLoadFailed,
+        Self::ProviderSyncConflict,
+        Self::ProviderSyncConfirmationMismatch,
+        Self::SessionFiles,
+        Self::SqliteRows,
+        Self::BackupEvidence,
+        Self::PreviousPage,
+        Self::NextPage,
+        Self::Page,
+        Self::Archived,
+        Self::RefreshSessions,
+        Self::ConfirmProviderRepair,
+        Self::ProviderRepairWarning,
     ];
 }
 
@@ -975,6 +1057,170 @@ const CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         zh: "启用上下文条目",
         en: "Enable context entry",
+    },
+    CatalogEntry {
+        zh: "会话管理",
+        en: "Session management",
+    },
+    CatalogEntry {
+        zh: "搜索、清理与修复本地会话",
+        en: "Search, clean up, and repair local sessions",
+    },
+    CatalogEntry {
+        zh: "搜索会话",
+        en: "Search sessions",
+    },
+    CatalogEntry {
+        zh: "全部",
+        en: "All",
+    },
+    CatalogEntry {
+        zh: "活跃",
+        en: "Active",
+    },
+    CatalogEntry {
+        zh: "已归档",
+        en: "Archived",
+    },
+    CatalogEntry {
+        zh: "全选筛选结果",
+        en: "Select all filtered",
+    },
+    CatalogEntry {
+        zh: "清除选择",
+        en: "Clear selection",
+    },
+    CatalogEntry {
+        zh: "已选择会话",
+        en: "Selected sessions",
+    },
+    CatalogEntry {
+        zh: "删除选中的会话",
+        en: "Delete selected sessions",
+    },
+    CatalogEntry {
+        zh: "确认删除",
+        en: "Confirm deletion",
+    },
+    CatalogEntry {
+        zh: "将删除 SQLite 会话记录及关联 rollout 文件；修改本地会话数据前会先创建备份。",
+        en: "SQLite session records and related rollout files will be removed; backups are created before local session data is changed.",
+    },
+    CatalogEntry {
+        zh: "没有符合条件的会话",
+        en: "No sessions match the current filters",
+    },
+    CatalogEntry {
+        zh: "无法加载本地会话。",
+        en: "Unable to load local sessions.",
+    },
+    CatalogEntry {
+        zh: "会话后台服务已停止。",
+        en: "The session worker has stopped.",
+    },
+    CatalogEntry {
+        zh: "会话已变化，请刷新后重试。",
+        en: "Sessions changed. Refresh and try again.",
+    },
+    CatalogEntry {
+        zh: "删除确认与当前选择不匹配。",
+        en: "The delete confirmation does not match the current selection.",
+    },
+    CatalogEntry {
+        zh: "无法删除所选会话。",
+        en: "Unable to delete the selected sessions.",
+    },
+    CatalogEntry {
+        zh: "所选会话已删除。",
+        en: "Selected sessions were deleted.",
+    },
+    CatalogEntry {
+        zh: "部分会话未能删除。",
+        en: "Some sessions could not be deleted.",
+    },
+    CatalogEntry {
+        zh: "数据库",
+        en: "Databases",
+    },
+    CatalogEntry {
+        zh: "读取问题",
+        en: "Read issues",
+    },
+    CatalogEntry {
+        zh: "历史会话修复",
+        en: "Historical session repair",
+    },
+    CatalogEntry {
+        zh: "供应商目标",
+        en: "Provider target",
+    },
+    CatalogEntry {
+        zh: "自动修复",
+        en: "Automatic repair",
+    },
+    CatalogEntry {
+        zh: "运行供应商修复",
+        en: "Run provider repair",
+    },
+    CatalogEntry {
+        zh: "历史会话修复完成。",
+        en: "Historical session repair completed.",
+    },
+    CatalogEntry {
+        zh: "历史会话修复失败。",
+        en: "Historical session repair failed.",
+    },
+    CatalogEntry {
+        zh: "无法加载供应商修复设置。",
+        en: "Unable to load provider repair settings.",
+    },
+    CatalogEntry {
+        zh: "供应商修复设置已变化，请刷新。",
+        en: "Provider repair settings changed. Refresh and try again.",
+    },
+    CatalogEntry {
+        zh: "供应商修复确认与目标不匹配。",
+        en: "The provider repair confirmation does not match the target.",
+    },
+    CatalogEntry {
+        zh: "会话文件",
+        en: "Session files",
+    },
+    CatalogEntry {
+        zh: "SQLite 行",
+        en: "SQLite rows",
+    },
+    CatalogEntry {
+        zh: "备份凭据",
+        en: "Backup evidence",
+    },
+    CatalogEntry {
+        zh: "上一页",
+        en: "Previous page",
+    },
+    CatalogEntry {
+        zh: "下一页",
+        en: "Next page",
+    },
+    CatalogEntry {
+        zh: "页",
+        en: "Page",
+    },
+    CatalogEntry {
+        zh: "已归档",
+        en: "Archived",
+    },
+    CatalogEntry {
+        zh: "刷新会话",
+        en: "Refresh sessions",
+    },
+    CatalogEntry {
+        zh: "确认供应商修复",
+        en: "Confirm provider repair",
+    },
+    CatalogEntry {
+        zh: "更新历史会话的供应商元数据前会先创建备份。",
+        en: "Historical session provider metadata is backed up before it is updated.",
     },
 ];
 

@@ -7,7 +7,7 @@ use codex_plus_manager_native::state::context::{ContextFailureKind, ContextViewS
 use codex_plus_manager_native::state::{OverviewPhase, Route};
 use codex_plus_manager_native::theme;
 use codex_plus_manager_native::views::context::{self, ContextAction};
-use codex_plus_manager_native::views::shell::{ShellViewModel, render_shell};
+use codex_plus_manager_native::views::shell::{ShellFeatureStates, ShellViewModel, render_shell};
 use codex_plus_manager_service::{
     ContextBundle, ContextEntryDraft, ContextEntryKey, ContextEntryLiveState, ContextEntrySummary,
     ContextKind, ContextOwnershipOutcome, ContextSyncDiffSummary, ContextSyncGuard,
@@ -180,7 +180,7 @@ fn tools_route_has_exact_bilingual_navigation_and_header_copy() {
             .build_ui(move |ui| {
                 egui_extras::install_image_loaders(ui.ctx());
                 theme::apply(ui.ctx(), ThemeMode::Dark);
-                let _ = render_shell(ui, &shell_model, None, None, None, None, None);
+                let _ = render_shell(ui, &shell_model, ShellFeatureStates::default());
                 shell_model.route = Route::Context;
             });
         for label in labels {

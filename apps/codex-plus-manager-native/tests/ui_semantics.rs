@@ -1,7 +1,9 @@
 use codex_plus_manager_native::i18n::{Locale, ThemeMode};
 use codex_plus_manager_native::state::{OverviewFailureKind, OverviewPhase};
 use codex_plus_manager_native::theme;
-use codex_plus_manager_native::views::shell::{ShellAction, ShellViewModel, render_shell};
+use codex_plus_manager_native::views::shell::{
+    ShellAction, ShellFeatureStates, ShellViewModel, render_shell,
+};
 use eframe::egui;
 use egui_kittest::{Harness, kittest::Queryable};
 
@@ -17,7 +19,7 @@ struct TestShellState {
 fn render_test_shell(ui: &mut egui::Ui, state: &mut TestShellState) {
     egui_extras::install_image_loaders(ui.ctx());
     theme::apply(ui.ctx(), state.model.theme);
-    for action in render_shell(ui, &state.model, None, None, None, None, None) {
+    for action in render_shell(ui, &state.model, ShellFeatureStates::default()) {
         state.emitted.push(action.clone());
         match action {
             ShellAction::Navigate(route) => state.model.route = route,
@@ -27,6 +29,7 @@ fn render_test_shell(ui: &mut egui::Ui, state: &mut TestShellState) {
             ShellAction::Provider(_) => {}
             ShellAction::Import(_)
             | ShellAction::Environment(_)
+            | ShellAction::Sessions(_)
             | ShellAction::Context(_)
             | ShellAction::Marketplace(_) => {}
         }

@@ -15,7 +15,9 @@ use codex_plus_manager_native::state::provider::ProviderViewState;
 use codex_plus_manager_native::theme;
 use codex_plus_manager_native::views::environment::EnvironmentAction;
 use codex_plus_manager_native::views::import::ImportAction;
-use codex_plus_manager_native::views::shell::{ShellAction, ShellViewModel, render_shell};
+use codex_plus_manager_native::views::shell::{
+    ShellAction, ShellFeatureStates, ShellViewModel, render_shell,
+};
 use codex_plus_manager_service::{
     CcsDiscovery, CcsProviderSummary, EnvironmentRemovalOutcome, PendingImportSnapshot,
     PendingImportSummary, ProviderRevision, RelayEnvironmentErrorKind, RelayEnvironmentWorkspace,
@@ -41,11 +43,12 @@ fn render(ui: &mut egui::Ui, state: &mut FeatureState) {
     for action in render_shell(
         ui,
         &state.model,
-        Some(&state.provider),
-        Some(&state.provider_import),
-        Some(&state.environment),
-        None,
-        None,
+        ShellFeatureStates {
+            provider: Some(&state.provider),
+            provider_import: Some(&state.provider_import),
+            environment: Some(&state.environment),
+            ..ShellFeatureStates::default()
+        },
     ) {
         match &action {
             ShellAction::Navigate(route) => state.model.route = *route,
@@ -60,6 +63,7 @@ fn render(ui: &mut egui::Ui, state: &mut FeatureState) {
             }
             ShellAction::Import(_)
             | ShellAction::Environment(_)
+            | ShellAction::Sessions(_)
             | ShellAction::Context(_)
             | ShellAction::Marketplace(_) => {}
             ShellAction::Refresh

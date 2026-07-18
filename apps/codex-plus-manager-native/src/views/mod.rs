@@ -5,4 +5,5 @@ pub mod import;
 pub mod marketplace;
 pub mod overview;
 pub mod provider;
+pub mod sessions;
 pub mod shell;

@@ -12,7 +12,9 @@ use codex_plus_manager_native::state::provider::{
 };
 use codex_plus_manager_native::theme;
 use codex_plus_manager_native::views::provider::{ProviderAction, ProviderEdit};
-use codex_plus_manager_native::views::shell::{ShellAction, ShellViewModel, render_shell};
+use codex_plus_manager_native::views::shell::{
+    ShellAction, ShellFeatureStates, ShellViewModel, render_shell,
+};
 use codex_plus_manager_service::{
     ProviderActivationErrorKind, ProviderActivationSummary, ProviderDocument, ProviderKind,
     ProviderLiveFileKind, ProviderLiveFiles, ProviderLiveRevision, ProviderLiveWorkspace,
@@ -140,11 +142,10 @@ fn render(ui: &mut egui::Ui, state: &mut ProviderHarnessState) {
     for action in render_shell(
         ui,
         &state.model,
-        Some(&state.provider),
-        None,
-        None,
-        None,
-        None,
+        ShellFeatureStates {
+            provider: Some(&state.provider),
+            ..ShellFeatureStates::default()
+        },
     ) {
         if let ShellAction::Navigate(route) = &action {
             state.model.route = *route;

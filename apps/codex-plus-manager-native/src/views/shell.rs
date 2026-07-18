@@ -10,10 +10,11 @@ use crate::state::import::ImportViewState;
 use crate::state::marketplace::MarketplaceViewState;
 use crate::state::provider::OperationPhase;
 use crate::state::provider::{ProviderLoadPhase, ProviderViewState};
+use crate::state::sessions::SessionViewState;
 use crate::state::{OverviewFailureKind, OverviewPhase, Route};
 use crate::{icons, theme};
 
-use super::{about, context, environment, import, marketplace, overview, provider};
+use super::{about, context, environment, import, marketplace, overview, provider, sessions};
 
 pub const SIDEBAR_WIDTH: f32 = 176.0;
 pub const HEADER_HEIGHT: f32 = 58.0;
@@ -29,6 +30,7 @@ pub enum ShellAction {
     Provider(provider::ProviderAction),
     Import(import::ImportAction),
     Environment(environment::EnvironmentAction),
+    Sessions(sessions::SessionAction),
     Context(context::ContextAction),
     Marketplace(marketplace::MarketplaceAction),
 }
@@ -45,15 +47,29 @@ pub struct ShellViewModel {
     pub renderer: String,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct ShellFeatureStates<'a> {
+    pub provider: Option<&'a ProviderViewState>,
+    pub provider_import: Option<&'a ImportViewState>,
+    pub environment: Option<&'a EnvironmentViewState>,
+    pub context: Option<&'a ContextViewState>,
+    pub marketplace: Option<&'a MarketplaceViewState>,
+    pub sessions: Option<&'a SessionViewState>,
+}
+
 pub fn render_shell(
     ui: &mut egui::Ui,
     model: &ShellViewModel,
-    provider_state: Option<&ProviderViewState>,
-    import_state: Option<&ImportViewState>,
-    environment_state: Option<&EnvironmentViewState>,
-    context_state: Option<&ContextViewState>,
-    marketplace_state: Option<&MarketplaceViewState>,
+    states: ShellFeatureStates<'_>,
 ) -> Vec<ShellAction> {
+    let ShellFeatureStates {
+        provider: provider_state,
+        provider_import: import_state,
+        environment: environment_state,
+        context: context_state,
+        marketplace: marketplace_state,
+        sessions: sessions_state,
+    } = states;
     let mut actions = Vec::new();
 
     egui::Panel::left("native_manager_sidebar")
@@ -83,7 +99,14 @@ pub fn render_shell(
                 .inner_margin(egui::Margin::symmetric(16, 4)),
         )
         .show(ui, |ui| {
-            render_status(ui, model, provider_state, environment_state, context_state)
+            render_status(
+                ui,
+                model,
+                provider_state,
+                environment_state,
+                context_state,
+                sessions_state,
+            )
         });
 
     egui::CentralPanel::default()
@@ -121,6 +144,13 @@ pub fn render_shell(
                             .into_iter()
                             .map(ShellAction::Environment),
                     );
+                }
+            }
+            Route::Sessions => {
+                if let Some(state) = sessions_state {
+                    let mut session_actions = Vec::new();
+                    sessions::render(ui, state, model.locale, &mut session_actions);
+                    actions.extend(session_actions.into_iter().map(ShellAction::Sessions));
                 }
             }
             Route::Context => {
@@ -215,6 +245,14 @@ fn render_sidebar(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<S
         text(model.locale, TextKey::Environment),
         model.route == Route::Environment,
         Route::Environment,
+        actions,
+    );
+    navigation_button(
+        ui,
+        icons::message_circle(),
+        text(model.locale, TextKey::Sessions),
+        model.route == Route::Sessions,
+        Route::Sessions,
         actions,
     );
     navigation_button(
@@ -345,6 +383,11 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
                     text(model.locale, TextKey::AppName),
                     text(model.locale, TextKey::Environment)
                 ),
+                Route::Sessions => format!(
+                    "{} {}",
+                    text(model.locale, TextKey::AppName),
+                    text(model.locale, TextKey::Sessions)
+                ),
                 Route::Context => format!(
                     "{} {}",
                     text(model.locale, TextKey::AppName),
@@ -361,6 +404,7 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
                 Route::Overview => TextKey::OverviewSubtitle,
                 Route::Providers => TextKey::ProvidersSubtitle,
                 Route::Environment => TextKey::EnvironmentSubtitle,
+                Route::Sessions => TextKey::SessionsSubtitle,
                 Route::Context => TextKey::ToolsPluginsSubtitle,
                 Route::About => TextKey::AboutSubtitle,
             };
@@ -408,6 +452,7 @@ fn render_status(
     provider_state: Option<&ProviderViewState>,
     environment_state: Option<&EnvironmentViewState>,
     context_state: Option<&ContextViewState>,
+    sessions_state: Option<&SessionViewState>,
 ) {
     if model.route == Route::Providers {
         let phase = provider_state.map_or(ProviderLoadPhase::Idle, |state| state.load_phase);
@@ -469,6 +514,28 @@ fn render_status(
             OperationPhase::Ready => (text(model.locale, TextKey::Ready), theme::SUCCESS_COLOR),
             OperationPhase::Error => (
                 text(model.locale, TextKey::ContextLoadFailed),
+                theme::ERROR_COLOR,
+            ),
+        };
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                color,
+                format!("{}: {status}", text(model.locale, TextKey::Status)),
+            );
+            render_status_metadata(ui, model);
+        });
+        return;
+    }
+
+    if model.route == Route::Sessions {
+        let phase = sessions_state.map_or(OperationPhase::Idle, |state| state.workspace_phase);
+        let (status, color) = match phase {
+            OperationPhase::Idle | OperationPhase::Running => {
+                (text(model.locale, TextKey::Loading), theme::WARNING_COLOR)
+            }
+            OperationPhase::Ready => (text(model.locale, TextKey::Ready), theme::SUCCESS_COLOR),
+            OperationPhase::Error => (
+                text(model.locale, TextKey::SessionLoadFailed),
                 theme::ERROR_COLOR,
             ),
         };
