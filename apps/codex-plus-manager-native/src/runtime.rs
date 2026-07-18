@@ -8,6 +8,7 @@ pub mod environment;
 pub mod import;
 pub mod marketplace;
 pub mod provider;
+pub mod sessions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchError {

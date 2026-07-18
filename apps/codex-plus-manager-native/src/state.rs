@@ -7,11 +7,13 @@ pub mod environment;
 pub mod import;
 pub mod marketplace;
 pub mod provider;
+pub mod sessions;
 
 use context::{ContextFailureKind, ContextViewState};
 use environment::EnvironmentViewState;
 use import::ImportViewState;
 use provider::ProviderViewState;
+use sessions::SessionViewState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Route {
@@ -19,6 +21,7 @@ pub enum Route {
     Overview,
     Providers,
     Environment,
+    Sessions,
     Context,
     About,
 }
@@ -92,6 +95,7 @@ pub struct AppState {
     pub provider: ProviderViewState,
     pub provider_import: ImportViewState,
     pub environment: EnvironmentViewState,
+    pub sessions: SessionViewState,
     pub context: ContextViewState,
     pub marketplace: marketplace::MarketplaceViewState,
 }

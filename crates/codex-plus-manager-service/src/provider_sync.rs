@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use codex_plus_core::settings::BackendSettings;
-use codex_plus_data::{
+pub use codex_plus_data::{
     ProviderSyncResult, ProviderSyncStatus, ProviderSyncTargetList, ProviderSyncTargetOption,
     ProviderSyncTargetSource,
 };

@@ -205,6 +205,20 @@ pub struct SessionDeleteOutcome {
 }
 
 impl SessionDeleteOutcome {
+    pub fn metadata_only(
+        session_id: impl Into<String>,
+        status: DeleteStatus,
+        backup_path: Option<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            status,
+            backup_path,
+            compatibility_message: String::new(),
+            compatibility_undo_token: None,
+        }
+    }
+
     pub fn compatibility_message(&self) -> &str {
         &self.compatibility_message
     }

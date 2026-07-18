@@ -69,8 +69,9 @@ pub use provider_presets::{
 };
 pub use provider_sync::{
     ProviderSyncEnvironment, ProviderSyncError, ProviderSyncErrorKind, ProviderSyncOutcome,
-    ProviderSyncRevision, ProviderSyncService, ProviderSyncSource, ProviderSyncWorkspace,
-    RunProviderSync, SetProviderAutoRepair,
+    ProviderSyncResult, ProviderSyncRevision, ProviderSyncService, ProviderSyncSource,
+    ProviderSyncStatus, ProviderSyncTargetList, ProviderSyncTargetOption, ProviderSyncTargetSource,
+    ProviderSyncWorkspace, RunProviderSync, SetProviderAutoRepair,
 };
 pub use provider_system::SystemProviderEnvironment;
 pub use relay_environment::{
