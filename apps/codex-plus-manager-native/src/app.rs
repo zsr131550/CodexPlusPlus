@@ -1,12 +1,15 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use codex_plus_core::zed_remote::{
+    ZedOpenStrategy, ZedRemoteProjectSource, ZedRemoteRegistryRevision,
+};
 use codex_plus_manager_service::{
     ContextKind, ContextToolsSource, DiagnoseProviderProfile, FetchProviderModels, OverviewSource,
     PluginMarketplaceKind, PluginMarketplaceSource, ProviderActivationSource, ProviderErrorKind,
     ProviderImportSource, ProviderNetworkFailureKind, ProviderProfile, ProviderSource,
     ProviderSyncSource, RelayEnvironmentSource, ScriptIntegrity, SessionSource,
-    TestProviderProfile, UserScriptOrigin, UserScriptRevision, UserScriptSource,
+    TestProviderProfile, UserScriptOrigin, UserScriptRevision, UserScriptSource, ZedRemoteSource,
 };
 use eframe::egui;
 
@@ -22,6 +25,7 @@ use crate::runtime::provider::{
 };
 use crate::runtime::sessions::{SessionDispatcher, SessionResponse};
 use crate::runtime::user_scripts::{UserScriptDispatcher, UserScriptResponse};
+use crate::runtime::zed_remote::{ZedRemoteDispatcher, ZedRemoteResponse};
 use crate::runtime::{DispatchError, OverviewDispatcher};
 use crate::state::context::ContextFailureKind;
 use crate::state::environment::EnvironmentFailureKind;
@@ -34,6 +38,7 @@ use crate::state::provider::{
 };
 use crate::state::sessions::{ProviderSyncFailureKind, SessionFailureKind};
 use crate::state::user_scripts::{ScriptsTab, UserScriptFailureKind};
+use crate::state::zed_remote::{ZedRemoteFailureKind, ZedRemoteLoadPhase};
 use crate::state::{AppState, OverviewFailureKind, OverviewPhase, Route};
 use crate::theme;
 use crate::views::context::ContextAction;
@@ -44,6 +49,7 @@ use crate::views::provider::{ProviderAction, ProviderEdit};
 use crate::views::sessions::SessionAction;
 use crate::views::shell::{ShellAction, ShellFeatureStates, ShellViewModel, render_shell};
 use crate::views::user_scripts::UserScriptAction;
+use crate::views::zed_remote::ZedRemoteAction;
 
 pub struct NativeManagerSources {
     pub overview: Arc<dyn OverviewSource>,
@@ -56,6 +62,7 @@ pub struct NativeManagerSources {
     pub sessions: Arc<dyn SessionSource>,
     pub provider_sync: Arc<dyn ProviderSyncSource>,
     pub user_scripts: Arc<dyn UserScriptSource>,
+    pub zed_remote: Arc<dyn ZedRemoteSource>,
 }
 
 pub struct NativeManagerApp {
@@ -70,6 +77,7 @@ pub struct NativeManagerApp {
     marketplace_dispatcher: MarketplaceDispatcher,
     session_dispatcher: SessionDispatcher,
     user_script_dispatcher: UserScriptDispatcher,
+    zed_remote_dispatcher: ZedRemoteDispatcher,
     last_updated: Option<String>,
     overview_worker_stopped: bool,
     provider_store_worker_stopped: bool,
@@ -80,6 +88,7 @@ pub struct NativeManagerApp {
     marketplace_worker_stopped: bool,
     session_worker_stopped: bool,
     user_script_worker_stopped: bool,
+    zed_remote_worker_stopped: bool,
     window_focused: bool,
     pending_route: Option<Route>,
     pending_provider_reload: bool,
@@ -147,6 +156,11 @@ impl NativeManagerApp {
             sources.user_scripts,
             Arc::new(move || user_script_repaint_context.request_repaint()),
         );
+        let zed_remote_repaint_context = creation.egui_ctx.clone();
+        let zed_remote_dispatcher = ZedRemoteDispatcher::spawn(
+            sources.zed_remote,
+            Arc::new(move || zed_remote_repaint_context.request_repaint()),
+        );
         let mut app = Self {
             state: AppState::default(),
             persisted,
@@ -159,6 +173,7 @@ impl NativeManagerApp {
             marketplace_dispatcher,
             session_dispatcher,
             user_script_dispatcher,
+            zed_remote_dispatcher,
             last_updated: None,
             overview_worker_stopped: false,
             provider_store_worker_stopped: false,
@@ -169,6 +184,7 @@ impl NativeManagerApp {
             marketplace_worker_stopped: false,
             session_worker_stopped: false,
             user_script_worker_stopped: false,
+            zed_remote_worker_stopped: false,
             window_focused: true,
             pending_route: None,
             pending_provider_reload: false,
@@ -188,6 +204,22 @@ impl NativeManagerApp {
             self.state
                 .overview
                 .apply_response(request_id, Err(OverviewFailureKind::WorkerStopped));
+        }
+    }
+
+    fn refresh_zed_remote(&mut self) {
+        let request_id = self.state.zed_remote.begin_load();
+        if self.zed_remote_dispatcher.request_load(request_id).is_err() {
+            self.zed_remote_worker_stopped = true;
+            self.state
+                .zed_remote
+                .apply_load_response(request_id, Err(ZedRemoteFailureKind::WorkerStopped));
+        }
+    }
+
+    fn refresh_zed_remote_after_conflict(&mut self) {
+        if self.state.zed_remote.take_refresh_after_conflict() {
+            self.refresh_zed_remote();
         }
     }
 
@@ -211,6 +243,7 @@ impl NativeManagerApp {
                 Route::Environment => self.inspect_environment(),
                 Route::Sessions => self.refresh_sessions_route(),
                 Route::Scripts => self.refresh_user_scripts_route(),
+                Route::ZedRemote => self.refresh_zed_remote(),
                 Route::Context => {
                     self.load_context_workspace();
                     self.inspect_plugin_marketplaces();
@@ -221,6 +254,7 @@ impl NativeManagerApp {
                 Route::Environment => self.inspect_environment(),
                 Route::Sessions => self.refresh_sessions_route(),
                 Route::Scripts => self.refresh_user_scripts_route(),
+                Route::ZedRemote => self.refresh_zed_remote(),
                 Route::Context => {
                     self.load_context_workspace();
                     self.inspect_plugin_marketplaces();
@@ -239,6 +273,7 @@ impl NativeManagerApp {
             ShellAction::UserScripts(action) => self.apply_user_script_action(action),
             ShellAction::Context(action) => self.apply_context_action(action),
             ShellAction::Marketplace(action) => self.apply_marketplace_action(action),
+            ShellAction::ZedRemote(action) => self.apply_zed_remote_action(ctx, action),
         }
         ctx.request_repaint();
     }
@@ -261,6 +296,7 @@ impl NativeManagerApp {
         let entering_context = self.state.route != Route::Context && route == Route::Context;
         let entering_sessions = self.state.route != Route::Sessions && route == Route::Sessions;
         let entering_scripts = self.state.route != Route::Scripts && route == Route::Scripts;
+        let entering_zed_remote = self.state.route != Route::ZedRemote && route == Route::ZedRemote;
         self.state.route = route;
         if route == Route::Providers && self.state.provider.load_phase == ProviderLoadPhase::Idle {
             self.load_providers();
@@ -279,6 +315,9 @@ impl NativeManagerApp {
         }
         if entering_scripts {
             self.refresh_user_scripts_route();
+        }
+        if entering_zed_remote {
+            self.refresh_zed_remote();
         }
     }
 
@@ -787,6 +826,109 @@ impl NativeManagerApp {
                 self.state.marketplace.cancel_repair_confirmation();
             }
             MarketplaceAction::ConfirmRepair => self.repair_plugin_marketplace(),
+        }
+    }
+
+    fn apply_zed_remote_action(&mut self, ctx: &egui::Context, action: ZedRemoteAction) {
+        match action {
+            ZedRemoteAction::Refresh => self.refresh_zed_remote(),
+            ZedRemoteAction::SetSearch(query) => self.state.zed_remote.set_search_query(query),
+            ZedRemoteAction::SetRecentPage(page) => self.state.zed_remote.set_recent_page(page),
+            ZedRemoteAction::SetDiscoveredPage(page) => {
+                self.state.zed_remote.set_discovered_page(page)
+            }
+            ZedRemoteAction::SetStrategy(strategy) => self.state.zed_remote.set_strategy(strategy),
+            ZedRemoteAction::SetRegistryEnabled(enabled) => {
+                self.state.zed_remote.set_registry_enabled(enabled)
+            }
+            ZedRemoteAction::SavePreferences => {
+                let Some((request_id, request)) = self.state.zed_remote.begin_save_preferences()
+                else {
+                    return;
+                };
+                if self
+                    .zed_remote_dispatcher
+                    .request_save_preferences(request_id, request)
+                    .is_err()
+                {
+                    self.zed_remote_worker_stopped = true;
+                    self.state
+                        .zed_remote
+                        .apply_save_response(request_id, Err(ZedRemoteFailureKind::WorkerStopped));
+                }
+            }
+            ZedRemoteAction::RequestOpen {
+                project_id,
+                strategy,
+                remember,
+            } => {
+                self.state
+                    .zed_remote
+                    .request_open(project_id, strategy, remember);
+            }
+            ZedRemoteAction::ConfirmOpen => {
+                let Some((request_id, request)) = self.state.zed_remote.begin_open() else {
+                    return;
+                };
+                if self
+                    .zed_remote_dispatcher
+                    .request_open(request_id, request)
+                    .is_err()
+                {
+                    self.zed_remote_worker_stopped = true;
+                    self.state
+                        .zed_remote
+                        .apply_open_response(request_id, Err(ZedRemoteFailureKind::WorkerStopped));
+                }
+            }
+            ZedRemoteAction::CancelOpen => {
+                self.state.zed_remote.cancel_open();
+            }
+            ZedRemoteAction::SetOpenStrategy(strategy) => {
+                self.state.zed_remote.set_open_strategy(strategy);
+            }
+            ZedRemoteAction::SetOpenRemember(remember) => {
+                self.state.zed_remote.set_open_remember(remember);
+            }
+            ZedRemoteAction::CopyUrl(project_id) => {
+                if let Some(url) = self
+                    .state
+                    .zed_remote
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| {
+                        workspace
+                            .projects
+                            .iter()
+                            .find(|project| project.id == project_id)
+                    })
+                    .map(|project| project.url.clone())
+                {
+                    ctx.copy_text(url);
+                }
+            }
+            ZedRemoteAction::RequestForget(project_id) => {
+                self.state.zed_remote.request_forget(project_id);
+            }
+            ZedRemoteAction::ConfirmForget => {
+                let Some((request_id, request)) = self.state.zed_remote.begin_forget() else {
+                    return;
+                };
+                if self
+                    .zed_remote_dispatcher
+                    .request_forget(request_id, request)
+                    .is_err()
+                {
+                    self.zed_remote_worker_stopped = true;
+                    self.state.zed_remote.apply_forget_response(
+                        request_id,
+                        Err(ZedRemoteFailureKind::WorkerStopped),
+                    );
+                }
+            }
+            ZedRemoteAction::CancelForget => {
+                self.state.zed_remote.cancel_forget();
+            }
         }
     }
 
@@ -1781,6 +1923,87 @@ impl NativeManagerApp {
         }
     }
 
+    fn reduce_zed_remote_responses(&mut self) {
+        loop {
+            match self.zed_remote_dispatcher.try_recv() {
+                Ok(Some(ZedRemoteResponse::Load { request_id, result })) => {
+                    let accepted = self.state.zed_remote.apply_load_response(
+                        request_id,
+                        result.map_err(|error| ZedRemoteFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.zed_remote.load_phase == ZedRemoteLoadPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                    self.refresh_zed_remote_after_conflict();
+                }
+                Ok(Some(ZedRemoteResponse::SavePreferences { request_id, result })) => {
+                    let accepted = self.state.zed_remote.apply_save_response(
+                        request_id,
+                        result.map_err(|error| ZedRemoteFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.zed_remote.save_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                    self.refresh_zed_remote_after_conflict();
+                }
+                Ok(Some(ZedRemoteResponse::Open { request_id, result })) => {
+                    let accepted = self.state.zed_remote.apply_open_response(
+                        request_id,
+                        result.map_err(|error| ZedRemoteFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.zed_remote.open_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                    self.refresh_zed_remote_after_conflict();
+                }
+                Ok(Some(ZedRemoteResponse::Forget { request_id, result })) => {
+                    let accepted = self.state.zed_remote.apply_forget_response(
+                        request_id,
+                        result.map_err(|error| ZedRemoteFailureKind::Service(error.kind())),
+                    );
+                    if accepted && self.state.zed_remote.forget_phase == OperationPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                    self.refresh_zed_remote_after_conflict();
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    if !self.zed_remote_worker_stopped {
+                        self.zed_remote_worker_stopped = true;
+                        if matches!(
+                            self.state.zed_remote.load_phase,
+                            ZedRemoteLoadPhase::Loading | ZedRemoteLoadPhase::Refreshing
+                        ) {
+                            self.state.zed_remote.apply_load_response(
+                                self.state.zed_remote.current_load_request_id,
+                                Err(ZedRemoteFailureKind::WorkerStopped),
+                            );
+                        }
+                        if self.state.zed_remote.save_phase == OperationPhase::Running {
+                            self.state.zed_remote.apply_save_response(
+                                self.state.zed_remote.current_save_request_id,
+                                Err(ZedRemoteFailureKind::WorkerStopped),
+                            );
+                        }
+                        if self.state.zed_remote.open_phase == OperationPhase::Running {
+                            self.state.zed_remote.apply_open_response(
+                                self.state.zed_remote.current_open_request_id,
+                                Err(ZedRemoteFailureKind::WorkerStopped),
+                            );
+                        }
+                        if self.state.zed_remote.forget_phase == OperationPhase::Running {
+                            self.state.zed_remote.apply_forget_response(
+                                self.state.zed_remote.current_forget_request_id,
+                                Err(ZedRemoteFailureKind::WorkerStopped),
+                            );
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     fn fail_running_context_operations(&mut self) {
         if self.state.context.workspace_phase == OperationPhase::Running {
             self.state.apply_context_workspace_response(
@@ -1827,6 +2050,9 @@ impl NativeManagerApp {
             }
             if self.state.route == Route::Scripts {
                 self.refresh_user_scripts_route();
+            }
+            if self.state.route == Route::ZedRemote {
+                self.refresh_zed_remote();
             }
         }
         self.window_focused = focused;
@@ -2117,6 +2343,93 @@ impl NativeManagerApp {
             PerfScriptAction::ConfirmUserScriptDelete => {
                 Some(ShellAction::UserScripts(UserScriptAction::ConfirmDelete))
             }
+            PerfScriptAction::NavigateZedRemote => Some(ShellAction::Navigate(Route::ZedRemote)),
+            PerfScriptAction::RefreshZedRemote => {
+                Some(ShellAction::ZedRemote(ZedRemoteAction::Refresh))
+            }
+            PerfScriptAction::EditZedPreferences => {
+                self.apply_action(
+                    ctx,
+                    ShellAction::ZedRemote(ZedRemoteAction::SetStrategy(
+                        ZedOpenStrategy::NewWindow,
+                    )),
+                );
+                self.apply_action(
+                    ctx,
+                    ShellAction::ZedRemote(ZedRemoteAction::SetRegistryEnabled(true)),
+                );
+                None
+            }
+            PerfScriptAction::SaveZedPreferences => {
+                Some(ShellAction::ZedRemote(ZedRemoteAction::SavePreferences))
+            }
+            PerfScriptAction::RequestZedOpen => self
+                .state
+                .zed_remote
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.projects.iter().find(|project| project.is_current))
+                .map(|project| {
+                    ShellAction::ZedRemote(ZedRemoteAction::RequestOpen {
+                        project_id: project.id.clone(),
+                        strategy: self.state.zed_remote.draft_strategy,
+                        remember: self.state.zed_remote.draft_registry_enabled,
+                    })
+                }),
+            PerfScriptAction::CancelZedOpen => {
+                Some(ShellAction::ZedRemote(ZedRemoteAction::CancelOpen))
+            }
+            PerfScriptAction::ConfirmZedOpen => {
+                Some(ShellAction::ZedRemote(ZedRemoteAction::ConfirmOpen))
+            }
+            PerfScriptAction::RequestZedForget => self
+                .state
+                .zed_remote
+                .workspace
+                .as_ref()
+                .and_then(|workspace| {
+                    workspace.projects.iter().find(|project| {
+                        project.source == ZedRemoteProjectSource::Recent
+                            && project.label == "Performance forget fixture"
+                    })
+                })
+                .map(|project| {
+                    ShellAction::ZedRemote(ZedRemoteAction::RequestForget(project.id.clone()))
+                }),
+            PerfScriptAction::CancelZedForget => {
+                Some(ShellAction::ZedRemote(ZedRemoteAction::CancelForget))
+            }
+            PerfScriptAction::ConfirmZedForget => {
+                Some(ShellAction::ZedRemote(ZedRemoteAction::ConfirmForget))
+            }
+            PerfScriptAction::RequestZedConflictRefresh => {
+                let project_id = self
+                    .state
+                    .zed_remote
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| {
+                        workspace.projects.iter().find(|project| {
+                            project.source == ZedRemoteProjectSource::Recent
+                                && project.label == "Performance stale fixture"
+                        })
+                    })
+                    .map(|project| project.id.clone());
+                if let Some(project_id) = project_id {
+                    self.apply_action(
+                        ctx,
+                        ShellAction::ZedRemote(ZedRemoteAction::RequestForget(project_id)),
+                    );
+                    if let Some(confirmation) = self.state.zed_remote.pending_forget.as_mut() {
+                        confirmation.expected_registry_revision =
+                            ZedRemoteRegistryRevision::from_digest([0xa5; 32]);
+                    }
+                }
+                None
+            }
+            PerfScriptAction::ConfirmZedConflictRefresh => {
+                Some(ShellAction::ZedRemote(ZedRemoteAction::ConfirmForget))
+            }
         };
         if let Some(action) = shell_action {
             self.apply_action(ctx, action);
@@ -2135,6 +2448,7 @@ impl eframe::App for NativeManagerApp {
         self.reduce_user_script_responses();
         self.reduce_context_responses();
         self.reduce_marketplace_responses();
+        self.reduce_zed_remote_responses();
         self.refresh_pending_on_focus_regain(ctx);
         if let Some(perf) = &mut self.perf {
             perf.drive(ctx);
@@ -2158,6 +2472,7 @@ impl eframe::App for NativeManagerApp {
                 marketplace: Some(&self.state.marketplace),
                 sessions: Some(&self.state.sessions),
                 user_scripts: Some(&self.state.user_scripts),
+                zed_remote: Some(&self.state.zed_remote),
             },
         ) {
             self.apply_action(ui.ctx(), action);

@@ -9,6 +9,7 @@ pub mod marketplace;
 pub mod provider;
 pub mod sessions;
 pub mod user_scripts;
+pub mod zed_remote;
 
 use context::{ContextFailureKind, ContextViewState};
 use environment::EnvironmentViewState;
@@ -25,6 +26,7 @@ pub enum Route {
     Sessions,
     Scripts,
     Context,
+    ZedRemote,
     About,
 }
 
@@ -101,6 +103,7 @@ pub struct AppState {
     pub context: ContextViewState,
     pub marketplace: marketplace::MarketplaceViewState,
     pub user_scripts: user_scripts::UserScriptViewState,
+    pub zed_remote: zed_remote::ZedRemoteViewState,
 }
 
 impl AppState {

@@ -10,6 +10,7 @@ pub mod marketplace;
 pub mod provider;
 pub mod sessions;
 pub mod user_scripts;
+pub mod zed_remote;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchError {
@@ -21,6 +22,29 @@ pub(crate) fn try_receive<T>(receiver: &mpsc::Receiver<T>) -> Result<Option<T>, 
         Ok(response) => Ok(Some(response)),
         Err(mpsc::TryRecvError::Empty) => Ok(None),
         Err(mpsc::TryRecvError::Disconnected) => Err(DispatchError::WorkerStopped),
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct DiagnosticLogTestGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+pub(crate) fn diagnostic_log_test_guard(path: std::path::PathBuf) -> DiagnosticLogTestGuard {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let lock = LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(path));
+    DiagnosticLogTestGuard { _lock: lock }
+}
+
+#[cfg(test)]
+impl Drop for DiagnosticLogTestGuard {
+    fn drop(&mut self) {
+        codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
     }
 }
 
@@ -248,7 +272,7 @@ mod tests {
     fn service_failures_are_logged_by_the_worker_before_delivery() {
         let temp = tempfile::tempdir().unwrap();
         let log_path = temp.path().join("diagnostic.log");
-        codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+        let _log_guard = diagnostic_log_test_guard(log_path.clone());
         let dispatcher = OverviewDispatcher::spawn(Arc::new(FailingSource), Arc::new(|| {}));
 
         dispatcher.request(1).unwrap();
@@ -260,7 +284,6 @@ mod tests {
         );
 
         let log = std::fs::read_to_string(log_path).unwrap();
-        codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
         assert!(log.contains("native_manager.overview_failed"));
         assert!(log.contains("deterministic failure"));
     }
