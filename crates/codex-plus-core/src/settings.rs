@@ -1187,7 +1187,7 @@ fn normalize_settings_config_sections(mut settings: BackendSettings) -> BackendS
     settings
 }
 
-fn split_context_config_sections(config: &str) -> (String, String) {
+pub fn split_context_config_sections(config: &str) -> (String, String) {
     let mut common = Vec::new();
     let mut context = Vec::new();
     let mut in_context_table = false;
@@ -1216,7 +1216,7 @@ fn is_context_table_header(header: &str) -> bool {
         || header.starts_with("[plugins.")
 }
 
-fn join_config_sections(sections: &[&str]) -> String {
+pub fn join_config_sections(sections: &[&str]) -> String {
     let joined = sections
         .iter()
         .map(|section| section.trim())

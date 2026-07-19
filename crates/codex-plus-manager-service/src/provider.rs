@@ -4,11 +4,15 @@ use std::fmt::Write as _;
 
 use codex_plus_core::model_suffix::parse_model_window_token;
 use codex_plus_core::relay_config::{
-    CodexContextEntries, list_context_entries_from_common_config,
-    normalize_relay_profile_for_storage, relay_profile_api_key, relay_profile_base_url,
-    relay_profile_model,
+    CodexContextEntries, extract_common_config_from_config,
+    list_context_entries_from_common_config, normalize_relay_profile_for_storage,
+    relay_profile_api_key, relay_profile_base_url, relay_profile_model,
+    strip_common_config_from_config,
 };
-use codex_plus_core::settings::{AggregateRelayProfile, BackendSettings, RelayMode, RelayProfile};
+use codex_plus_core::settings::{
+    AggregateRelayProfile, BackendSettings, RelayMode, RelayProfile, join_config_sections,
+    split_context_config_sections,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -152,6 +156,29 @@ pub struct SaveProviderWorkspace {
     pub document: ProviderDocument,
 }
 
+#[derive(Clone)]
+pub struct ExtractProviderCommonConfig {
+    pub expected_revision: ProviderRevision,
+    pub document: ProviderDocument,
+    pub profile_id: String,
+}
+
+impl fmt::Debug for ExtractProviderCommonConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtractProviderCommonConfig")
+            .field("expected_revision", &self.expected_revision)
+            .field("profile_id", &self.profile_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderCommonConfigExtraction {
+    Applied(Box<ProviderWorkspace>),
+    NoContent,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationSeverity {
     Error,
@@ -202,6 +229,7 @@ pub enum ProviderValidationKind {
     MissingBaseUrl,
     MissingApiKey,
     MissingTestModel,
+    CommonConfigProfileUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +286,10 @@ pub trait ProviderSource: Send + Sync + 'static {
         &self,
         request: SaveProviderWorkspace,
     ) -> Result<ProviderWorkspace, ProviderError>;
+    fn extract_common_config(
+        &self,
+        request: ExtractProviderCommonConfig,
+    ) -> Result<ProviderCommonConfigExtraction, ProviderError>;
     fn test_profile(
         &self,
         request: TestProviderProfile,
@@ -343,6 +375,57 @@ impl<E: ProviderEnvironment + ProviderNetworkEnvironment> ProviderSource for Pro
         self.workspace_from_settings(&updated)
     }
 
+    fn extract_common_config(
+        &self,
+        request: ExtractProviderCommonConfig,
+    ) -> Result<ProviderCommonConfigExtraction, ProviderError> {
+        let current = self
+            .environment
+            .load_settings()
+            .map_err(|_| ProviderError::load_failed())?;
+        if revision_from_settings(&current)? != request.expected_revision {
+            return Err(ProviderError::conflict());
+        }
+
+        let mut document = request.document;
+        let Some(profile_index) = document
+            .profiles
+            .iter()
+            .position(|profile| profile.id() == request.profile_id)
+        else {
+            return Err(common_config_profile_unavailable(&request.profile_id));
+        };
+        let Some(config_contents) = document.profiles[profile_index]
+            .ordinary()
+            .map(|profile| profile.config_contents.clone())
+        else {
+            return Err(common_config_profile_unavailable(&request.profile_id));
+        };
+
+        let extracted = extract_common_config_from_config(&config_contents)
+            .map_err(|_| invalid_common_config(&request.profile_id))?;
+        let (common, context) = split_context_config_sections(&extracted);
+        if common.is_empty() && context.is_empty() {
+            return Ok(ProviderCommonConfigExtraction::NoContent);
+        }
+        let cleaned = strip_common_config_from_config(&config_contents, &extracted)
+            .map_err(|_| invalid_common_config(&request.profile_id))?;
+
+        document.profiles[profile_index]
+            .ordinary_mut()
+            .expect("ordinary profile checked above")
+            .config_contents = cleaned;
+        document.common_config_contents = common;
+        document.context_config_contents =
+            join_config_sections(&[document.context_config_contents.as_str(), context.as_str()]);
+
+        self.save_workspace(SaveProviderWorkspace {
+            expected_revision: request.expected_revision,
+            document,
+        })
+        .map(|workspace| ProviderCommonConfigExtraction::Applied(Box::new(workspace)))
+    }
+
     fn test_profile(
         &self,
         request: TestProviderProfile,
@@ -363,6 +446,22 @@ impl<E: ProviderEnvironment + ProviderNetworkEnvironment> ProviderSource for Pro
     ) -> Result<ProviderDoctorReport, ProviderNetworkError> {
         self.diagnose_profile_network(request)
     }
+}
+
+fn invalid_common_config(profile_id: &str) -> ProviderError {
+    ProviderError::validation(vec![ProviderValidationIssue::error(
+        nonempty(profile_id.trim()),
+        ProviderField::ConfigContents,
+        ProviderValidationKind::InvalidConfigToml,
+    )])
+}
+
+fn common_config_profile_unavailable(profile_id: &str) -> ProviderError {
+    ProviderError::validation(vec![ProviderValidationIssue::error(
+        nonempty(profile_id.trim()),
+        ProviderField::ConfigContents,
+        ProviderValidationKind::CommonConfigProfileUnavailable,
+    )])
 }
 
 pub fn validate_provider_document(

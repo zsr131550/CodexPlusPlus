@@ -1,4 +1,5 @@
 mod context_tools;
+mod enhancements;
 mod error;
 mod maintenance;
 mod manager_settings;
@@ -27,6 +28,11 @@ pub use context_tools::{
     ContextToolsError, ContextToolsErrorKind, ContextToolsService, ContextToolsSource,
     ContextWorkspace, DeleteContextEntry, LoadContextEntryDraft, PreviewContextSync,
     SaveContextEntry, SaveContextEntryMode, SetContextEntryEnabled, SyncContextToLive,
+};
+pub use enhancements::{
+    EnhancementError, EnhancementErrorKind, EnhancementRevision, EnhancementSettings,
+    EnhancementSettingsEnvironment, EnhancementSettingsService, EnhancementSettingsSource,
+    EnhancementWorkspace, ResetEnhancements, SaveEnhancements,
 };
 pub use error::{OverviewError, OverviewErrorKind};
 pub use maintenance::{
@@ -61,8 +67,9 @@ pub use plugin_marketplace::{
     RepairPluginMarketplace,
 };
 pub use provider::{
-    ProviderActivationSummary, ProviderDocument, ProviderEnvironment, ProviderField, ProviderKind,
-    ProviderProfile, ProviderRevision, ProviderService, ProviderSource, ProviderValidationIssue,
+    ExtractProviderCommonConfig, ProviderActivationSummary, ProviderCommonConfigExtraction,
+    ProviderDocument, ProviderEnvironment, ProviderField, ProviderKind, ProviderProfile,
+    ProviderRevision, ProviderService, ProviderSource, ProviderValidationIssue,
     ProviderValidationKind, ProviderWorkspace, SaveProviderWorkspace, ValidationSeverity,
     validate_provider_document,
 };
@@ -112,11 +119,12 @@ pub use sessions::{
 };
 pub use system::{SystemOverviewEnvironment, SystemOverviewSource};
 pub use user_scripts::{
-    DeleteUserScript, InstallMarketScript, ScriptIntegrity, ScriptMarketCompatibilityWorkspace,
-    ScriptMarketRevision, ScriptMarketSummary, ScriptMarketWorkspace, SetUserScriptEnabled,
-    SetUserScriptsEnabled, UserScriptBackupEvidence, UserScriptEnvironment, UserScriptError,
-    UserScriptErrorKind, UserScriptMutationOutcome, UserScriptOrigin, UserScriptRevision,
-    UserScriptService, UserScriptSource, UserScriptStatus, UserScriptSummary, UserScriptWorkspace,
+    DeleteUserScript, InstallMarketScript, ScriptHomepage, ScriptIntegrity,
+    ScriptMarketCompatibilityWorkspace, ScriptMarketRevision, ScriptMarketSummary,
+    ScriptMarketWorkspace, SetUserScriptEnabled, SetUserScriptsEnabled, UserScriptBackupEvidence,
+    UserScriptEnvironment, UserScriptError, UserScriptErrorKind, UserScriptMutationOutcome,
+    UserScriptOrigin, UserScriptRevision, UserScriptService, UserScriptSource, UserScriptStatus,
+    UserScriptSummary, UserScriptWorkspace,
 };
 pub use zed_remote::{
     ForgetZedRemoteProject, OpenZedRemoteProject, SaveZedPreferences, ZedLaunchExecutor,

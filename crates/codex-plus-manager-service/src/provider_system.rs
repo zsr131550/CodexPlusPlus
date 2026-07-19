@@ -1522,6 +1522,25 @@ impl crate::ManagerSettingsEnvironment for SystemProviderEnvironment {
     }
 }
 
+impl crate::EnhancementSettingsEnvironment for SystemProviderEnvironment {
+    fn load_enhancement_settings(&self) -> anyhow::Result<BackendSettings> {
+        self.settings.load()
+    }
+
+    fn update_enhancement_settings_if<F>(
+        &self,
+        payload: Value,
+        predicate: F,
+    ) -> anyhow::Result<Option<BackendSettings>>
+    where
+        F: FnOnce(&BackendSettings) -> bool,
+    {
+        let _lock =
+            codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&self.codex_home)?;
+        self.settings.update_if(payload, predicate)
+    }
+}
+
 fn default_builtin_user_scripts_dir() -> PathBuf {
     std::env::current_exe()
         .ok()

@@ -94,6 +94,25 @@ impl fmt::Debug for UserScriptWorkspace {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScriptHomepage(String);
+
+impl ScriptHomepage {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ScriptHomepage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ScriptHomepage([redacted])")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptMarketSummary {
     pub id: String,
@@ -103,6 +122,7 @@ pub struct ScriptMarketSummary {
     pub author: String,
     pub tags: Vec<String>,
     pub source_host: String,
+    pub homepage: Option<ScriptHomepage>,
     pub integrity: ScriptIntegrity,
     pub installed_version: Option<String>,
     pub update_available: bool,
@@ -623,6 +643,8 @@ fn market_summary(script: &MarketScript) -> ScriptMarketSummary {
         author: script.author.clone(),
         tags: script.tags.clone(),
         source_host,
+        homepage: (!script.homepage.trim().is_empty())
+            .then(|| ScriptHomepage::new(script.homepage.trim())),
         integrity: classify_digest(&script.sha256).into(),
         installed_version: None,
         update_available: false,
