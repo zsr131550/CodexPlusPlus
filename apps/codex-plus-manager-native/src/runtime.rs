@@ -6,6 +6,7 @@ use codex_plus_manager_service::{OverviewError, OverviewSnapshot, OverviewSource
 pub mod context;
 pub mod environment;
 pub mod import;
+pub mod maintenance;
 pub mod marketplace;
 pub mod provider;
 pub mod sessions;

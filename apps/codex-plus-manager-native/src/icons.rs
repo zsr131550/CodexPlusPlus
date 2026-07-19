@@ -1,6 +1,6 @@
 use eframe::egui;
 
-pub const ICON_FILES: [&str; 25] = [
+pub const ICON_FILES: [&str; 29] = [
     "layout-dashboard.svg",
     "info.svg",
     "refresh-cw.svg",
@@ -26,6 +26,10 @@ pub const ICON_FILES: [&str; 25] = [
     "message-circle.svg",
     "file-code-2.svg",
     "folder-git-2.svg",
+    "folder-open.svg",
+    "file-search.svg",
+    "play.svg",
+    "rotate-ccw.svg",
 ];
 
 pub fn layout_dashboard() -> egui::ImageSource<'static> {
@@ -128,6 +132,22 @@ pub fn folder_git_2() -> egui::ImageSource<'static> {
     egui::include_image!("../assets/icons/folder-git-2.svg")
 }
 
+pub fn folder_open() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/folder-open.svg")
+}
+
+pub fn file_search() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/file-search.svg")
+}
+
+pub fn play() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/play.svg")
+}
+
+pub fn rotate_ccw() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/rotate-ccw.svg")
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -138,7 +158,7 @@ mod tests {
     #[test]
     fn declared_lucide_assets_exist_and_are_safe_standalone_svgs() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icons");
-        assert_eq!(ICON_FILES.len(), 25);
+        assert_eq!(ICON_FILES.len(), 29);
 
         for file in ICON_FILES {
             let path = root.join(file);

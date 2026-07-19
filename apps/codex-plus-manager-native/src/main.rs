@@ -6,11 +6,12 @@ use std::time::Instant;
 
 use codex_plus_manager_native::app::{NativeManagerApp, NativeManagerSources};
 use codex_plus_manager_native::fonts;
+use codex_plus_manager_native::path_picker::path_picker_from_environment;
 use codex_plus_manager_native::perf::PerfRecorder;
 use codex_plus_manager_service::{
-    ContextToolsService, PluginMarketplaceService, ProviderImportService, ProviderService,
-    ProviderSyncService, RelayEnvironmentService, SessionService, SystemOverviewSource,
-    SystemProviderEnvironment, UserScriptService, ZedRemoteService,
+    ContextToolsService, MaintenanceService, PluginMarketplaceService, ProviderImportService,
+    ProviderService, ProviderSyncService, RelayEnvironmentService, SessionService,
+    SystemOverviewSource, SystemProviderEnvironment, UserScriptService, ZedRemoteService,
 };
 use eframe::egui;
 
@@ -61,6 +62,7 @@ fn main() -> eframe::Result {
             let provider_sync_service = Arc::new(ProviderSyncService::new(environment.clone()));
             let user_script_service = Arc::new(UserScriptService::new(environment.clone()));
             let zed_remote_service = Arc::new(ZedRemoteService::new(environment.clone()));
+            let maintenance_service = Arc::new(MaintenanceService::new(environment.clone()));
             let environment_service = Arc::new(RelayEnvironmentService::new(environment));
             Ok(Box::new(NativeManagerApp::new(
                 creation,
@@ -77,6 +79,8 @@ fn main() -> eframe::Result {
                     provider_sync: provider_sync_service,
                     user_scripts: user_script_service,
                     zed_remote: zed_remote_service,
+                    maintenance: maintenance_service,
+                    path_picker: path_picker_from_environment(),
                 },
                 perf,
             )))

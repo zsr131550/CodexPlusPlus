@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use codex_plus_core::install::{EntryPointState, ShortcutState};
 use codex_plus_core::relay_config::{CodexContextEntries, RelayStatus};
 use codex_plus_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, RelayMode, RelayProfile,
@@ -10,9 +11,11 @@ use codex_plus_manager_native::state::provider::ProviderViewState;
 use codex_plus_manager_native::state::{OverviewPhase, Route};
 use codex_plus_manager_native::views::shell::ShellViewModel;
 use codex_plus_manager_service::{
-    LocatedResource, OverviewSnapshot, ProviderActivationSummary, ProviderDocument, ProviderKind,
-    ProviderLiveFiles, ProviderLiveRevision, ProviderLiveWorkspace, ProviderProfile,
-    ProviderRevision, ProviderWorkspace, ResourcePresence, ShortcutSnapshot, UpdateCheckState,
+    CodexLaunchPlan, DiagnosticPathPresence, LocatedResource, MaintenanceEnvironment,
+    MaintenanceService, MaintenanceWorkspace, OverviewSnapshot, PathKind,
+    ProviderActivationSummary, ProviderDocument, ProviderKind, ProviderLiveFiles,
+    ProviderLiveRevision, ProviderLiveWorkspace, ProviderProfile, ProviderRevision,
+    ProviderWorkspace, ResourcePresence, ShortcutSnapshot, UpdateCheckState,
 };
 
 pub fn snapshot(codex_version: &str) -> Arc<OverviewSnapshot> {
@@ -43,6 +46,118 @@ pub fn snapshot(codex_version: &str) -> Arc<OverviewSnapshot> {
         settings_path: PathBuf::from("C:/Users/Test/AppData/Roaming/Codex++/settings.json"),
         logs_path: PathBuf::from("C:/Users/Test/AppData/Roaming/Codex++/diagnostic.log"),
     })
+}
+
+#[derive(Clone)]
+struct FixtureMaintenanceEnvironment {
+    settings: codex_plus_core::settings::BackendSettings,
+    log_tail: Vec<u8>,
+}
+
+impl MaintenanceEnvironment for FixtureMaintenanceEnvironment {
+    fn load_maintenance_settings(
+        &self,
+    ) -> anyhow::Result<codex_plus_core::settings::BackendSettings> {
+        Ok(self.settings.clone())
+    }
+
+    fn update_maintenance_settings_if<F>(
+        &self,
+        _payload: serde_json::Value,
+        predicate: F,
+    ) -> anyhow::Result<Option<codex_plus_core::settings::BackendSettings>>
+    where
+        F: FnOnce(&codex_plus_core::settings::BackendSettings) -> bool,
+    {
+        Ok(predicate(&self.settings).then(|| self.settings.clone()))
+    }
+
+    fn inspect_path(&self, _path: &std::path::Path) -> anyhow::Result<PathKind> {
+        Ok(PathKind::File)
+    }
+
+    fn resolve_codex_app(&self, saved: &str) -> Option<PathBuf> {
+        (!saved.is_empty()).then(|| PathBuf::from(saved))
+    }
+
+    fn codex_app_version(&self, _path: &std::path::Path) -> Option<String> {
+        Some("fixture-codex-1.0".to_owned())
+    }
+
+    fn inspect_entrypoints(&self) -> anyhow::Result<EntryPointState> {
+        Ok(EntryPointState {
+            silent_shortcut: ShortcutState {
+                installed: true,
+                path: None,
+            },
+            management_shortcut: ShortcutState {
+                installed: false,
+                path: None,
+            },
+        })
+    }
+
+    fn watcher_disabled(&self) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    fn load_latest_launch(&self) -> anyhow::Result<Option<codex_plus_core::status::LaunchStatus>> {
+        Ok(Some(codex_plus_core::status::LaunchStatus {
+            status: "ready".to_owned(),
+            message: "private-message-sentinel".to_owned(),
+            started_at_ms: 42,
+            debug_port: Some(9229),
+            helper_port: Some(57321),
+            codex_app: Some("C:/private/status-path-sentinel".to_owned()),
+        }))
+    }
+
+    fn read_diagnostic_tail(&self, max_bytes: usize) -> anyhow::Result<Vec<u8>> {
+        let start = self.log_tail.len().saturating_sub(max_bytes);
+        Ok(self.log_tail[start..].to_vec())
+    }
+
+    fn diagnostic_path_presence(&self) -> DiagnosticPathPresence {
+        DiagnosticPathPresence {
+            settings: true,
+            logs: true,
+            latest_status: true,
+        }
+    }
+
+    fn launch_codex(&self, _plan: &CodexLaunchPlan) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[allow(dead_code)]
+pub fn maintenance_workspace(path: &str) -> Arc<MaintenanceWorkspace> {
+    let settings = codex_plus_core::settings::BackendSettings {
+        codex_app_path: path.to_owned(),
+        codex_app_stepwise_base_url: "https://private.invalid/body-sentinel".to_owned(),
+        codex_app_stepwise_api_key: "private-key-sentinel".to_owned(),
+        codex_app_image_overlay_path: "C:/private/overlay-sentinel.png".to_owned(),
+        ..codex_plus_core::settings::BackendSettings::default()
+    };
+    let log_tail = format!(
+        "{}\n",
+        serde_json::json!({
+            "timestamp_ms": 1,
+            "event": "native.maintenance.load",
+            "detail": {
+                "request_id": 7,
+                "path": path,
+                "key": "private-key-sentinel",
+                "body": "body-sentinel"
+            }
+        })
+    )
+    .into_bytes();
+    Arc::new(
+        MaintenanceService::new(FixtureMaintenanceEnvironment { settings, log_tail })
+            .load_workspace(codex_plus_manager_service::LoadMaintenance { log_lines: 100 })
+            .unwrap(),
+    )
 }
 
 #[allow(dead_code)]

@@ -5,20 +5,26 @@ use codex_plus_core::zed_remote::{
     ZedOpenStrategy, ZedRemoteProjectSource, ZedRemoteRegistryRevision,
 };
 use codex_plus_manager_service::{
-    ContextKind, ContextToolsSource, DiagnoseProviderProfile, FetchProviderModels, OverviewSource,
-    PluginMarketplaceKind, PluginMarketplaceSource, ProviderActivationSource, ProviderErrorKind,
-    ProviderImportSource, ProviderNetworkFailureKind, ProviderProfile, ProviderSource,
-    ProviderSyncSource, RelayEnvironmentSource, ScriptIntegrity, SessionSource,
-    TestProviderProfile, UserScriptOrigin, UserScriptRevision, UserScriptSource, ZedRemoteSource,
+    ContextKind, ContextToolsSource, DiagnoseProviderProfile, FetchProviderModels,
+    MaintenanceSource, OverviewSource, PluginMarketplaceKind, PluginMarketplaceSource,
+    ProviderActivationSource, ProviderErrorKind, ProviderImportSource, ProviderNetworkFailureKind,
+    ProviderProfile, ProviderSource, ProviderSyncSource, RelayEnvironmentSource, ScriptIntegrity,
+    SessionSource, TestProviderProfile, UserScriptOrigin, UserScriptRevision, UserScriptSource,
+    ZedRemoteSource,
 };
 use eframe::egui;
 
 use crate::fonts;
+use crate::path_picker::{
+    PathPicker, PathPickerDispatchError, PathPickerDispatcher, PathPickerErrorKind,
+    PathPickerTarget,
+};
 use crate::perf::{PerfRecorder, PerfScriptAction};
 use crate::persistence::{self, PersistedUiState};
 use crate::runtime::context::{ContextDispatcher, ContextResponse};
 use crate::runtime::environment::{EnvironmentDispatcher, EnvironmentResponse};
 use crate::runtime::import::{ImportDispatcher, ImportResponse};
+use crate::runtime::maintenance::{MaintenanceDispatcher, MaintenanceResponse};
 use crate::runtime::marketplace::{MarketplaceDispatcher, MarketplaceResponse};
 use crate::runtime::provider::{
     ActivationResponse, ProviderActivationDispatcher, ProviderDispatcher, StoreResponse,
@@ -30,6 +36,10 @@ use crate::runtime::{DispatchError, OverviewDispatcher};
 use crate::state::context::ContextFailureKind;
 use crate::state::environment::EnvironmentFailureKind;
 use crate::state::import::ImportFailureKind;
+use crate::state::maintenance::{
+    MaintenanceFailure, MaintenanceFailureKind, MaintenanceLoadPhase, MaintenanceOperationPhase,
+    MaintenanceTransition,
+};
 use crate::state::marketplace::MarketplaceFailureKind;
 use crate::state::provider::{
     DeleteProfileError, GuardOutcome, GuardResolution, LiveLoadFailureKind, LiveMutationFailure,
@@ -44,6 +54,7 @@ use crate::theme;
 use crate::views::context::ContextAction;
 use crate::views::environment::EnvironmentAction;
 use crate::views::import::ImportAction;
+use crate::views::maintenance::MaintenanceAction;
 use crate::views::marketplace::MarketplaceAction;
 use crate::views::provider::{ProviderAction, ProviderEdit};
 use crate::views::sessions::SessionAction;
@@ -63,6 +74,8 @@ pub struct NativeManagerSources {
     pub provider_sync: Arc<dyn ProviderSyncSource>,
     pub user_scripts: Arc<dyn UserScriptSource>,
     pub zed_remote: Arc<dyn ZedRemoteSource>,
+    pub maintenance: Arc<dyn MaintenanceSource>,
+    pub path_picker: Arc<dyn PathPicker>,
 }
 
 pub struct NativeManagerApp {
@@ -78,6 +91,8 @@ pub struct NativeManagerApp {
     session_dispatcher: SessionDispatcher,
     user_script_dispatcher: UserScriptDispatcher,
     zed_remote_dispatcher: ZedRemoteDispatcher,
+    maintenance_dispatcher: MaintenanceDispatcher,
+    path_picker_dispatcher: PathPickerDispatcher,
     last_updated: Option<String>,
     overview_worker_stopped: bool,
     provider_store_worker_stopped: bool,
@@ -89,6 +104,8 @@ pub struct NativeManagerApp {
     session_worker_stopped: bool,
     user_script_worker_stopped: bool,
     zed_remote_worker_stopped: bool,
+    maintenance_worker_stopped: bool,
+    path_picker_worker_stopped: bool,
     window_focused: bool,
     pending_route: Option<Route>,
     pending_provider_reload: bool,
@@ -161,6 +178,16 @@ impl NativeManagerApp {
             sources.zed_remote,
             Arc::new(move || zed_remote_repaint_context.request_repaint()),
         );
+        let maintenance_repaint_context = creation.egui_ctx.clone();
+        let maintenance_dispatcher = MaintenanceDispatcher::spawn(
+            sources.maintenance,
+            Arc::new(move || maintenance_repaint_context.request_repaint()),
+        );
+        let picker_repaint_context = creation.egui_ctx.clone();
+        let path_picker_dispatcher = PathPickerDispatcher::spawn(
+            sources.path_picker,
+            Arc::new(move || picker_repaint_context.request_repaint()),
+        );
         let mut app = Self {
             state: AppState::default(),
             persisted,
@@ -174,6 +201,8 @@ impl NativeManagerApp {
             session_dispatcher,
             user_script_dispatcher,
             zed_remote_dispatcher,
+            maintenance_dispatcher,
+            path_picker_dispatcher,
             last_updated: None,
             overview_worker_stopped: false,
             provider_store_worker_stopped: false,
@@ -185,6 +214,8 @@ impl NativeManagerApp {
             session_worker_stopped: false,
             user_script_worker_stopped: false,
             zed_remote_worker_stopped: false,
+            maintenance_worker_stopped: false,
+            path_picker_worker_stopped: false,
             window_focused: true,
             pending_route: None,
             pending_provider_reload: false,
@@ -223,6 +254,30 @@ impl NativeManagerApp {
         }
     }
 
+    fn refresh_maintenance(&mut self) {
+        let request_id = self.state.maintenance.begin_load();
+        if self
+            .maintenance_dispatcher
+            .request_load(request_id, self.state.maintenance.log_limit)
+            .is_err()
+        {
+            self.maintenance_worker_stopped = true;
+            self.state
+                .maintenance
+                .apply_load_response(request_id, Err(MaintenanceFailureKind::WorkerStopped));
+        }
+    }
+
+    fn request_maintenance_refresh(&mut self) {
+        if self
+            .state
+            .maintenance
+            .request_transition(MaintenanceTransition::Refresh)
+        {
+            self.refresh_maintenance();
+        }
+    }
+
     fn load_providers(&mut self) {
         let Some(request_id) = self.state.provider.begin_live_load() else {
             return;
@@ -244,6 +299,7 @@ impl NativeManagerApp {
                 Route::Sessions => self.refresh_sessions_route(),
                 Route::Scripts => self.refresh_user_scripts_route(),
                 Route::ZedRemote => self.refresh_zed_remote(),
+                Route::Maintenance => self.request_maintenance_refresh(),
                 Route::Context => {
                     self.load_context_workspace();
                     self.inspect_plugin_marketplaces();
@@ -255,6 +311,7 @@ impl NativeManagerApp {
                 Route::Sessions => self.refresh_sessions_route(),
                 Route::Scripts => self.refresh_user_scripts_route(),
                 Route::ZedRemote => self.refresh_zed_remote(),
+                Route::Maintenance => self.request_maintenance_refresh(),
                 Route::Context => {
                     self.load_context_workspace();
                     self.inspect_plugin_marketplaces();
@@ -274,11 +331,21 @@ impl NativeManagerApp {
             ShellAction::Context(action) => self.apply_context_action(action),
             ShellAction::Marketplace(action) => self.apply_marketplace_action(action),
             ShellAction::ZedRemote(action) => self.apply_zed_remote_action(ctx, action),
+            ShellAction::Maintenance(action) => self.apply_maintenance_action(ctx, action),
         }
         ctx.request_repaint();
     }
 
     fn navigate(&mut self, route: Route) {
+        if self.state.route == Route::Maintenance
+            && route != Route::Maintenance
+            && !self
+                .state
+                .maintenance
+                .request_transition(MaintenanceTransition::Navigate(route))
+        {
+            return;
+        }
         if self.state.route == Route::Providers
             && route != Route::Providers
             && self.state.provider.has_unsaved_changes()
@@ -297,6 +364,8 @@ impl NativeManagerApp {
         let entering_sessions = self.state.route != Route::Sessions && route == Route::Sessions;
         let entering_scripts = self.state.route != Route::Scripts && route == Route::Scripts;
         let entering_zed_remote = self.state.route != Route::ZedRemote && route == Route::ZedRemote;
+        let entering_maintenance =
+            self.state.route != Route::Maintenance && route == Route::Maintenance;
         self.state.route = route;
         if route == Route::Providers && self.state.provider.load_phase == ProviderLoadPhase::Idle {
             self.load_providers();
@@ -318,6 +387,9 @@ impl NativeManagerApp {
         }
         if entering_zed_remote {
             self.refresh_zed_remote();
+        }
+        if entering_maintenance {
+            self.refresh_maintenance();
         }
     }
 
@@ -929,6 +1001,96 @@ impl NativeManagerApp {
             ZedRemoteAction::CancelForget => {
                 self.state.zed_remote.cancel_forget();
             }
+        }
+    }
+
+    fn apply_maintenance_action(&mut self, ctx: &egui::Context, action: MaintenanceAction) {
+        match action {
+            MaintenanceAction::Refresh => self.request_maintenance_refresh(),
+            MaintenanceAction::SetAppPath(path) => self.state.maintenance.set_app_path(path),
+            MaintenanceAction::PickExecutable => {
+                self.request_maintenance_picker(PathPickerTarget::MaintenanceExecutable)
+            }
+            MaintenanceAction::PickDirectory => {
+                self.request_maintenance_picker(PathPickerTarget::MaintenanceDirectory)
+            }
+            MaintenanceAction::SaveAppPath => {
+                if let Some((request_id, request)) = self.state.maintenance.begin_save() {
+                    self.dispatch_maintenance_save(request_id, request);
+                }
+            }
+            MaintenanceAction::RequestClear => {
+                self.state.maintenance.request_clear();
+            }
+            MaintenanceAction::ConfirmClear => {
+                if let Some((request_id, request)) = self.state.maintenance.confirm_clear() {
+                    self.dispatch_maintenance_save(request_id, request);
+                }
+            }
+            MaintenanceAction::CancelClear => self.state.maintenance.cancel_clear(),
+            MaintenanceAction::SetDebugPort(port) => self.state.maintenance.debug_port = port,
+            MaintenanceAction::SetHelperPort(port) => self.state.maintenance.helper_port = port,
+            MaintenanceAction::Launch => {
+                if let Some((request_id, request)) = self.state.maintenance.begin_launch()
+                    && self
+                        .maintenance_dispatcher
+                        .request_launch(request_id, request)
+                        .is_err()
+                {
+                    self.maintenance_worker_stopped = true;
+                    self.state.maintenance.apply_launch_response(
+                        request_id,
+                        Err(MaintenanceFailureKind::WorkerStopped),
+                    );
+                }
+            }
+            MaintenanceAction::SetDocumentTab(tab) => self.state.maintenance.set_document_tab(tab),
+            MaintenanceAction::SetLogLimit(limit) => {
+                if self.state.maintenance.set_log_limit(limit) {
+                    self.refresh_maintenance();
+                }
+            }
+            MaintenanceAction::CopyDocument(document) => ctx.copy_text(document),
+            MaintenanceAction::ConfirmDiscard => {
+                if let Some(transition) = self.state.maintenance.confirm_discard_transition() {
+                    match transition {
+                        MaintenanceTransition::Navigate(route) => self.navigate(route),
+                        MaintenanceTransition::Refresh => self.refresh_maintenance(),
+                    }
+                }
+            }
+            MaintenanceAction::CancelDiscard => self.state.maintenance.cancel_transition(),
+        }
+    }
+
+    fn dispatch_maintenance_save(
+        &mut self,
+        request_id: u64,
+        request: codex_plus_manager_service::SaveCodexAppPath,
+    ) {
+        if self
+            .maintenance_dispatcher
+            .request_save(request_id, request)
+            .is_err()
+        {
+            self.maintenance_worker_stopped = true;
+            self.state.maintenance.apply_save_response(
+                request_id,
+                Err(MaintenanceFailure::new(
+                    MaintenanceFailureKind::WorkerStopped,
+                )),
+            );
+        }
+    }
+
+    fn request_maintenance_picker(&mut self, target: PathPickerTarget) {
+        let Some(request) = self.state.maintenance.begin_picker(target) else {
+            return;
+        };
+        if self.path_picker_dispatcher.request(request).is_err() {
+            self.path_picker_worker_stopped = true;
+            self.state.maintenance.invalidate_picker();
+            self.state.maintenance.picker_error = Some(PathPickerErrorKind::WorkerStopped);
         }
     }
 
@@ -2004,6 +2166,99 @@ impl NativeManagerApp {
         }
     }
 
+    fn reduce_maintenance_responses(&mut self) {
+        loop {
+            match self.maintenance_dispatcher.try_recv() {
+                Ok(Some(MaintenanceResponse::Loaded { request_id, result })) => {
+                    let accepted = self.state.maintenance.apply_load_response(
+                        request_id,
+                        result.map_err(|error| error.kind().into()),
+                    );
+                    if accepted && self.state.maintenance.load_phase == MaintenanceLoadPhase::Ready
+                    {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(MaintenanceResponse::AppPathSaved { request_id, result })) => {
+                    let accepted = self.state.maintenance.apply_save_response(
+                        request_id,
+                        result.map_err(|error| MaintenanceFailure::from_service(&error)),
+                    );
+                    if accepted
+                        && self.state.maintenance.save.phase == MaintenanceOperationPhase::Ready
+                    {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(MaintenanceResponse::Launched { request_id, result })) => {
+                    let accepted = self.state.maintenance.apply_launch_response(
+                        request_id,
+                        result.map_err(|error| error.kind().into()),
+                    );
+                    if accepted
+                        && self.state.maintenance.launch.phase == MaintenanceOperationPhase::Ready
+                    {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    if !self.maintenance_worker_stopped {
+                        self.maintenance_worker_stopped = true;
+                        self.fail_running_maintenance_operations();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn reduce_path_picker_responses(&mut self) {
+        loop {
+            match self.path_picker_dispatcher.try_recv() {
+                Ok(Some(response)) => {
+                    self.state.maintenance.apply_picker_response(response);
+                }
+                Ok(None) => break,
+                Err(PathPickerDispatchError::WorkerStopped) => {
+                    if !self.path_picker_worker_stopped {
+                        self.path_picker_worker_stopped = true;
+                        self.state.maintenance.invalidate_picker();
+                        self.state.maintenance.picker_error =
+                            Some(PathPickerErrorKind::WorkerStopped);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn fail_running_maintenance_operations(&mut self) {
+        if matches!(
+            self.state.maintenance.load_phase,
+            MaintenanceLoadPhase::Loading | MaintenanceLoadPhase::Refreshing
+        ) {
+            self.state.maintenance.apply_load_response(
+                self.state.maintenance.current_load_request_id,
+                Err(MaintenanceFailureKind::WorkerStopped),
+            );
+        }
+        if self.state.maintenance.save.phase == MaintenanceOperationPhase::Running {
+            self.state.maintenance.apply_save_response(
+                self.state.maintenance.save.current_request_id,
+                Err(MaintenanceFailure::new(
+                    MaintenanceFailureKind::WorkerStopped,
+                )),
+            );
+        }
+        if self.state.maintenance.launch.phase == MaintenanceOperationPhase::Running {
+            self.state.maintenance.apply_launch_response(
+                self.state.maintenance.launch.current_request_id,
+                Err(MaintenanceFailureKind::WorkerStopped),
+            );
+        }
+    }
+
     fn fail_running_context_operations(&mut self) {
         if self.state.context.workspace_phase == OperationPhase::Running {
             self.state.apply_context_workspace_response(
@@ -2053,6 +2308,9 @@ impl NativeManagerApp {
             }
             if self.state.route == Route::ZedRemote {
                 self.refresh_zed_remote();
+            }
+            if self.state.route == Route::Maintenance {
+                self.refresh_maintenance();
             }
         }
         self.window_focused = focused;
@@ -2449,6 +2707,8 @@ impl eframe::App for NativeManagerApp {
         self.reduce_context_responses();
         self.reduce_marketplace_responses();
         self.reduce_zed_remote_responses();
+        self.reduce_maintenance_responses();
+        self.reduce_path_picker_responses();
         self.refresh_pending_on_focus_regain(ctx);
         if let Some(perf) = &mut self.perf {
             perf.drive(ctx);
@@ -2473,6 +2733,7 @@ impl eframe::App for NativeManagerApp {
                 sessions: Some(&self.state.sessions),
                 user_scripts: Some(&self.state.user_scripts),
                 zed_remote: Some(&self.state.zed_remote),
+                maintenance: Some(&self.state.maintenance),
             },
         ) {
             self.apply_action(ui.ctx(), action);

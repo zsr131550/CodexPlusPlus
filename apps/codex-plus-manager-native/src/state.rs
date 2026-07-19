@@ -5,6 +5,7 @@ use codex_plus_manager_service::OverviewSnapshot;
 pub mod context;
 pub mod environment;
 pub mod import;
+pub mod maintenance;
 pub mod marketplace;
 pub mod provider;
 pub mod sessions;
@@ -27,6 +28,7 @@ pub enum Route {
     Scripts,
     Context,
     ZedRemote,
+    Maintenance,
     About,
 }
 
@@ -104,6 +106,7 @@ pub struct AppState {
     pub marketplace: marketplace::MarketplaceViewState,
     pub user_scripts: user_scripts::UserScriptViewState,
     pub zed_remote: zed_remote::ZedRemoteViewState,
+    pub maintenance: maintenance::MaintenanceViewState,
 }
 
 impl AppState {
