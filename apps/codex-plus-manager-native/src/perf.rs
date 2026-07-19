@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-const SCRIPT_DURATION: Duration = Duration::from_secs(40);
+const SCRIPT_DURATION: Duration = Duration::from_secs(50);
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const FINAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -94,6 +94,26 @@ pub enum PerfScriptAction {
     ConfirmZedForget,
     RequestZedConflictRefresh,
     ConfirmZedConflictRefresh,
+    NavigateMaintenance,
+    RefreshMaintenance,
+    SetMaintenanceLogLimit,
+    OpenMaintenanceReport,
+    EditMaintenancePath,
+    SaveMaintenancePath,
+    PickMaintenanceExecutable,
+    LaunchMaintenance,
+    NavigateSettings,
+    EditStepwiseSettings,
+    TestStepwiseSettings,
+    SaveStepwiseSettings,
+    OpenImageOverlaySettings,
+    PickOverlayImage,
+    SaveImageOverlaySettings,
+    RequestImageOverlayReset,
+    CancelImageOverlayReset,
+    OpenExtraArgsSettings,
+    EditExtraArgsSettings,
+    SaveExtraArgsSettings,
 }
 
 enum PerfEvent {
@@ -295,7 +315,7 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> 
         egui::Key::F34,
         egui::Key::F35,
     ];
-    const ACTIONS: [PerfScriptAction; 79] = [
+    const ACTIONS: [PerfScriptAction; 99] = [
         PerfScriptAction::NavigateProviders,
         PerfScriptAction::SelectNextProvider,
         PerfScriptAction::EditProviderName,
@@ -375,6 +395,26 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> 
         PerfScriptAction::ConfirmZedForget,
         PerfScriptAction::RequestZedConflictRefresh,
         PerfScriptAction::ConfirmZedConflictRefresh,
+        PerfScriptAction::NavigateMaintenance,
+        PerfScriptAction::RefreshMaintenance,
+        PerfScriptAction::SetMaintenanceLogLimit,
+        PerfScriptAction::OpenMaintenanceReport,
+        PerfScriptAction::EditMaintenancePath,
+        PerfScriptAction::SaveMaintenancePath,
+        PerfScriptAction::PickMaintenanceExecutable,
+        PerfScriptAction::LaunchMaintenance,
+        PerfScriptAction::NavigateSettings,
+        PerfScriptAction::EditStepwiseSettings,
+        PerfScriptAction::TestStepwiseSettings,
+        PerfScriptAction::SaveStepwiseSettings,
+        PerfScriptAction::OpenImageOverlaySettings,
+        PerfScriptAction::PickOverlayImage,
+        PerfScriptAction::SaveImageOverlaySettings,
+        PerfScriptAction::RequestImageOverlayReset,
+        PerfScriptAction::CancelImageOverlayReset,
+        PerfScriptAction::OpenExtraArgsSettings,
+        PerfScriptAction::EditExtraArgsSettings,
+        PerfScriptAction::SaveExtraArgsSettings,
     ];
     ACTIONS.get(index).map(|action| {
         let key = INITIAL_KEYS.get(index).copied().unwrap_or(egui::Key::F35);
@@ -458,6 +498,26 @@ impl PerfScriptAction {
             Self::ConfirmZedForget => "confirm_zed_forget",
             Self::RequestZedConflictRefresh => "request_zed_conflict_refresh",
             Self::ConfirmZedConflictRefresh => "confirm_zed_conflict_refresh",
+            Self::NavigateMaintenance => "navigate_maintenance",
+            Self::RefreshMaintenance => "refresh_maintenance",
+            Self::SetMaintenanceLogLimit => "set_maintenance_log_limit",
+            Self::OpenMaintenanceReport => "open_maintenance_report",
+            Self::EditMaintenancePath => "edit_maintenance_path",
+            Self::SaveMaintenancePath => "save_maintenance_path",
+            Self::PickMaintenanceExecutable => "pick_maintenance_executable",
+            Self::LaunchMaintenance => "launch_maintenance",
+            Self::NavigateSettings => "navigate_settings",
+            Self::EditStepwiseSettings => "edit_stepwise_settings",
+            Self::TestStepwiseSettings => "test_stepwise_settings",
+            Self::SaveStepwiseSettings => "save_stepwise_settings",
+            Self::OpenImageOverlaySettings => "open_image_overlay_settings",
+            Self::PickOverlayImage => "pick_overlay_image",
+            Self::SaveImageOverlaySettings => "save_image_overlay_settings",
+            Self::RequestImageOverlayReset => "request_image_overlay_reset",
+            Self::CancelImageOverlayReset => "cancel_image_overlay_reset",
+            Self::OpenExtraArgsSettings => "open_extra_args_settings",
+            Self::EditExtraArgsSettings => "edit_extra_args_settings",
+            Self::SaveExtraArgsSettings => "save_extra_args_settings",
         }
     }
 }
@@ -782,12 +842,126 @@ mod tests {
                 Some((Duration::from_millis(milliseconds), egui::Key::F35, action)),
             );
         }
-        assert_eq!(script_step(79), None);
+    }
+
+    #[test]
+    fn native_perf_script_appends_the_complete_maintenance_and_settings_workflow() {
+        let expected = [
+            (
+                40_000,
+                PerfScriptAction::NavigateMaintenance,
+                "navigate_maintenance",
+            ),
+            (
+                40_500,
+                PerfScriptAction::RefreshMaintenance,
+                "refresh_maintenance",
+            ),
+            (
+                41_000,
+                PerfScriptAction::SetMaintenanceLogLimit,
+                "set_maintenance_log_limit",
+            ),
+            (
+                41_500,
+                PerfScriptAction::OpenMaintenanceReport,
+                "open_maintenance_report",
+            ),
+            (
+                42_000,
+                PerfScriptAction::EditMaintenancePath,
+                "edit_maintenance_path",
+            ),
+            (
+                42_500,
+                PerfScriptAction::SaveMaintenancePath,
+                "save_maintenance_path",
+            ),
+            (
+                43_000,
+                PerfScriptAction::PickMaintenanceExecutable,
+                "pick_maintenance_executable",
+            ),
+            (
+                43_500,
+                PerfScriptAction::LaunchMaintenance,
+                "launch_maintenance",
+            ),
+            (
+                44_000,
+                PerfScriptAction::NavigateSettings,
+                "navigate_settings",
+            ),
+            (
+                44_500,
+                PerfScriptAction::EditStepwiseSettings,
+                "edit_stepwise_settings",
+            ),
+            (
+                45_000,
+                PerfScriptAction::TestStepwiseSettings,
+                "test_stepwise_settings",
+            ),
+            (
+                45_500,
+                PerfScriptAction::SaveStepwiseSettings,
+                "save_stepwise_settings",
+            ),
+            (
+                46_000,
+                PerfScriptAction::OpenImageOverlaySettings,
+                "open_image_overlay_settings",
+            ),
+            (
+                46_500,
+                PerfScriptAction::PickOverlayImage,
+                "pick_overlay_image",
+            ),
+            (
+                47_000,
+                PerfScriptAction::SaveImageOverlaySettings,
+                "save_image_overlay_settings",
+            ),
+            (
+                47_500,
+                PerfScriptAction::RequestImageOverlayReset,
+                "request_image_overlay_reset",
+            ),
+            (
+                48_000,
+                PerfScriptAction::CancelImageOverlayReset,
+                "cancel_image_overlay_reset",
+            ),
+            (
+                48_500,
+                PerfScriptAction::OpenExtraArgsSettings,
+                "open_extra_args_settings",
+            ),
+            (
+                49_000,
+                PerfScriptAction::EditExtraArgsSettings,
+                "edit_extra_args_settings",
+            ),
+            (
+                49_500,
+                PerfScriptAction::SaveExtraArgsSettings,
+                "save_extra_args_settings",
+            ),
+        ];
+
+        for (offset, (milliseconds, action, name)) in expected.into_iter().enumerate() {
+            assert_eq!(
+                script_step(79 + offset),
+                Some((Duration::from_millis(milliseconds), egui::Key::F35, action)),
+            );
+            assert_eq!(action.name(), name);
+        }
+        assert_eq!(script_step(99), None);
     }
 
     #[test]
     fn native_perf_repaint_window_covers_the_complete_script() {
-        let (last_due, _, _) = script_step(78).expect("last scripted action");
+        let (last_due, _, _) = script_step(98).expect("last scripted action");
 
         assert!(SCRIPT_DURATION >= last_due + Duration::from_millis(500));
     }
@@ -827,6 +1001,28 @@ mod tests {
             "CODEX_PLUS_NATIVE_ZED_LAUNCH_RECORD_PATH",
             "New-ZedRemoteFixture",
             "Assert-ZedRemoteWorkflowResult",
+        ] {
+            assert!(script.contains(contract), "missing {contract}");
+        }
+    }
+
+    #[test]
+    fn native_perf_script_uses_isolated_maintenance_and_settings_fixtures() {
+        let script = include_str!("../../../scripts/perf/native-manager.ps1");
+
+        for contract in [
+            "CODEX_PLUS_NATIVE_DIAGNOSTIC_LOG_PATH",
+            "CODEX_PLUS_NATIVE_LATEST_STATUS_PATH",
+            "CODEX_PLUS_NATIVE_WATCHER_DISABLED_FLAG_PATH",
+            "CODEX_PLUS_NATIVE_ENTRYPOINT_SILENT_INSTALLED",
+            "CODEX_PLUS_NATIVE_ENTRYPOINT_MANAGEMENT_INSTALLED",
+            "CODEX_PLUS_NATIVE_CODEX_LAUNCH_RECORD_PATH",
+            "CODEX_PLUS_NATIVE_PATH_PICKER_RESPONSES_PATH",
+            "CODEX_PLUS_NATIVE_PATH_PICKER_RECORD_PATH",
+            "CODEX_PLUS_NATIVE_STEPWISE_TEST_RECORD_PATH",
+            "CODEX_PLUS_NATIVE_STEPWISE_TEST_RESULT",
+            "New-MaintenanceSettingsFixture",
+            "Assert-MaintenanceSettingsWorkflowResult",
         ] {
             assert!(script.contains(contract), "missing {contract}");
         }

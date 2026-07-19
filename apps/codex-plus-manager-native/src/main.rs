@@ -9,9 +9,9 @@ use codex_plus_manager_native::fonts;
 use codex_plus_manager_native::path_picker::path_picker_from_environment;
 use codex_plus_manager_native::perf::PerfRecorder;
 use codex_plus_manager_service::{
-    ContextToolsService, MaintenanceService, ManagerSettingsService, PluginMarketplaceService,
-    ProviderImportService, ProviderService, ProviderSyncService, RelayEnvironmentService,
-    SessionService, SystemOverviewSource, SystemProviderEnvironment, UserScriptService,
+    ContextToolsService, MaintenanceService, ManagerSettingsService, OverviewService,
+    PluginMarketplaceService, ProviderImportService, ProviderService, ProviderSyncService,
+    RelayEnvironmentService, SessionService, SystemProviderEnvironment, UserScriptService,
     ZedRemoteService,
 };
 use eframe::egui;
@@ -21,6 +21,7 @@ const APP_TITLE: &str = "Codex++ Native Manager";
 const MEBIBYTE: u64 = 1024 * 1024;
 
 fn main() -> eframe::Result {
+    configure_diagnostic_log_from_env();
     let process_started = Instant::now();
     let perf = PerfRecorder::from_env(process_started);
     let cjk_font = match fonts::load_cjk_font() {
@@ -66,12 +67,13 @@ fn main() -> eframe::Result {
             let maintenance_service = Arc::new(MaintenanceService::new(environment.clone()));
             let manager_settings_service =
                 Arc::new(ManagerSettingsService::new(environment.clone()));
+            let overview_service = Arc::new(OverviewService::new(environment.clone()));
             let environment_service = Arc::new(RelayEnvironmentService::new(environment));
             Ok(Box::new(NativeManagerApp::new(
                 creation,
                 cjk_font,
                 NativeManagerSources {
-                    overview: Arc::new(SystemOverviewSource::default()),
+                    overview: overview_service,
                     provider: provider_service.clone(),
                     activation: provider_service,
                     provider_import: import_service,
@@ -90,6 +92,16 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+fn configure_diagnostic_log_from_env() {
+    let Some(path) = std::env::var_os("CODEX_PLUS_NATIVE_DIAGNOSTIC_LOG_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    else {
+        return;
+    };
+    codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(path));
 }
 
 fn memory_efficient_wgpu_configuration() -> eframe::WgpuConfiguration {

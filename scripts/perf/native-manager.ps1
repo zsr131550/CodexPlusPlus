@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $ColdRunCount = 5
 $ColdExitAfterMs = 3000
 $IdleSampleSeconds = 30
-$IdleExitAfterMs = 42000
+$IdleExitAfterMs = 52000
 $FirstFrameLimitMs = 1500.0
 $CpuP95LimitMs = 16.7
 $MaximumStallLimitMs = 50.0
@@ -90,7 +90,27 @@ $ExpectedScriptActions = @(
     'request_zed_forget',
     'confirm_zed_forget',
     'request_zed_conflict_refresh',
-    'confirm_zed_conflict_refresh'
+    'confirm_zed_conflict_refresh',
+    'navigate_maintenance',
+    'refresh_maintenance',
+    'set_maintenance_log_limit',
+    'open_maintenance_report',
+    'edit_maintenance_path',
+    'save_maintenance_path',
+    'pick_maintenance_executable',
+    'launch_maintenance',
+    'navigate_settings',
+    'edit_stepwise_settings',
+    'test_stepwise_settings',
+    'save_stepwise_settings',
+    'open_image_overlay_settings',
+    'pick_overlay_image',
+    'save_image_overlay_settings',
+    'request_image_overlay_reset',
+    'cancel_image_overlay_reset',
+    'open_extra_args_settings',
+    'edit_extra_args_settings',
+    'save_extra_args_settings'
 )
 
 $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -143,20 +163,128 @@ function Stop-OwnedProcess {
     }
 }
 
+function New-MaintenanceSettingsFixture {
+    param(
+        [Parameter(Mandatory)]
+        [string] $SampleDirectory
+    )
+
+    $FixtureRoot = Join-Path $SampleDirectory 'maintenance-settings'
+    $AppPath = Join-Path $FixtureRoot 'private-path-sentinel-codex.exe'
+    $InitialImagePath = Join-Path $FixtureRoot 'initial-private-path-sentinel.png'
+    $SelectedImagePath = Join-Path $FixtureRoot 'selected-private-path-sentinel.png'
+    $DiagnosticLogPath = Join-Path $FixtureRoot 'diagnostic.jsonl'
+    $LatestStatusPath = Join-Path $FixtureRoot 'latest-status.json'
+    $WatcherFlagPath = Join-Path $FixtureRoot 'watcher.disabled'
+    $PathPickerResponsesPath = Join-Path $FixtureRoot 'path-picker-responses.json'
+    $PathPickerRecordPath = Join-Path $FixtureRoot 'path-picker-record.json'
+    $StepwiseRecordPath = Join-Path $FixtureRoot 'stepwise-test-record.json'
+    $CodexLaunchRecordPath = Join-Path $FixtureRoot 'codex-launch-record.json'
+    $EntrypointMutationPath = Join-Path $FixtureRoot 'entrypoint-mutation.json'
+    $WatcherMutationPath = Join-Path $FixtureRoot 'watcher-mutation.json'
+    $RealLaunchArtifactPath = Join-Path $FixtureRoot 'real-launch-artifact.json'
+    $SecretSentinel = 'private-stepwise-key-sentinel-7d44'
+    $InitialStepwiseUrl = 'https://private-stepwise.example.test/body-sentinel-initial'
+    $SavedStepwiseUrl = 'https://perf-stepwise.example.test/v2'
+    $InitialStepwiseModel = 'private-body-sentinel-model'
+    $SavedStepwiseModel = 'perf-stepwise-model-edited'
+    $SavedStepwiseEnvironment = 'OPENAI_CODEX_PLUS_PERF_SENTINEL'
+    $SavedExtraArgs = @('--perf-mode', '--safe-value=fixture')
+
+    New-Item -ItemType Directory -Path $FixtureRoot | Out-Null
+    [IO.File]::WriteAllText($AppPath, 'isolated-codex-fixture', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText(
+        $InitialImagePath,
+        'isolated-initial-image-fixture',
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllText(
+        $SelectedImagePath,
+        'isolated-selected-image-fixture',
+        [Text.UTF8Encoding]::new($false)
+    )
+    $DiagnosticRecord = [ordered]@{
+        timestamp_ms = 123
+        pid = 0
+        event = 'native_manager.perf_fixture'
+        detail = [ordered]@{ status = 'ready' }
+    } | ConvertTo-Json -Depth 4 -Compress
+    [IO.File]::WriteAllText(
+        $DiagnosticLogPath,
+        $DiagnosticRecord + [Environment]::NewLine,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $LatestStatus = [ordered]@{
+        status = 'running'
+        message = 'fixture-ready'
+        started_at_ms = 123
+        debug_port = 9229
+        helper_port = 57321
+        codex_app = $null
+    } | ConvertTo-Json -Depth 4
+    [IO.File]::WriteAllText(
+        $LatestStatusPath,
+        $LatestStatus,
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllText(
+        $WatcherFlagPath,
+        'disabled',
+        [Text.UTF8Encoding]::new($false)
+    )
+    $PickerResponses = [ordered]@{
+        maintenance_executable = $AppPath
+        settings_overlay_image = $SelectedImagePath
+    } | ConvertTo-Json -Depth 4
+    [IO.File]::WriteAllText(
+        $PathPickerResponsesPath,
+        $PickerResponses,
+        [Text.UTF8Encoding]::new($false)
+    )
+
+    [pscustomobject]@{
+        FixtureRoot = $FixtureRoot
+        AppPath = $AppPath
+        InitialImagePath = $InitialImagePath
+        SelectedImagePath = $SelectedImagePath
+        DiagnosticLogPath = $DiagnosticLogPath
+        LatestStatusPath = $LatestStatusPath
+        WatcherFlagPath = $WatcherFlagPath
+        PathPickerResponsesPath = $PathPickerResponsesPath
+        PathPickerRecordPath = $PathPickerRecordPath
+        StepwiseRecordPath = $StepwiseRecordPath
+        StepwiseResult = 'ok:4'
+        CodexLaunchRecordPath = $CodexLaunchRecordPath
+        EntrypointMutationPath = $EntrypointMutationPath
+        WatcherMutationPath = $WatcherMutationPath
+        RealLaunchArtifactPath = $RealLaunchArtifactPath
+        SecretSentinel = $SecretSentinel
+        InitialStepwiseUrl = $InitialStepwiseUrl
+        SavedStepwiseUrl = $SavedStepwiseUrl
+        InitialStepwiseModel = $InitialStepwiseModel
+        SavedStepwiseModel = $SavedStepwiseModel
+        SavedStepwiseEnvironment = $SavedStepwiseEnvironment
+        SavedExtraArgs = $SavedExtraArgs
+    }
+}
+
 function New-ProviderSettingsFixture {
     param(
         [Parameter(Mandatory)]
-        [string] $Path
+        [string] $Path,
+
+        [Parameter(Mandatory)]
+        [pscustomobject] $MaintenanceSettingsFixture
     )
 
-    $ProfileDefaults = @{
+    $ProfileDefaults = [ordered]@{
         protocol = 'responses'
         relayMode = 'pureApi'
         testModel = 'perf-model'
         configContents = ''
         authContents = ''
         useCommonConfig = $true
-        contextSelection = @{ mcpServers = @(); skills = @(); plugins = @() }
+        contextSelection = [ordered]@{ mcpServers = @(); skills = @(); plugins = @() }
         contextSelectionInitialized = $false
         contextWindow = '200000'
         autoCompactLimit = '160000'
@@ -194,6 +322,22 @@ enabled = true
 enabled = true
 '@
     $Settings = [ordered]@{
+        codexAppPath = $MaintenanceSettingsFixture.AppPath
+        codexExtraArgs = @('--private-body-sentinel-initial')
+        codexAppStepwiseEnabled = $false
+        codexAppStepwiseDirectSend = $false
+        codexAppStepwiseBaseUrl = $MaintenanceSettingsFixture.InitialStepwiseUrl
+        codexAppStepwiseApiKey = $MaintenanceSettingsFixture.SecretSentinel
+        codexAppStepwiseApiKeyEnv = 'CODEX_STEPWISE_API_KEY'
+        codexAppStepwiseModel = $MaintenanceSettingsFixture.InitialStepwiseModel
+        codexAppStepwiseMaxItems = 6
+        codexAppStepwiseMaxInputChars = 6000
+        codexAppStepwiseMaxOutputTokens = 500
+        codexAppStepwiseTimeoutMs = 8000
+        codexAppImageOverlayEnabled = $true
+        codexAppImageOverlayPath = $MaintenanceSettingsFixture.InitialImagePath
+        codexAppImageOverlayOpacity = 41
+        codexAppImageOverlayFitMode = 'fill'
         relayProfilesEnabled = $true
         activeRelayId = 'perf-provider-a'
         relayProfiles = @($First, $Second)
@@ -207,9 +351,112 @@ enabled = true
             keep = $true
             label = 'preserved'
         }
+        futureSettingsRoot = [ordered]@{
+            keep = $true
+            label = 'maintenance-settings-preserved'
+        }
     }
     $Json = $Settings | ConvertTo-Json -Depth 8
     [IO.File]::WriteAllText($Path, $Json, [Text.UTF8Encoding]::new($false))
+    return [pscustomobject]@{
+        RelayProfiles = @(
+            [pscustomobject]$First
+            [pscustomobject]$Second
+        )
+    }
+}
+
+function Assert-MaintenanceSettingsFixtureSetup {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Fixture,
+
+        [Parameter(Mandatory)]
+        [string] $SampleDirectory,
+
+        [Parameter(Mandatory)]
+        [string] $SettingsPath
+    )
+
+    $SampleRoot = [IO.Path]::GetFullPath($SampleDirectory).TrimEnd('\') + '\'
+    foreach ($FixturePath in @(
+        $SettingsPath,
+        $Fixture.FixtureRoot,
+        $Fixture.AppPath,
+        $Fixture.InitialImagePath,
+        $Fixture.SelectedImagePath,
+        $Fixture.DiagnosticLogPath,
+        $Fixture.LatestStatusPath,
+        $Fixture.WatcherFlagPath,
+        $Fixture.PathPickerResponsesPath,
+        $Fixture.PathPickerRecordPath,
+        $Fixture.StepwiseRecordPath,
+        $Fixture.CodexLaunchRecordPath,
+        $Fixture.EntrypointMutationPath,
+        $Fixture.WatcherMutationPath,
+        $Fixture.RealLaunchArtifactPath
+    )) {
+        $Resolved = [IO.Path]::GetFullPath([string]$FixturePath)
+        if (-not $Resolved.StartsWith($SampleRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "maintenance/settings fixture escaped the isolated sample root: $Resolved"
+        }
+    }
+
+    foreach ($RequiredFile in @(
+        $SettingsPath,
+        $Fixture.AppPath,
+        $Fixture.InitialImagePath,
+        $Fixture.SelectedImagePath,
+        $Fixture.DiagnosticLogPath,
+        $Fixture.LatestStatusPath,
+        $Fixture.WatcherFlagPath,
+        $Fixture.PathPickerResponsesPath
+    )) {
+        if (-not (Test-Path -LiteralPath $RequiredFile -PathType Leaf)) {
+            throw "maintenance/settings fixture file is missing: $RequiredFile"
+        }
+    }
+
+    foreach ($UnexpectedRecord in @(
+        $Fixture.PathPickerRecordPath,
+        $Fixture.StepwiseRecordPath,
+        $Fixture.CodexLaunchRecordPath,
+        $Fixture.EntrypointMutationPath,
+        $Fixture.WatcherMutationPath,
+        $Fixture.RealLaunchArtifactPath
+    )) {
+        if (Test-Path -LiteralPath $UnexpectedRecord) {
+            throw "maintenance/settings fixture record was not clean: $UnexpectedRecord"
+        }
+    }
+
+    $ExpectedEnvironment = [ordered]@{
+        CODEX_PLUS_NATIVE_DIAGNOSTIC_LOG_PATH = $Fixture.DiagnosticLogPath
+        CODEX_PLUS_NATIVE_LATEST_STATUS_PATH = $Fixture.LatestStatusPath
+        CODEX_PLUS_NATIVE_WATCHER_DISABLED_FLAG_PATH = $Fixture.WatcherFlagPath
+        CODEX_PLUS_NATIVE_ENTRYPOINT_SILENT_INSTALLED = '1'
+        CODEX_PLUS_NATIVE_ENTRYPOINT_MANAGEMENT_INSTALLED = '0'
+        CODEX_PLUS_NATIVE_CODEX_LAUNCH_RECORD_PATH = $Fixture.CodexLaunchRecordPath
+        CODEX_PLUS_NATIVE_PATH_PICKER_RESPONSES_PATH = $Fixture.PathPickerResponsesPath
+        CODEX_PLUS_NATIVE_PATH_PICKER_RECORD_PATH = $Fixture.PathPickerRecordPath
+        CODEX_PLUS_NATIVE_STEPWISE_TEST_RECORD_PATH = $Fixture.StepwiseRecordPath
+        CODEX_PLUS_NATIVE_STEPWISE_TEST_RESULT = $Fixture.StepwiseResult
+    }
+    foreach ($Name in $ExpectedEnvironment.Keys) {
+        $Actual = [Environment]::GetEnvironmentVariable($Name, 'Process')
+        if ([string]::IsNullOrWhiteSpace($Actual) -or $Actual -ne $ExpectedEnvironment[$Name]) {
+            throw "maintenance/settings isolation variable is missing or partial: $Name"
+        }
+    }
+
+    $PickerResponses = Get-Content -LiteralPath $Fixture.PathPickerResponsesPath -Raw |
+        ConvertFrom-Json
+    if (
+        $PickerResponses.maintenance_executable -ne $Fixture.AppPath -or
+        $PickerResponses.settings_overlay_image -ne $Fixture.SelectedImagePath
+    ) {
+        throw 'path-picker responses do not match the isolated fixture files'
+    }
 }
 
 function New-CodexHomeFixture {
@@ -577,10 +824,6 @@ function Start-ScriptMarketFixture {
     }
 }
 
-function Get-NativeDiagnosticLogPath {
-    Join-Path $HOME '.codex-session-delete\codex-plus.log'
-}
-
 function Read-DiagnosticRecordsForProcess {
     param(
         [Parameter(Mandatory)]
@@ -664,9 +907,13 @@ function Invoke-NativeSample {
     $PendingImportPath = Join-Path $SampleDirectory 'pending-provider-import.json'
     $BackupDirectory = Join-Path $SampleDirectory 'backups'
     $ContextOwnershipPath = Join-Path $SampleDirectory 'context-live-ownership.json'
-    $DiagnosticLogPath = Get-NativeDiagnosticLogPath
     New-Item -ItemType Directory -Path $SampleDirectory | Out-Null
-    New-ProviderSettingsFixture -Path $SettingsPath
+    $MaintenanceSettingsFixture = New-MaintenanceSettingsFixture `
+        -SampleDirectory $SampleDirectory
+    $DiagnosticLogPath = $MaintenanceSettingsFixture.DiagnosticLogPath
+    $ProviderSettingsFixture = New-ProviderSettingsFixture `
+        -Path $SettingsPath `
+        -MaintenanceSettingsFixture $MaintenanceSettingsFixture
     New-CodexHomeFixture -Path $CodexHome
     New-PendingImportFixture -Path $PendingImportPath
     $ZedFixture = New-ZedRemoteFixture -SampleDirectory $SampleDirectory
@@ -701,8 +948,31 @@ function Invoke-NativeSample {
         $env:CODEX_PLUS_NATIVE_ZED_GLOBAL_STATE_PATH = $ZedFixture.GlobalStatePath
         $env:CODEX_PLUS_NATIVE_ZED_REGISTRY_PATH = $ZedFixture.RegistryPath
         $env:CODEX_PLUS_NATIVE_ZED_LAUNCH_RECORD_PATH = $ZedFixture.LaunchRecordPath
+        $env:CODEX_PLUS_NATIVE_DIAGNOSTIC_LOG_PATH = `
+            $MaintenanceSettingsFixture.DiagnosticLogPath
+        $env:CODEX_PLUS_NATIVE_LATEST_STATUS_PATH = `
+            $MaintenanceSettingsFixture.LatestStatusPath
+        $env:CODEX_PLUS_NATIVE_WATCHER_DISABLED_FLAG_PATH = `
+            $MaintenanceSettingsFixture.WatcherFlagPath
+        $env:CODEX_PLUS_NATIVE_ENTRYPOINT_SILENT_INSTALLED = '1'
+        $env:CODEX_PLUS_NATIVE_ENTRYPOINT_MANAGEMENT_INSTALLED = '0'
+        $env:CODEX_PLUS_NATIVE_CODEX_LAUNCH_RECORD_PATH = `
+            $MaintenanceSettingsFixture.CodexLaunchRecordPath
+        $env:CODEX_PLUS_NATIVE_PATH_PICKER_RESPONSES_PATH = `
+            $MaintenanceSettingsFixture.PathPickerResponsesPath
+        $env:CODEX_PLUS_NATIVE_PATH_PICKER_RECORD_PATH = `
+            $MaintenanceSettingsFixture.PathPickerRecordPath
+        $env:CODEX_PLUS_NATIVE_STEPWISE_TEST_RECORD_PATH = `
+            $MaintenanceSettingsFixture.StepwiseRecordPath
+        $env:CODEX_PLUS_NATIVE_STEPWISE_TEST_RESULT = `
+            $MaintenanceSettingsFixture.StepwiseResult
         $env:CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY = '1'
         $env:OPENAI_CODEX_PLUS_PERF_SENTINEL = 'present'
+
+        Assert-MaintenanceSettingsFixtureSetup `
+            -Fixture $MaintenanceSettingsFixture `
+            -SampleDirectory $SampleDirectory `
+            -SettingsPath $SettingsPath
 
         $Process = Start-Process `
             -FilePath $BinaryPath `
@@ -780,6 +1050,8 @@ function Invoke-NativeSample {
             ZedForgetPath = $ZedFixture.ForgetPath
             ZedStalePath = $ZedFixture.StalePath
             ZedSensitiveValues = $ZedFixture.SensitiveValues
+            MaintenanceSettingsFixture = $MaintenanceSettingsFixture
+            ProviderSettingsFixture = $ProviderSettingsFixture
         }
     }
     finally {
@@ -788,6 +1060,181 @@ function Invoke-NativeSample {
         }
         if ($null -ne $MarketFixture) {
             Stop-OwnedProcess -Process $MarketFixture.Process
+        }
+    }
+}
+
+function Assert-MaintenanceSettingsWorkflowResult {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Sample
+    )
+
+    $Fixture = $Sample.MaintenanceSettingsFixture
+    $Settings = Get-Content -LiteralPath $Sample.SettingsPath -Raw | ConvertFrom-Json
+    if ($Settings.codexAppPath -ne $Fixture.AppPath) {
+        throw 'the maintenance workflow did not persist the scripted app path'
+    }
+    if (
+        $Settings.codexAppStepwiseEnabled -ne $true -or
+        $Settings.codexAppStepwiseDirectSend -ne $true -or
+        $Settings.codexAppStepwiseBaseUrl -ne $Fixture.SavedStepwiseUrl -or
+        $Settings.codexAppStepwiseApiKey -ne $Fixture.SecretSentinel -or
+        $Settings.codexAppStepwiseApiKeyEnv -ne $Fixture.SavedStepwiseEnvironment -or
+        $Settings.codexAppStepwiseModel -ne $Fixture.SavedStepwiseModel -or
+        [int]$Settings.codexAppStepwiseMaxItems -ne 5 -or
+        [int]$Settings.codexAppStepwiseMaxInputChars -ne 7000 -or
+        [int]$Settings.codexAppStepwiseMaxOutputTokens -ne 700 -or
+        [int64]$Settings.codexAppStepwiseTimeoutMs -ne 9000
+    ) {
+        throw 'the Stepwise workflow did not persist the complete scripted group'
+    }
+    if (
+        $Settings.codexAppImageOverlayEnabled -ne $true -or
+        $Settings.codexAppImageOverlayPath -ne $Fixture.SelectedImagePath -or
+        [int]$Settings.codexAppImageOverlayOpacity -ne 41 -or
+        $Settings.codexAppImageOverlayFitMode -ne 'fill'
+    ) {
+        throw 'the image-overlay workflow did not persist the complete scripted group'
+    }
+    if ((@($Settings.codexExtraArgs) -join "`n") -ne ($Fixture.SavedExtraArgs -join "`n")) {
+        throw 'the launch-arguments workflow did not persist the scripted values'
+    }
+    if (
+        $Settings.futureSettingsRoot.keep -ne $true -or
+        $Settings.futureSettingsRoot.label -ne 'maintenance-settings-preserved' -or
+        $Settings.activeRelayId -ne 'perf-provider-a' -or
+        @($Settings.relayProfiles).Count -ne 2 -or
+        $Settings.relayProfiles[0].name -ne 'Performance provider A' -or
+        $Settings.relayProfiles[1].name -ne 'Performance provider B'
+    ) {
+        throw 'the settings workflow did not preserve unknown or unrelated provider fields'
+    }
+    for ($Index = 0; $Index -lt $Sample.ProviderSettingsFixture.RelayProfiles.Count; $Index++) {
+        $ExpectedProfile = $Sample.ProviderSettingsFixture.RelayProfiles[$Index]
+        $ActualProfile = $Settings.relayProfiles[$Index]
+        foreach ($Property in $ExpectedProfile.PSObject.Properties.Name) {
+            $ExpectedValue = ConvertTo-Json -InputObject $ExpectedProfile.$Property -Depth 8 -Compress
+            $ActualValue = ConvertTo-Json -InputObject $ActualProfile.$Property -Depth 8 -Compress
+            if ($ActualValue -cne $ExpectedValue) {
+                throw 'the settings workflow changed an unrelated provider field'
+            }
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $Fixture.PathPickerRecordPath -PathType Leaf)) {
+        throw 'the isolated path picker did not write a record'
+    }
+    $PickerText = Get-Content -LiteralPath $Fixture.PathPickerRecordPath -Raw
+    $PickerRecords = $PickerText | ConvertFrom-Json
+    if (
+        $PickerRecords.Count -ne 2 -or
+        $PickerRecords[0].target -ne 'maintenance_executable' -or
+        $PickerRecords[0].selected -ne $true -or
+        $PickerRecords[0].cancelled -ne $false -or
+        $PickerRecords[1].target -ne 'settings_overlay_image' -or
+        $PickerRecords[1].selected -ne $true -or
+        $PickerRecords[1].cancelled -ne $false
+    ) {
+        throw 'the isolated path picker did not record executable and image targets in order'
+    }
+    foreach ($Record in $PickerRecords) {
+        if ((@($Record.PSObject.Properties.Name | Sort-Object) -join ',') -ne 'cancelled,selected,target') {
+            throw 'the path-picker record disclosed data beyond safe ordered metadata'
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $Fixture.StepwiseRecordPath -PathType Leaf)) {
+        throw 'the recording Stepwise tester did not write a record'
+    }
+    $StepwiseText = Get-Content -LiteralPath $Fixture.StepwiseRecordPath -Raw
+    $Stepwise = $StepwiseText | ConvertFrom-Json
+    $ExpectedStepwiseFields = @(
+        'baseUrlConfigured',
+        'callCount',
+        'directKeyConfigured',
+        'enabled',
+        'environmentNameConfigured',
+        'maxInputChars',
+        'maxItems',
+        'maxOutputTokens',
+        'modelLength',
+        'operation',
+        'timeoutMs'
+    ) | Sort-Object
+    if (
+        (@($Stepwise.PSObject.Properties.Name | Sort-Object) -join ',') -ne
+            ($ExpectedStepwiseFields -join ',') -or
+        $Stepwise.operation -ne 'stepwise_test' -or
+        [int]$Stepwise.callCount -ne 1 -or
+        $Stepwise.enabled -ne $true -or
+        $Stepwise.baseUrlConfigured -ne $true -or
+        $Stepwise.directKeyConfigured -ne $true -or
+        $Stepwise.environmentNameConfigured -ne $true -or
+        [int]$Stepwise.modelLength -ne $Fixture.SavedStepwiseModel.Length -or
+        [int]$Stepwise.maxItems -ne 5 -or
+        [int]$Stepwise.maxInputChars -ne 7000 -or
+        [int]$Stepwise.maxOutputTokens -ne 700 -or
+        [int64]$Stepwise.timeoutMs -ne 9000
+    ) {
+        throw 'the recording Stepwise tester captured an unexpected or unsafe call'
+    }
+
+    if (-not (Test-Path -LiteralPath $Fixture.CodexLaunchRecordPath -PathType Leaf)) {
+        throw 'the recording Codex launcher did not write a record'
+    }
+    $LaunchText = Get-Content -LiteralPath $Fixture.CodexLaunchRecordPath -Raw
+    $Launch = $LaunchText | ConvertFrom-Json
+    if (
+        (@($Launch.PSObject.Properties.Name | Sort-Object) -join ',') -ne
+            'argumentCount,callCount,debugPort,helperPort,operation,pathConfigured' -or
+        $Launch.operation -ne 'launch' -or
+        [int]$Launch.callCount -ne 1 -or
+        [int]$Launch.debugPort -ne 9229 -or
+        [int]$Launch.helperPort -ne 57321 -or
+        $Launch.pathConfigured -ne $true -or
+        [int]$Launch.argumentCount -ne 6
+    ) {
+        throw 'the recording Codex launcher captured an unexpected request'
+    }
+
+    $SensitiveValues = @(
+        $Fixture.SecretSentinel,
+        'private-path-sentinel',
+        $Fixture.InitialStepwiseUrl,
+        $Fixture.SavedStepwiseUrl,
+        $Fixture.InitialStepwiseModel,
+        $Fixture.SavedStepwiseModel,
+        'private-body-sentinel'
+    )
+    foreach ($Sensitive in $SensitiveValues) {
+        if ($Sample.ReportText.Contains([string]$Sensitive)) {
+            throw 'the performance report disclosed a key, path, URL, model, or body sentinel'
+        }
+        if ($StepwiseText.Contains([string]$Sensitive)) {
+            throw 'the Stepwise record disclosed a key, URL, or model sentinel'
+        }
+        if ($LaunchText.Contains([string]$Sensitive)) {
+            throw 'the Codex launch record disclosed a path or argument sentinel'
+        }
+        if ($PickerText.Contains([string]$Sensitive)) {
+            throw 'the path-picker record disclosed a selected path sentinel'
+        }
+    }
+    if ($Sample.ReportText.Contains('native_manager.perf_fixture')) {
+        throw 'the raw maintenance diagnostic fixture was copied into performance evidence'
+    }
+
+    if ((Get-Content -LiteralPath $Fixture.WatcherFlagPath -Raw).Trim() -ne 'disabled') {
+        throw 'the maintenance workflow mutated the Watcher flag'
+    }
+    foreach ($UnexpectedArtifact in @(
+        $Fixture.EntrypointMutationPath,
+        $Fixture.WatcherMutationPath,
+        $Fixture.RealLaunchArtifactPath
+    )) {
+        if (Test-Path -LiteralPath $UnexpectedArtifact) {
+            throw "the maintenance workflow created a forbidden mutation artifact: $UnexpectedArtifact"
         }
     }
 }
@@ -1189,6 +1636,16 @@ foreach ($Name in @(
     'CODEX_PLUS_NATIVE_ZED_GLOBAL_STATE_PATH',
     'CODEX_PLUS_NATIVE_ZED_REGISTRY_PATH',
     'CODEX_PLUS_NATIVE_ZED_LAUNCH_RECORD_PATH',
+    'CODEX_PLUS_NATIVE_DIAGNOSTIC_LOG_PATH',
+    'CODEX_PLUS_NATIVE_LATEST_STATUS_PATH',
+    'CODEX_PLUS_NATIVE_WATCHER_DISABLED_FLAG_PATH',
+    'CODEX_PLUS_NATIVE_ENTRYPOINT_SILENT_INSTALLED',
+    'CODEX_PLUS_NATIVE_ENTRYPOINT_MANAGEMENT_INSTALLED',
+    'CODEX_PLUS_NATIVE_CODEX_LAUNCH_RECORD_PATH',
+    'CODEX_PLUS_NATIVE_PATH_PICKER_RESPONSES_PATH',
+    'CODEX_PLUS_NATIVE_PATH_PICKER_RECORD_PATH',
+    'CODEX_PLUS_NATIVE_STEPWISE_TEST_RECORD_PATH',
+    'CODEX_PLUS_NATIVE_STEPWISE_TEST_RESULT',
     'CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY',
     'OPENAI_CODEX_PLUS_PERF_SENTINEL'
 )) {
@@ -1232,6 +1689,7 @@ try {
     Assert-MarketplaceWorkflowResult -Sample $IdleSample
     Assert-UserScriptWorkflowResult -Sample $IdleSample
     Assert-ZedRemoteWorkflowResult -Sample $IdleSample
+    Assert-MaintenanceSettingsWorkflowResult -Sample $IdleSample
     if ($null -eq $IdleSample.PrivateMemoryBytes) {
         throw 'the 30-second sample did not record private memory'
     }

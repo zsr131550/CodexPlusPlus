@@ -20,10 +20,14 @@ use codex_plus_manager_native::state::Route;
 use codex_plus_manager_native::state::context::{ContextFailureKind, ContextViewState};
 use codex_plus_manager_native::state::environment::EnvironmentViewState;
 use codex_plus_manager_native::state::import::ImportViewState;
+use codex_plus_manager_native::state::maintenance::MaintenanceViewState;
 use codex_plus_manager_native::state::marketplace::{MarketplaceFailureKind, MarketplaceViewState};
 use codex_plus_manager_native::state::provider::ProviderViewState;
 use codex_plus_manager_native::state::sessions::{
     ProviderSyncFailureKind, SessionFilter, SessionViewState,
+};
+use codex_plus_manager_native::state::settings::{
+    SettingsFailure, SettingsFailureKind, SettingsTab, SettingsViewState,
 };
 use codex_plus_manager_native::state::user_scripts::{
     ScriptsTab, UserScriptFailureKind, UserScriptViewState,
@@ -35,17 +39,20 @@ use codex_plus_manager_service::{
     CcsDiscovery, CcsProviderSummary, ContextBundle, ContextEntryKey, ContextEntryLiveState,
     ContextEntrySummary, ContextKind, ContextOwnershipOutcome, ContextSyncDiffSummary,
     ContextSyncGuard, ContextSyncKeys, ContextSyncOutcome, ContextSyncPreview,
-    ContextToolsErrorKind, ContextWorkspace, PluginMarketplaceErrorKind, PluginMarketplaceKind,
+    ContextToolsErrorKind, ContextWorkspace, LaunchOutcome, MaintenanceSection,
+    ManagerSettingsWorkspace, PluginMarketplaceErrorKind, PluginMarketplaceKind,
     PluginMarketplaceRevision, PluginMarketplaceStatus, PluginMarketplaceWorkspace,
-    ProviderActivationSummary, ProviderDocument, ProviderLiveRevision, ProviderRevision,
-    ProviderSyncErrorKind, ProviderSyncRevision, ProviderSyncTargetList, ProviderSyncTargetOption,
-    ProviderSyncTargetSource, ProviderSyncWorkspace, ProviderWorkspace, RelayEnvironmentWorkspace,
+    PrivateArgument, PrivatePath, PrivateUrl, ProviderActivationSummary, ProviderDocument,
+    ProviderLiveRevision, ProviderRevision, ProviderSyncErrorKind, ProviderSyncRevision,
+    ProviderSyncTargetList, ProviderSyncTargetOption, ProviderSyncTargetSource,
+    ProviderSyncWorkspace, ProviderWorkspace, RelayEnvironmentWorkspace, SafeSettingsGroup,
     ScriptIntegrity, ScriptMarketRevision, ScriptMarketSummary, ScriptMarketWorkspace,
-    SessionDeleteBatchOutcome, SessionDeleteOutcome, SessionRevision, SessionSummary,
-    SessionWorkspace, UserScriptBackupEvidence, UserScriptErrorKind, UserScriptMutationOutcome,
-    UserScriptOrigin, UserScriptRevision, UserScriptStatus, UserScriptSummary, UserScriptWorkspace,
-    ZedProjectRevision, ZedRememberOutcome, ZedRemoteErrorKind, ZedRemoteOpenOutcome,
-    ZedRemoteProjectSummary, ZedRemoteWorkspace, ZedSettingsRevision,
+    SectionValue, SessionDeleteBatchOutcome, SessionDeleteOutcome, SessionRevision, SessionSummary,
+    SessionWorkspace, StepwiseTestOutcome, UserScriptBackupEvidence, UserScriptErrorKind,
+    UserScriptMutationOutcome, UserScriptOrigin, UserScriptRevision, UserScriptStatus,
+    UserScriptSummary, UserScriptWorkspace, ZedProjectRevision, ZedRememberOutcome,
+    ZedRemoteErrorKind, ZedRemoteOpenOutcome, ZedRemoteProjectSummary, ZedRemoteWorkspace,
+    ZedSettingsRevision,
 };
 use eframe::egui;
 use egui_kittest::{Harness, SnapshotOptions, SnapshotResults, kittest::Queryable};
@@ -67,6 +74,18 @@ struct SnapshotState {
 struct ZedSnapshotState {
     model: ShellViewModel,
     zed_remote: ZedRemoteViewState,
+    cjk_font: Option<Vec<u8>>,
+}
+
+struct MaintenanceSnapshotState {
+    model: ShellViewModel,
+    maintenance: MaintenanceViewState,
+    cjk_font: Option<Vec<u8>>,
+}
+
+struct SettingsSnapshotState {
+    model: ShellViewModel,
+    settings: SettingsViewState,
     cjk_font: Option<Vec<u8>>,
 }
 
@@ -118,6 +137,22 @@ enum ZedRemoteSnapshotScenario {
     LaunchConfirmation,
     SettingsConflict,
     PartialRemember,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MaintenanceSnapshotScenario {
+    Loading,
+    Ready,
+    Partial,
+    LaunchSuccess,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SettingsSnapshotScenario {
+    StepwiseDirty,
+    ImageResetConfirmation,
+    ArgumentsConflict,
+    StepwiseTestSuccess,
 }
 
 const CASES: &[(f32, f32, Locale, ThemeMode, &str)] = &[
@@ -416,6 +451,36 @@ const ZED_REMOTE_SCENARIOS: &[(ZedRemoteSnapshotScenario, &str)] = &[
     ),
 ];
 
+const OPERATIONAL_VIEWPORTS: &[(f32, f32, Locale, ThemeMode, &str)] = &[
+    (960.0, 720.0, Locale::ZhCn, ThemeMode::Light, "960_zh_light"),
+    (960.0, 720.0, Locale::En, ThemeMode::Dark, "960_en_dark"),
+    (1180.0, 820.0, Locale::ZhCn, ThemeMode::Dark, "1180_zh_dark"),
+    (1180.0, 820.0, Locale::En, ThemeMode::Light, "1180_en_light"),
+];
+
+const MAINTENANCE_SCENARIOS: &[(MaintenanceSnapshotScenario, &str)] = &[
+    (MaintenanceSnapshotScenario::Loading, "loading"),
+    (MaintenanceSnapshotScenario::Ready, "ready"),
+    (MaintenanceSnapshotScenario::Partial, "partial"),
+    (MaintenanceSnapshotScenario::LaunchSuccess, "launch_success"),
+];
+
+const SETTINGS_SCENARIOS: &[(SettingsSnapshotScenario, &str)] = &[
+    (SettingsSnapshotScenario::StepwiseDirty, "stepwise_dirty"),
+    (
+        SettingsSnapshotScenario::ImageResetConfirmation,
+        "image_reset_confirmation",
+    ),
+    (
+        SettingsSnapshotScenario::ArgumentsConflict,
+        "arguments_conflict",
+    ),
+    (
+        SettingsSnapshotScenario::StepwiseTestSuccess,
+        "stepwise_test_success",
+    ),
+];
+
 #[test]
 fn overview_wgpu_snapshot_matrix() {
     if std::env::var_os("CODEX_PLUS_UI_SNAPSHOTS").as_deref() != Some("1".as_ref()) {
@@ -506,11 +571,68 @@ fn zed_remote_wgpu_snapshot_matrix() {
     run_zed_remote_snapshot_matrix();
 }
 
+#[test]
+fn maintenance_wgpu_snapshot_matrix() {
+    if std::env::var_os("CODEX_PLUS_UI_SNAPSHOTS").as_deref() != Some("1".as_ref()) {
+        return;
+    }
+    let _guard = snapshot_test_guard();
+
+    run_maintenance_snapshot_matrix();
+}
+
+#[test]
+fn settings_wgpu_snapshot_matrix() {
+    if std::env::var_os("CODEX_PLUS_UI_SNAPSHOTS").as_deref() != Some("1".as_ref()) {
+        return;
+    }
+    let _guard = snapshot_test_guard();
+
+    run_settings_snapshot_matrix();
+}
+
 fn snapshot_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+macro_rules! assert_nonblank_render {
+    ($image:expr, $name:expr) => {{
+        let rendered = &$image;
+        let distinct = rendered
+            .pixels()
+            .map(|pixel| pixel.0)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            distinct.len() > 8,
+            "{} rendered with only {} colors",
+            $name,
+            distinct.len()
+        );
+
+        let background = rendered.get_pixel(0, 0).0;
+        let mut bounds: Option<(u32, u32, u32, u32)> = None;
+        for (x, y, pixel) in rendered.enumerate_pixels() {
+            if pixel.0 == background {
+                continue;
+            }
+            bounds = Some(match bounds {
+                Some((min_x, min_y, max_x, max_y)) => {
+                    (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                }
+                None => (x, y, x, y),
+            });
+        }
+        let (min_x, min_y, max_x, max_y) =
+            bounds.unwrap_or_else(|| panic!("{} has no non-background content", $name));
+        assert!(
+            max_x.saturating_sub(min_x) > 0 && max_y.saturating_sub(min_y) > 0,
+            "{} has zero-area content bounds: ({min_x}, {min_y})-({max_x}, {max_y})",
+            $name
+        );
+    }};
 }
 
 fn run_snapshot_matrix(
@@ -942,6 +1064,275 @@ fn run_zed_remote_snapshot_matrix() {
     results.unwrap();
 }
 
+fn run_maintenance_snapshot_matrix() {
+    let font = fonts::load_cjk_font().expect("Windows CJK font is required for UI snapshots");
+    let snapshots = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    let mut results = SnapshotResults::new();
+
+    for &(scenario, scenario_name) in MAINTENANCE_SCENARIOS {
+        for &(width, height, locale, mode, viewport_name) in OPERATIONAL_VIEWPORTS {
+            let options = SnapshotOptions::new().output_path(&snapshots);
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(width, height))
+                .with_theme(match mode {
+                    ThemeMode::Dark => egui::Theme::Dark,
+                    ThemeMode::Light => egui::Theme::Light,
+                })
+                .with_os(egui::os::OperatingSystem::Windows)
+                .with_options(options)
+                .wgpu()
+                .build_ui_state(
+                    |ui, state: &mut MaintenanceSnapshotState| {
+                        if let Some(bytes) = state.cjk_font.take() {
+                            egui_extras::install_image_loaders(ui.ctx());
+                            fonts::install_cjk_font(ui.ctx(), bytes);
+                            theme::apply(ui.ctx(), state.model.theme);
+                        }
+                        let _ = render_shell(
+                            ui,
+                            &state.model,
+                            ShellFeatureStates {
+                                maintenance: Some(&state.maintenance),
+                                ..ShellFeatureStates::default()
+                            },
+                        );
+                    },
+                    MaintenanceSnapshotState {
+                        model: {
+                            let mut model = common::model(locale, mode);
+                            model.route = Route::Maintenance;
+                            model
+                        },
+                        maintenance: maintenance_snapshot_state(scenario),
+                        cjk_font: Some(font.clone()),
+                    },
+                );
+
+            harness.remove_cursor();
+            if matches!(scenario, MaintenanceSnapshotScenario::Loading) {
+                harness.run_steps(2);
+            } else {
+                harness.run();
+            }
+            assert_maintenance_snapshot_layout(&harness, scenario, locale, width, height);
+            let image = harness
+                .render()
+                .expect("maintenance snapshot should render");
+            let snapshot_name = format!("maintenance_{scenario_name}_{viewport_name}");
+            assert_nonblank_render!(image, snapshot_name.as_str());
+            harness.snapshot(snapshot_name);
+            results.extend_harness(&mut harness);
+        }
+    }
+
+    results.unwrap();
+}
+
+fn run_settings_snapshot_matrix() {
+    let font = fonts::load_cjk_font().expect("Windows CJK font is required for UI snapshots");
+    let snapshots = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    let mut results = SnapshotResults::new();
+
+    for &(scenario, scenario_name) in SETTINGS_SCENARIOS {
+        for &(width, height, locale, mode, viewport_name) in OPERATIONAL_VIEWPORTS {
+            let options = SnapshotOptions::new().output_path(&snapshots);
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(width, height))
+                .with_theme(match mode {
+                    ThemeMode::Dark => egui::Theme::Dark,
+                    ThemeMode::Light => egui::Theme::Light,
+                })
+                .with_os(egui::os::OperatingSystem::Windows)
+                .with_options(options)
+                .wgpu()
+                .build_ui_state(
+                    |ui, state: &mut SettingsSnapshotState| {
+                        if let Some(bytes) = state.cjk_font.take() {
+                            egui_extras::install_image_loaders(ui.ctx());
+                            fonts::install_cjk_font(ui.ctx(), bytes);
+                            theme::apply(ui.ctx(), state.model.theme);
+                        }
+                        let _ = render_shell(
+                            ui,
+                            &state.model,
+                            ShellFeatureStates {
+                                settings: Some(&state.settings),
+                                ..ShellFeatureStates::default()
+                            },
+                        );
+                    },
+                    SettingsSnapshotState {
+                        model: {
+                            let mut model = common::model(locale, mode);
+                            model.route = Route::Settings;
+                            model
+                        },
+                        settings: settings_snapshot_state(scenario),
+                        cjk_font: Some(font.clone()),
+                    },
+                );
+
+            harness.remove_cursor();
+            harness.run();
+            assert_settings_snapshot_layout(&harness, scenario, locale, width, height);
+            let image = harness.render().expect("settings snapshot should render");
+            let snapshot_name = format!("settings_{scenario_name}_{viewport_name}");
+            assert_nonblank_render!(image, snapshot_name.as_str());
+            harness.snapshot(snapshot_name);
+            results.extend_harness(&mut harness);
+        }
+    }
+
+    results.unwrap();
+}
+
+fn assert_maintenance_snapshot_layout(
+    harness: &Harness<'_, MaintenanceSnapshotState>,
+    scenario: MaintenanceSnapshotScenario,
+    locale: Locale,
+    width: f32,
+    height: f32,
+) {
+    let header = format!(
+        "{} {}",
+        text(locale, TextKey::AppName),
+        text(locale, TextKey::Maintenance)
+    );
+    assert_inside(harness.get_by_label(&header).rect(), width, height, &header);
+
+    let application = harness
+        .get_by_label(text(locale, TextKey::CodexApplication))
+        .rect();
+    let diagnostics = harness
+        .get_by_label(text(locale, TextKey::Diagnostics))
+        .rect();
+    assert_inside(
+        application,
+        width,
+        height,
+        text(locale, TextKey::CodexApplication),
+    );
+    assert_inside(
+        diagnostics,
+        width,
+        height,
+        text(locale, TextKey::Diagnostics),
+    );
+
+    match scenario {
+        MaintenanceSnapshotScenario::Loading => {
+            let loading = format!(
+                "{}: {}",
+                text(locale, TextKey::Status),
+                text(locale, TextKey::Loading)
+            );
+            assert_inside(
+                harness.get_by_label(&loading).rect(),
+                width,
+                height,
+                &loading,
+            );
+        }
+        MaintenanceSnapshotScenario::Ready => {
+            let path = "C:/fixture/Codex";
+            let path_editor = harness.get_by(|node| {
+                node.role() == egui::accesskit::Role::TextInput
+                    && node.value().as_deref() == Some(path)
+            });
+            assert_inside(path_editor.rect(), width, height, path);
+        }
+        MaintenanceSnapshotScenario::Partial => {
+            let unavailable = text(locale, TextKey::SafeDocumentUnavailable);
+            assert_inside(
+                harness.get_by_label(unavailable).rect(),
+                width,
+                height,
+                unavailable,
+            );
+        }
+        MaintenanceSnapshotScenario::LaunchSuccess => {
+            let accepted = text(locale, TextKey::LaunchAccepted);
+            assert_inside(
+                harness.get_by_label(accepted).rect(),
+                width,
+                height,
+                accepted,
+            );
+        }
+    }
+
+    if width <= 960.0 {
+        let path_label = harness
+            .get_by_label(text(locale, TextKey::ApplicationPath))
+            .rect();
+        assert!(
+            diagnostics.min.y > path_label.max.y + 120.0,
+            "compact maintenance must stack: {path_label:?} {diagnostics:?}"
+        );
+    } else {
+        assert!(
+            diagnostics.min.x > application.min.x + 300.0,
+            "wide maintenance must use columns: {application:?} {diagnostics:?}"
+        );
+        assert!(
+            (diagnostics.min.y - application.min.y).abs() < 8.0,
+            "wide maintenance columns must align: {application:?} {diagnostics:?}"
+        );
+    }
+
+    let tree = format!("{:#?}", harness.root());
+    assert!(!tree.contains("private-"), "{tree}");
+    assert!(!tree.contains("sentinel"), "{tree}");
+}
+
+fn assert_settings_snapshot_layout(
+    harness: &Harness<'_, SettingsSnapshotState>,
+    scenario: SettingsSnapshotScenario,
+    locale: Locale,
+    width: f32,
+    height: f32,
+) {
+    let header = format!(
+        "{} {}",
+        text(locale, TextKey::AppName),
+        text(locale, TextKey::Settings)
+    );
+    assert_inside(harness.get_by_label(&header).rect(), width, height, &header);
+
+    let (tab, signal) = match (locale, scenario) {
+        (Locale::ZhCn, SettingsSnapshotScenario::StepwiseDirty) => {
+            ("Stepwise", "当前分组有未保存更改".to_owned())
+        }
+        (Locale::En, SettingsSnapshotScenario::StepwiseDirty) => {
+            ("Stepwise", "This group has unsaved changes".to_owned())
+        }
+        (Locale::ZhCn, SettingsSnapshotScenario::ImageResetConfirmation) => {
+            ("图片覆盖", "重置图片覆盖设置？".to_owned())
+        }
+        (Locale::En, SettingsSnapshotScenario::ImageResetConfirmation) => {
+            ("Image overlay", "Reset image overlay settings?".to_owned())
+        }
+        (Locale::ZhCn, SettingsSnapshotScenario::ArgumentsConflict) => {
+            ("启动参数", "设置已在其他位置更改".to_owned())
+        }
+        (Locale::En, SettingsSnapshotScenario::ArgumentsConflict) => {
+            ("Launch arguments", "Settings changed elsewhere".to_owned())
+        }
+        (Locale::ZhCn, SettingsSnapshotScenario::StepwiseTestSuccess) => {
+            ("Stepwise", "连接测试通过，条目数: 4".to_owned())
+        }
+        (Locale::En, SettingsSnapshotScenario::StepwiseTestSuccess) => {
+            ("Stepwise", "Connection succeeded, items: 4".to_owned())
+        }
+    };
+    assert_inside(harness.get_by_label(tab).rect(), width, height, tab);
+    assert_inside(harness.get_by_label(&signal).rect(), width, height, &signal);
+
+    let tree = format!("{:#?}", harness.root());
+    assert!(!tree.contains("private-"), "{tree}");
+    assert!(!tree.contains("sentinel"), "{tree}");
+}
+
 fn assert_context_layout(
     harness: &Harness<'_, SnapshotState>,
     scenario: ContextSnapshotScenario,
@@ -1145,6 +1536,96 @@ fn assert_inside(rect: egui::Rect, width: f32, height: f32, label: &str) {
         rect.max.x <= width && rect.max.y <= height,
         "{label}: {rect:?}"
     );
+}
+
+fn maintenance_snapshot_state(scenario: MaintenanceSnapshotScenario) -> MaintenanceViewState {
+    let mut state = MaintenanceViewState::default();
+    if matches!(scenario, MaintenanceSnapshotScenario::Loading) {
+        state.begin_load();
+        return state;
+    }
+
+    let mut workspace = (*common::maintenance_workspace("C:/fixture/Codex")).clone();
+    if matches!(scenario, MaintenanceSnapshotScenario::Partial) {
+        workspace.entrypoints = SectionValue::Unavailable(MaintenanceSection::Entrypoints);
+        workspace.watcher = SectionValue::Unavailable(MaintenanceSection::Watcher);
+        workspace.logs = SectionValue::Unavailable(MaintenanceSection::Logs);
+    }
+    let request_id = state.begin_load();
+    assert!(state.apply_load_response(request_id, Ok(Arc::new(workspace))));
+
+    if matches!(scenario, MaintenanceSnapshotScenario::LaunchSuccess) {
+        let (launch_id, _) = state.begin_launch().expect("fixture launch must start");
+        assert!(state.apply_launch_response(
+            launch_id,
+            Ok(LaunchOutcome {
+                debug_port: 9229,
+                helper_port: 57321,
+                accepted: true,
+            }),
+        ));
+    }
+    state
+}
+
+fn settings_snapshot_state(scenario: SettingsSnapshotScenario) -> SettingsViewState {
+    let mut state = SettingsViewState::from_workspace(settings_snapshot_workspace(1));
+    match scenario {
+        SettingsSnapshotScenario::StepwiseDirty => {
+            state.edit_stepwise_url("https://edited.snapshot.example.test/v1".to_owned());
+            state.edit_stepwise_model(
+                "snapshot-model-with-a-long-but-safe-operational-name".to_owned(),
+            );
+        }
+        SettingsSnapshotScenario::ImageResetConfirmation => {
+            state.set_tab(SettingsTab::ImageOverlay);
+            state.edit_image_path("C:/fixture/overlay-preview.png".to_owned());
+            assert!(state.request_reset(SafeSettingsGroup::ImageOverlay));
+        }
+        SettingsSnapshotScenario::ArgumentsConflict => {
+            state.set_tab(SettingsTab::LaunchArguments);
+            state.edit_extra_args(
+                "--snapshot-mode\n--option=fixture-value\n--long-safe-argument=abcdefghijklmnopqrstuvwxyz"
+                    .to_owned(),
+            );
+            let (request_id, _) = state
+                .begin_extra_args_save()
+                .expect("dirty fixture arguments must save");
+            assert!(state.apply_extra_args_save_response(
+                request_id,
+                Err(SettingsFailure::with_workspace(
+                    SettingsFailureKind::SettingsConflict,
+                    SafeSettingsGroup::ExtraArgs,
+                    settings_snapshot_workspace(2),
+                )),
+            ));
+        }
+        SettingsSnapshotScenario::StepwiseTestSuccess => {
+            let (request_id, _) = state
+                .begin_stepwise_test()
+                .expect("fixture Stepwise test must start");
+            assert!(state.apply_stepwise_test_response(
+                request_id,
+                Ok(StepwiseTestOutcome { item_count: 4 }),
+            ));
+        }
+    }
+    state
+}
+
+fn settings_snapshot_workspace(seed: u8) -> Arc<ManagerSettingsWorkspace> {
+    let mut workspace = (*common::manager_settings_workspace(seed)).clone();
+    workspace.stepwise.settings.base_url =
+        PrivateUrl::new(format!("https://snapshot-{seed}.example.test/v1"));
+    workspace.stepwise.settings.api_key_env = "CODEX_PLUS_SNAPSHOT_KEY".to_owned();
+    workspace.stepwise.settings.model = format!("snapshot-model-{seed}");
+    workspace.image_overlay.settings.path =
+        PrivatePath::new(format!("C:/fixture/overlay-{seed}.png"));
+    workspace.extra_args.settings.args = vec![
+        PrivateArgument::new(format!("--snapshot-{seed}")),
+        PrivateArgument::new("--safe-mode"),
+    ];
+    Arc::new(workspace)
 }
 
 fn zed_remote_snapshot_state(scenario: ZedRemoteSnapshotScenario) -> ZedRemoteViewState {

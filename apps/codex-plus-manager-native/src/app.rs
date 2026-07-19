@@ -38,8 +38,8 @@ use crate::state::context::ContextFailureKind;
 use crate::state::environment::EnvironmentFailureKind;
 use crate::state::import::ImportFailureKind;
 use crate::state::maintenance::{
-    MaintenanceFailure, MaintenanceFailureKind, MaintenanceLoadPhase, MaintenanceOperationPhase,
-    MaintenanceTransition,
+    MaintenanceDocumentTab, MaintenanceFailure, MaintenanceFailureKind, MaintenanceLoadPhase,
+    MaintenanceOperationPhase, MaintenanceTransition,
 };
 use crate::state::marketplace::MarketplaceFailureKind;
 use crate::state::provider::{
@@ -49,7 +49,7 @@ use crate::state::provider::{
 };
 use crate::state::sessions::{ProviderSyncFailureKind, SessionFailureKind};
 use crate::state::settings::{
-    SettingsFailure, SettingsLoadPhase, SettingsResetRequest, SettingsTransition,
+    SettingsFailure, SettingsLoadPhase, SettingsResetRequest, SettingsTab, SettingsTransition,
 };
 use crate::state::user_scripts::{ScriptsTab, UserScriptFailureKind};
 use crate::state::zed_remote::{ZedRemoteFailureKind, ZedRemoteLoadPhase};
@@ -2987,6 +2987,84 @@ impl NativeManagerApp {
             }
             PerfScriptAction::ConfirmZedConflictRefresh => {
                 Some(ShellAction::ZedRemote(ZedRemoteAction::ConfirmForget))
+            }
+            PerfScriptAction::NavigateMaintenance => {
+                Some(ShellAction::Navigate(Route::Maintenance))
+            }
+            PerfScriptAction::RefreshMaintenance => {
+                Some(ShellAction::Maintenance(MaintenanceAction::Refresh))
+            }
+            PerfScriptAction::SetMaintenanceLogLimit => Some(ShellAction::Maintenance(
+                MaintenanceAction::SetLogLimit(100),
+            )),
+            PerfScriptAction::OpenMaintenanceReport => Some(ShellAction::Maintenance(
+                MaintenanceAction::SetDocumentTab(MaintenanceDocumentTab::Report),
+            )),
+            PerfScriptAction::EditMaintenancePath => {
+                let path = self.state.maintenance.app_path_draft.expose();
+                Some(ShellAction::Maintenance(MaintenanceAction::SetAppPath(
+                    format!(" {path} "),
+                )))
+            }
+            PerfScriptAction::SaveMaintenancePath => {
+                Some(ShellAction::Maintenance(MaintenanceAction::SaveAppPath))
+            }
+            PerfScriptAction::PickMaintenanceExecutable => {
+                Some(ShellAction::Maintenance(MaintenanceAction::PickExecutable))
+            }
+            PerfScriptAction::LaunchMaintenance => {
+                Some(ShellAction::Maintenance(MaintenanceAction::Launch))
+            }
+            PerfScriptAction::NavigateSettings => Some(ShellAction::Navigate(Route::Settings)),
+            PerfScriptAction::EditStepwiseSettings => {
+                for action in [
+                    SettingsAction::EditStepwiseEnabled(true),
+                    SettingsAction::EditStepwiseDirectSend(true),
+                    SettingsAction::EditStepwiseUrl(
+                        "https://perf-stepwise.example.test/v2".to_owned(),
+                    ),
+                    SettingsAction::EditStepwiseEnvironment(
+                        "OPENAI_CODEX_PLUS_PERF_SENTINEL".to_owned(),
+                    ),
+                    SettingsAction::EditStepwiseModel("perf-stepwise-model-edited".to_owned()),
+                    SettingsAction::EditStepwiseMaxItems(5),
+                    SettingsAction::EditStepwiseMaxInputChars(7_000),
+                    SettingsAction::EditStepwiseMaxOutputTokens(700),
+                    SettingsAction::EditStepwiseTimeoutMs(9_000),
+                ] {
+                    self.apply_action(ctx, ShellAction::Settings(action));
+                }
+                None
+            }
+            PerfScriptAction::TestStepwiseSettings => {
+                Some(ShellAction::Settings(SettingsAction::TestStepwise))
+            }
+            PerfScriptAction::SaveStepwiseSettings => {
+                Some(ShellAction::Settings(SettingsAction::SaveStepwise))
+            }
+            PerfScriptAction::OpenImageOverlaySettings => Some(ShellAction::Settings(
+                SettingsAction::SetTab(SettingsTab::ImageOverlay),
+            )),
+            PerfScriptAction::PickOverlayImage => {
+                Some(ShellAction::Settings(SettingsAction::PickImage))
+            }
+            PerfScriptAction::SaveImageOverlaySettings => {
+                Some(ShellAction::Settings(SettingsAction::SaveImage))
+            }
+            PerfScriptAction::RequestImageOverlayReset => Some(ShellAction::Settings(
+                SettingsAction::RequestReset(SafeSettingsGroup::ImageOverlay),
+            )),
+            PerfScriptAction::CancelImageOverlayReset => {
+                Some(ShellAction::Settings(SettingsAction::CancelReset))
+            }
+            PerfScriptAction::OpenExtraArgsSettings => Some(ShellAction::Settings(
+                SettingsAction::SetTab(SettingsTab::LaunchArguments),
+            )),
+            PerfScriptAction::EditExtraArgsSettings => Some(ShellAction::Settings(
+                SettingsAction::EditExtraArgs("--perf-mode\n--safe-value=fixture".to_owned()),
+            )),
+            PerfScriptAction::SaveExtraArgsSettings => {
+                Some(ShellAction::Settings(SettingsAction::SaveExtraArgs))
             }
         };
         if let Some(action) = shell_action {
