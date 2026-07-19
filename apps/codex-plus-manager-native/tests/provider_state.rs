@@ -6,16 +6,17 @@ use codex_plus_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, RelayMode, RelayProfile,
 };
 use codex_plus_manager_native::state::provider::{
-    DeleteProfileError, GuardOutcome, GuardResolution, ListDirection, LiveLoadFailureKind,
-    LiveMutationCommand, LiveMutationFailure, LiveMutationKind, LiveMutationRequestResult,
-    OperationPhase, ProviderLoadFailureKind, ProviderLoadPhase, ProviderSaveFailureKind,
-    ProviderViewState, TransitionResult,
+    CommonConfigExtractionOutcome, DeleteProfileError, GuardOutcome, GuardResolution,
+    ListDirection, LiveLoadFailureKind, LiveMutationCommand, LiveMutationFailure, LiveMutationKind,
+    LiveMutationRequestResult, OperationPhase, ProviderLoadFailureKind, ProviderLoadPhase,
+    ProviderSaveFailureKind, ProviderViewState, TransitionResult,
 };
 use codex_plus_manager_service::{
-    ProviderActivationErrorKind, ProviderActivationSummary, ProviderDocument, ProviderKind,
-    ProviderLiveFileKind, ProviderLiveFiles, ProviderLiveRevision, ProviderLiveWorkspace,
-    ProviderMutationOutcome, ProviderNetworkFailureKind, ProviderProfile, ProviderRevision,
-    ProviderRollbackOutcome, ProviderTestOutcome, ProviderTestResult, ProviderWorkspace,
+    ProviderActivationErrorKind, ProviderActivationSummary, ProviderCommonConfigExtraction,
+    ProviderDocument, ProviderKind, ProviderLiveFileKind, ProviderLiveFiles, ProviderLiveRevision,
+    ProviderLiveWorkspace, ProviderMutationOutcome, ProviderNetworkFailureKind, ProviderProfile,
+    ProviderRevision, ProviderRollbackOutcome, ProviderTestOutcome, ProviderTestResult,
+    ProviderWorkspace,
 };
 
 fn ordinary(id: &str) -> ProviderProfile {
@@ -120,6 +121,175 @@ fn load_edit_cancel_and_save_keep_baseline_and_dirty_state_coherent() {
     assert!(state.apply_save_response(save_id, Ok(Arc::new(saved))));
     assert!(!state.is_dirty());
     assert_eq!(state.selected_profile().unwrap().name(), "Saved");
+}
+
+#[test]
+fn common_config_extraction_installs_the_transformed_workspace_and_syncs_live_provider() {
+    let mut state = live_loaded_state();
+    assert!(state.edit_selected(|profile| {
+        profile.ordinary_mut().unwrap().config_contents =
+            "model = \"model-a\"\napproval_policy = \"never\"\n".to_string();
+    }));
+    let (request_id, request) = state.begin_common_config_extraction().unwrap();
+    assert_eq!(request.profile_id, "a");
+    assert_eq!(request.expected_revision.as_str(), "a".repeat(64));
+    assert_eq!(
+        state.common_config_extraction.phase,
+        OperationPhase::Running
+    );
+
+    let mut saved = workspace('b', "a");
+    saved.document = request.document;
+    saved.document.common_config_contents = "approval_policy = \"never\"\n".to_string();
+    saved.document.profiles[0]
+        .ordinary_mut()
+        .unwrap()
+        .config_contents = "model = \"model-a\"\n".to_string();
+
+    assert!(state.apply_common_config_extraction_response(
+        request_id,
+        Ok(ProviderCommonConfigExtraction::Applied(Box::new(saved))),
+    ));
+
+    assert_eq!(state.common_config_extraction.phase, OperationPhase::Ready);
+    assert_eq!(
+        state.common_config_extraction.outcome,
+        Some(CommonConfigExtractionOutcome::Applied)
+    );
+    assert_eq!(
+        state.baseline.as_ref().unwrap().revision.as_str(),
+        "b".repeat(64)
+    );
+    assert_eq!(
+        state.draft().unwrap().common_config_contents,
+        "approval_policy = \"never\"\n"
+    );
+    assert_eq!(
+        state
+            .live
+            .workspace
+            .as_ref()
+            .unwrap()
+            .provider
+            .revision
+            .as_str(),
+        "b".repeat(64)
+    );
+    assert!(!state.is_dirty());
+    assert_eq!(state.edit_generation, 0);
+}
+
+#[test]
+fn common_config_extraction_preserves_post_submit_edits_and_no_content_is_a_no_op() {
+    let mut state = loaded_state();
+    let baseline_before = Arc::clone(state.baseline.as_ref().unwrap());
+    let draft_before = state.draft().unwrap().clone();
+    let generation_before = state.edit_generation;
+    let (empty_request_id, _) = state.begin_common_config_extraction().unwrap();
+
+    assert!(state.apply_common_config_extraction_response(
+        empty_request_id,
+        Ok(ProviderCommonConfigExtraction::NoContent),
+    ));
+    assert!(Arc::ptr_eq(
+        state.baseline.as_ref().unwrap(),
+        &baseline_before
+    ));
+    assert_eq!(state.draft().unwrap(), &draft_before);
+    assert_eq!(state.edit_generation, generation_before);
+    assert_eq!(
+        state.common_config_extraction.outcome,
+        Some(CommonConfigExtractionOutcome::NoContent)
+    );
+
+    assert!(state.edit_selected(|profile| {
+        profile.ordinary_mut().unwrap().config_contents =
+            "model = \"model-a\"\napproval_policy = \"never\"\n".to_string();
+    }));
+    let (request_id, request) = state.begin_common_config_extraction().unwrap();
+    rename_selected(&mut state, "Edited after submit");
+    let generation_after_edit = state.edit_generation;
+    let mut saved = workspace('b', "a");
+    saved.document = request.document;
+    saved.document.common_config_contents = "approval_policy = \"never\"\n".to_string();
+
+    assert!(state.apply_common_config_extraction_response(
+        request_id,
+        Ok(ProviderCommonConfigExtraction::Applied(Box::new(saved))),
+    ));
+
+    assert_eq!(
+        state.selected_profile().unwrap().name(),
+        "Edited after submit"
+    );
+    assert_eq!(state.edit_generation, generation_after_edit);
+    assert_eq!(
+        state.baseline.as_ref().unwrap().revision.as_str(),
+        "b".repeat(64)
+    );
+    assert!(state.is_dirty());
+}
+
+#[test]
+fn common_config_extraction_rejects_stale_responses_and_preserves_draft_on_failure() {
+    let mut state = loaded_state();
+    rename_selected(&mut state, "Unsaved draft");
+    let draft_before = state.draft().unwrap().clone();
+    let (request_id, _) = state.begin_common_config_extraction().unwrap();
+
+    assert!(!state.apply_common_config_extraction_response(
+        request_id + 1,
+        Ok(ProviderCommonConfigExtraction::NoContent),
+    ));
+    assert_eq!(
+        state.common_config_extraction.phase,
+        OperationPhase::Running
+    );
+    assert!(state.apply_common_config_extraction_response(
+        request_id,
+        Err(ProviderSaveFailureKind::Conflict),
+    ));
+    assert_eq!(state.common_config_extraction.phase, OperationPhase::Error);
+    assert_eq!(
+        state.common_config_extraction.error,
+        Some(ProviderSaveFailureKind::Conflict)
+    );
+    assert_eq!(state.draft().unwrap(), &draft_before);
+    assert_eq!(
+        state.baseline.as_ref().unwrap().revision.as_str(),
+        "a".repeat(64)
+    );
+    assert!(!state.apply_common_config_extraction_response(
+        request_id,
+        Ok(ProviderCommonConfigExtraction::NoContent),
+    ));
+
+    let (retry_id, _) = state.begin_common_config_extraction().unwrap();
+    assert!(state.apply_common_config_extraction_response(
+        retry_id,
+        Err(ProviderSaveFailureKind::WorkerStopped),
+    ));
+    assert_eq!(state.draft().unwrap(), &draft_before);
+}
+
+#[test]
+fn common_config_extraction_is_mutually_exclusive_with_provider_and_live_mutations() {
+    let mut state = loaded_state();
+    let (request_id, _) = state.begin_common_config_extraction().unwrap();
+
+    assert!(state.begin_save().is_none());
+    assert!(state.begin_live_load().is_none());
+    assert_eq!(
+        state.request_live_mutation(LiveMutationKind::Clear),
+        LiveMutationRequestResult::Running
+    );
+
+    assert!(state.apply_common_config_extraction_response(
+        request_id,
+        Ok(ProviderCommonConfigExtraction::NoContent),
+    ));
+    let _save = state.begin_save().unwrap();
+    assert!(state.begin_common_config_extraction().is_none());
 }
 
 #[test]

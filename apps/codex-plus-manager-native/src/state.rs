@@ -3,6 +3,7 @@ use std::sync::Arc;
 use codex_plus_manager_service::OverviewSnapshot;
 
 pub mod context;
+pub mod enhancements;
 pub mod environment;
 pub mod import;
 pub mod maintenance;
@@ -28,6 +29,7 @@ pub enum Route {
     Sessions,
     Scripts,
     Context,
+    Enhancements,
     ZedRemote,
     Maintenance,
     Settings,
@@ -105,6 +107,7 @@ pub struct AppState {
     pub environment: EnvironmentViewState,
     pub sessions: SessionViewState,
     pub context: ContextViewState,
+    pub enhancements: enhancements::EnhancementViewState,
     pub marketplace: marketplace::MarketplaceViewState,
     pub user_scripts: user_scripts::UserScriptViewState,
     pub zed_remote: zed_remote::ZedRemoteViewState,

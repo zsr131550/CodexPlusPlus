@@ -16,9 +16,10 @@ use codex_plus_manager_native::views::shell::{
     ShellAction, ShellFeatureStates, ShellViewModel, render_shell,
 };
 use codex_plus_manager_service::{
-    ProviderActivationErrorKind, ProviderActivationSummary, ProviderDocument, ProviderKind,
-    ProviderLiveFileKind, ProviderLiveFiles, ProviderLiveRevision, ProviderLiveWorkspace,
-    ProviderProfile, ProviderRevision, ProviderRollbackOutcome, ProviderWorkspace,
+    ProviderActivationErrorKind, ProviderActivationSummary, ProviderCommonConfigExtraction,
+    ProviderDocument, ProviderKind, ProviderLiveFileKind, ProviderLiveFiles, ProviderLiveRevision,
+    ProviderLiveWorkspace, ProviderProfile, ProviderRevision, ProviderRollbackOutcome,
+    ProviderWorkspace,
 };
 use eframe::egui;
 use egui_kittest::{Harness, kittest::Queryable};
@@ -331,6 +332,135 @@ fn save_conflict_is_visible_without_discarding_the_draft() {
         harness.state().provider.selected_profile().unwrap().name(),
         "Edited provider"
     );
+}
+
+#[test]
+fn common_config_extraction_action_is_compact_emits_once_and_stays_in_bounds() {
+    for size in [[1180.0, 820.0], [960.0, 720.0]] {
+        let mut provider = loaded_provider();
+        provider.editor_tab = ProviderEditorTab::Config;
+        let mut harness = harness(size, Route::Providers, provider);
+
+        let action = harness.get_by_label("Extract common config");
+        let rect = action.rect();
+        assert!(rect.is_positive(), "missing extraction action at {size:?}");
+        assert!(
+            rect.max.x <= size[0] && rect.max.y <= size[1],
+            "clipped extraction action at {size:?}: {rect:?}"
+        );
+
+        action.click();
+        harness.run();
+        assert_eq!(
+            harness
+                .state()
+                .emitted
+                .iter()
+                .filter(|action| matches!(
+                    action,
+                    ShellAction::Provider(ProviderAction::ExtractCommonConfig)
+                ))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn common_config_extraction_renders_running_success_no_content_and_conflict_states() {
+    let mut running = loaded_provider();
+    running.editor_tab = ProviderEditorTab::Config;
+    running.edit_selected(|profile| {
+        profile.ordinary_mut().unwrap().config_contents =
+            "model = \"model-a\"\napproval_policy = \"never\"\n".to_string();
+    });
+    let (_running_id, _) = running.begin_common_config_extraction().unwrap();
+    let running_harness = harness([1180.0, 820.0], Route::Providers, running);
+    assert!(
+        running_harness
+            .get_by_label("Extracting common config")
+            .rect()
+            .is_positive()
+    );
+    assert!(
+        running_harness
+            .query_by(|node| {
+                node.label().as_deref() == Some("Extract common config") && node.is_disabled()
+            })
+            .is_some()
+    );
+    assert!(
+        running_harness
+            .query_by(
+                |node| node.label().as_deref() == Some("Active provider") && node.is_disabled()
+            )
+            .is_some()
+    );
+
+    let mut applied = loaded_provider();
+    applied.editor_tab = ProviderEditorTab::Config;
+    let (applied_id, request) = applied.begin_common_config_extraction().unwrap();
+    let mut saved = workspace();
+    saved.revision = ProviderRevision::parse("c".repeat(64)).unwrap();
+    saved.document = request.document;
+    assert!(applied.apply_common_config_extraction_response(
+        applied_id,
+        Ok(ProviderCommonConfigExtraction::Applied(Box::new(saved))),
+    ));
+    let applied_harness = harness([1180.0, 820.0], Route::Providers, applied);
+    assert!(
+        applied_harness
+            .get_by_label("Common config extracted")
+            .rect()
+            .is_positive()
+    );
+
+    let mut empty = loaded_provider();
+    empty.editor_tab = ProviderEditorTab::Config;
+    let (empty_id, _) = empty.begin_common_config_extraction().unwrap();
+    assert!(empty.apply_common_config_extraction_response(
+        empty_id,
+        Ok(ProviderCommonConfigExtraction::NoContent),
+    ));
+    let empty_harness = harness([1180.0, 820.0], Route::Providers, empty);
+    assert!(
+        empty_harness
+            .get_by_label("No common config found")
+            .rect()
+            .is_positive()
+    );
+
+    let mut conflict = loaded_provider();
+    conflict.editor_tab = ProviderEditorTab::Config;
+    let (conflict_id, _) = conflict.begin_common_config_extraction().unwrap();
+    assert!(conflict.apply_common_config_extraction_response(
+        conflict_id,
+        Err(ProviderSaveFailureKind::Conflict),
+    ));
+    let conflict_harness = harness([1180.0, 820.0], Route::Providers, conflict);
+    assert!(
+        conflict_harness
+            .get_by_label("Provider workspace changed on disk. Reload before extracting again.")
+            .rect()
+            .is_positive()
+    );
+}
+
+#[test]
+fn common_config_extraction_is_bilingual_and_absent_for_aggregate_profiles() {
+    let mut ordinary = loaded_provider();
+    ordinary.editor_tab = ProviderEditorTab::Config;
+    let zh = harness_with_locale([1180.0, 820.0], Route::Providers, ordinary, Locale::ZhCn);
+    assert!(zh.get_by_label("提取公共配置").rect().is_positive());
+
+    let mut aggregate = loaded_provider();
+    assert_eq!(
+        aggregate.request_selection("aggregate-a"),
+        TransitionResult::Applied
+    );
+    aggregate.editor_tab = ProviderEditorTab::Config;
+    let aggregate = harness([1180.0, 820.0], Route::Providers, aggregate);
+    assert!(aggregate.query_by_label("Extract common config").is_none());
 }
 
 #[test]

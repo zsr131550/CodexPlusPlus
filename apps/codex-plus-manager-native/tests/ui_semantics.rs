@@ -43,6 +43,7 @@ fn render_test_shell(ui: &mut egui::Ui, state: &mut TestShellState) {
             | ShellAction::UserScripts(_)
             | ShellAction::Context(_)
             | ShellAction::Marketplace(_)
+            | ShellAction::Enhancements(_)
             | ShellAction::ZedRemote(_)
             | ShellAction::Maintenance(_)
             | ShellAction::Settings(_) => {}

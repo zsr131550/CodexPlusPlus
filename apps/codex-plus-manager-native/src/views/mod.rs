@@ -1,5 +1,6 @@
 pub mod about;
 pub mod context;
+pub mod enhancements;
 pub mod environment;
 pub mod import;
 pub mod maintenance;

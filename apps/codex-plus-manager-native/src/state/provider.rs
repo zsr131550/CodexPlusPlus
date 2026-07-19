@@ -6,12 +6,12 @@ use codex_plus_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, RelayMode, RelayProfile,
 };
 use codex_plus_manager_service::{
-    ApplyActiveProvider, BackfillActiveProvider, ClearLiveProvider, ProviderActivationErrorKind,
-    ProviderDoctorReport, ProviderDocument, ProviderLiveFileKind, ProviderLiveWorkspace,
-    ProviderModelsResult, ProviderMutationGuard, ProviderMutationOutcome,
-    ProviderNetworkFailureKind, ProviderProfile, ProviderRollbackOutcome, ProviderTestResult,
-    ProviderWorkspace, SaveLiveFile, SaveProviderWorkspace, SwitchProvider, apply_provider_preset,
-    provider_presets,
+    ApplyActiveProvider, BackfillActiveProvider, ClearLiveProvider, ExtractProviderCommonConfig,
+    ProviderActivationErrorKind, ProviderCommonConfigExtraction, ProviderDoctorReport,
+    ProviderDocument, ProviderLiveFileKind, ProviderLiveWorkspace, ProviderModelsResult,
+    ProviderMutationGuard, ProviderMutationOutcome, ProviderNetworkFailureKind, ProviderProfile,
+    ProviderRollbackOutcome, ProviderTestResult, ProviderWorkspace, SaveLiveFile,
+    SaveProviderWorkspace, SwitchProvider, apply_provider_preset, provider_presets,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -232,6 +232,53 @@ pub struct SaveOperationState {
     pub error: Option<ProviderSaveFailureKind>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommonConfigExtractionOutcome {
+    Applied,
+    NoContent,
+}
+
+pub struct CommonConfigExtractionState {
+    pub phase: OperationPhase,
+    pub current_request_id: u64,
+    pub outcome: Option<CommonConfigExtractionOutcome>,
+    pub error: Option<ProviderSaveFailureKind>,
+    submitted_document: Option<ProviderDocument>,
+}
+
+impl Default for CommonConfigExtractionState {
+    fn default() -> Self {
+        Self {
+            phase: OperationPhase::Idle,
+            current_request_id: 0,
+            outcome: None,
+            error: None,
+            submitted_document: None,
+        }
+    }
+}
+
+impl fmt::Debug for CommonConfigExtractionState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommonConfigExtractionState")
+            .field("phase", &self.phase)
+            .field("current_request_id", &self.current_request_id)
+            .field("outcome", &self.outcome)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CommonConfigExtractionState {
+    fn clear_result(&mut self) {
+        self.phase = OperationPhase::Idle;
+        self.outcome = None;
+        self.error = None;
+        self.submitted_document = None;
+    }
+}
+
 pub struct NetworkOperationState<T> {
     pub phase: OperationPhase,
     pub current_request_id: u64,
@@ -307,6 +354,7 @@ pub struct ProviderViewState {
     pub list_collapsed: bool,
     pub edit_generation: u64,
     pub save: SaveOperationState,
+    pub common_config_extraction: CommonConfigExtractionState,
     pub test: NetworkOperationState<ProviderTestResult>,
     pub models: NetworkOperationState<ProviderModelsResult>,
     pub doctor: NetworkOperationState<ProviderDoctorReport>,
@@ -332,6 +380,7 @@ impl Default for ProviderViewState {
             list_collapsed: false,
             edit_generation: 0,
             save: SaveOperationState::default(),
+            common_config_extraction: CommonConfigExtractionState::default(),
             test: NetworkOperationState::default(),
             models: NetworkOperationState::default(),
             doctor: NetworkOperationState::default(),
@@ -358,6 +407,7 @@ impl fmt::Debug for ProviderViewState {
             )
             .field("edit_generation", &self.edit_generation)
             .field("dirty", &self.is_dirty())
+            .field("common_config_extraction", &self.common_config_extraction)
             .finish_non_exhaustive()
     }
 }
@@ -402,6 +452,9 @@ impl ProviderViewState {
                 self.edit_generation = 0;
                 self.pending_guard = None;
                 self.pending_guard_save = None;
+                if self.common_config_extraction.phase != OperationPhase::Running {
+                    self.common_config_extraction.clear_result();
+                }
                 self.reset_secret_and_operations();
             }
             Err(error) => {
@@ -485,6 +538,9 @@ impl ProviderViewState {
         }
         self.edit_generation = 0;
         self.save = SaveOperationState::default();
+        if self.common_config_extraction.phase != OperationPhase::Running {
+            self.common_config_extraction.clear_result();
+        }
         self.pending_guard = None;
         self.pending_guard_save = None;
         self.reset_secret_and_operations();
@@ -554,7 +610,9 @@ impl ProviderViewState {
     pub fn begin_save(&mut self) -> Option<(u64, SaveProviderWorkspace)> {
         let baseline = self.baseline.as_ref()?;
         let draft = self.draft.clone()?;
-        if self.save.phase == OperationPhase::Running {
+        if self.save.phase == OperationPhase::Running
+            || self.common_config_extraction.phase == OperationPhase::Running
+        {
             return None;
         }
         self.save.current_request_id = next_id(self.save.current_request_id, "provider save");
@@ -611,10 +669,107 @@ impl ProviderViewState {
         true
     }
 
+    pub fn begin_common_config_extraction(&mut self) -> Option<(u64, ExtractProviderCommonConfig)> {
+        if self.common_config_extraction.phase == OperationPhase::Running
+            || self.save.phase == OperationPhase::Running
+            || self.live.mutation_phase == OperationPhase::Running
+            || matches!(
+                self.live.load_phase,
+                ProviderLoadPhase::Loading | ProviderLoadPhase::Refreshing
+            )
+            || self.live.confirmation.is_some()
+        {
+            return None;
+        }
+        let baseline = self.baseline.as_ref()?;
+        let document = self.draft.clone()?;
+        let profile_id = self.selected_profile_id.clone()?;
+        if !document.profiles.iter().any(|profile| {
+            profile.id() == profile_id
+                && profile.kind() == codex_plus_manager_service::ProviderKind::Ordinary
+        }) {
+            return None;
+        }
+
+        self.common_config_extraction.current_request_id = next_id(
+            self.common_config_extraction.current_request_id,
+            "provider common config extraction",
+        );
+        self.common_config_extraction.phase = OperationPhase::Running;
+        self.common_config_extraction.outcome = None;
+        self.common_config_extraction.error = None;
+        self.common_config_extraction.submitted_document = Some(document.clone());
+        Some((
+            self.common_config_extraction.current_request_id,
+            ExtractProviderCommonConfig {
+                expected_revision: baseline.revision.clone(),
+                document,
+                profile_id,
+            },
+        ))
+    }
+
+    pub fn apply_common_config_extraction_response(
+        &mut self,
+        request_id: u64,
+        result: Result<ProviderCommonConfigExtraction, ProviderSaveFailureKind>,
+    ) -> bool {
+        if request_id != self.common_config_extraction.current_request_id
+            || self.common_config_extraction.phase != OperationPhase::Running
+        {
+            return false;
+        }
+
+        let submitted = self.common_config_extraction.submitted_document.take();
+        match result {
+            Ok(ProviderCommonConfigExtraction::Applied(workspace)) => {
+                let workspace = *workspace;
+                let draft_unchanged = submitted
+                    .as_ref()
+                    .is_some_and(|submitted| self.draft.as_ref() == Some(submitted));
+                let workspace = Arc::new(workspace);
+                if draft_unchanged {
+                    let selected = self.selected_profile_id.clone();
+                    self.draft = Some(workspace.document.clone());
+                    self.selected_profile_id = selected
+                        .filter(|id| document_contains_id(&workspace.document, id))
+                        .or_else(|| {
+                            workspace
+                                .document
+                                .profiles
+                                .first()
+                                .map(|profile| profile.id().to_string())
+                        });
+                    self.edit_generation = 0;
+                    self.reset_secret_and_operations();
+                }
+                self.baseline = Some(workspace);
+                self.sync_live_provider_workspace();
+                self.common_config_extraction.phase = OperationPhase::Ready;
+                self.common_config_extraction.outcome =
+                    Some(CommonConfigExtractionOutcome::Applied);
+                self.common_config_extraction.error = None;
+            }
+            Ok(ProviderCommonConfigExtraction::NoContent) => {
+                self.common_config_extraction.phase = OperationPhase::Ready;
+                self.common_config_extraction.outcome =
+                    Some(CommonConfigExtractionOutcome::NoContent);
+                self.common_config_extraction.error = None;
+            }
+            Err(error) => {
+                self.common_config_extraction.phase = OperationPhase::Error;
+                self.common_config_extraction.outcome = None;
+                self.common_config_extraction.error = Some(error);
+            }
+        }
+        true
+    }
+
     pub fn begin_live_load(&mut self) -> Option<u64> {
         if self.is_dirty()
             || self.dirty_live_file_kind().is_some()
             || self.live.mutation_phase == OperationPhase::Running
+            || self.common_config_extraction.phase == OperationPhase::Running
         {
             return None;
         }
@@ -669,7 +824,9 @@ impl ProviderViewState {
     }
 
     pub fn request_live_mutation(&mut self, kind: LiveMutationKind) -> LiveMutationRequestResult {
-        if self.live.mutation_phase == OperationPhase::Running {
+        if self.live.mutation_phase == OperationPhase::Running
+            || self.common_config_extraction.phase == OperationPhase::Running
+        {
             return LiveMutationRequestResult::Running;
         }
         if self.live.confirmation.is_some() {
@@ -722,7 +879,10 @@ impl ProviderViewState {
     }
 
     pub fn confirm_live_mutation(&mut self) -> Option<(u64, LiveMutationCommand)> {
-        if self.live.mutation_phase == OperationPhase::Running || self.is_dirty() {
+        if self.live.mutation_phase == OperationPhase::Running
+            || self.common_config_extraction.phase == OperationPhase::Running
+            || self.is_dirty()
+        {
             return None;
         }
         let kind = self.live.confirmation.take()?;

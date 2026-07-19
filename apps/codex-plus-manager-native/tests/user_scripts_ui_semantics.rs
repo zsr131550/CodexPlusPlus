@@ -5,8 +5,9 @@ use codex_plus_manager_native::state::user_scripts::{ScriptsTab, UserScriptViewS
 use codex_plus_manager_native::theme;
 use codex_plus_manager_native::views::user_scripts::{self, UserScriptAction};
 use codex_plus_manager_service::{
-    ScriptIntegrity, ScriptMarketRevision, ScriptMarketSummary, ScriptMarketWorkspace,
-    UserScriptOrigin, UserScriptRevision, UserScriptStatus, UserScriptSummary, UserScriptWorkspace,
+    ScriptHomepage, ScriptIntegrity, ScriptMarketRevision, ScriptMarketSummary,
+    ScriptMarketWorkspace, UserScriptOrigin, UserScriptRevision, UserScriptStatus,
+    UserScriptSummary, UserScriptWorkspace,
 };
 use eframe::egui;
 use egui_kittest::{Harness, kittest::Queryable};
@@ -178,6 +179,49 @@ fn row_and_header_controls_emit_typed_actions() {
 }
 
 #[test]
+fn market_repository_and_valid_homepages_emit_egui_open_url_commands() {
+    let mut repository = harness(ViewState {
+        scripts: loaded_state(ScriptIntegrity::Verified),
+        locale: Locale::En,
+        emitted: Vec::new(),
+    });
+    assert_eq!(
+        repository
+            .query_all_by_label("Open project homepage")
+            .count(),
+        1
+    );
+    repository.get_by_label("Script market repository").click();
+    repository.step();
+    assert_eq!(
+        repository.output().platform_output.commands,
+        [egui::OutputCommand::OpenUrl(egui::OpenUrl::new_tab(
+            "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket"
+        ))]
+    );
+
+    let mut homepage = harness(ViewState {
+        scripts: loaded_state(ScriptIntegrity::Verified),
+        locale: Locale::En,
+        emitted: Vec::new(),
+    });
+    homepage.get_by_label("Open project homepage").click();
+    homepage.step();
+    assert_eq!(
+        homepage.output().platform_output.commands,
+        [egui::OutputCommand::OpenUrl(egui::OpenUrl::new_tab(
+            "https://example.invalid/demo?private-query-sentinel"
+        ))]
+    );
+
+    let debug = format!(
+        "{:?}",
+        homepage.state().scripts.market.as_ref().unwrap().entries[0]
+    );
+    assert!(!debug.contains("private-query-sentinel"));
+}
+
+#[test]
 fn compact_market_columns_never_overlap_the_action_button() {
     let harness = harness_at(
         ViewState {
@@ -321,6 +365,9 @@ fn loaded_state(integrity: ScriptIntegrity) -> UserScriptViewState {
                     author: "Fixture".to_string(),
                     tags: vec!["ui".to_string()],
                     source_host: "example.invalid".to_string(),
+                    homepage: Some(ScriptHomepage::new(
+                        "https://example.invalid/demo?private-query-sentinel",
+                    )),
                     integrity,
                     installed_version: Some("1".to_string()),
                     update_available: true,
@@ -333,6 +380,7 @@ fn loaded_state(integrity: ScriptIntegrity) -> UserScriptViewState {
                     author: "Fixture".to_string(),
                     tags: vec!["ui".to_string()],
                     source_host: "example.invalid".to_string(),
+                    homepage: Some(ScriptHomepage::new("javascript:alert(1)")),
                     integrity: ScriptIntegrity::Verified,
                     installed_version: None,
                     update_available: false,

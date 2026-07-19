@@ -5,9 +5,10 @@ use codex_plus_core::zed_remote::{
     ZedOpenStrategy, ZedRemoteProjectSource, ZedRemoteRegistryRevision,
 };
 use codex_plus_manager_service::{
-    ContextKind, ContextToolsSource, DiagnoseProviderProfile, FetchProviderModels,
-    MaintenanceSource, ManagerSettingsSource, OverviewSource, PluginMarketplaceKind,
-    PluginMarketplaceSource, ProviderActivationSource, ProviderErrorKind, ProviderImportSource,
+    ContextKind, ContextToolsSource, DiagnoseProviderProfile, EnhancementSettingsSource,
+    FetchProviderModels, MaintenanceSource, ManagerSettingsSource, OverviewSource,
+    PluginMarketplaceKind, PluginMarketplaceSource, ProviderActivationSource,
+    ProviderCommonConfigExtraction, ProviderErrorKind, ProviderImportSource,
     ProviderNetworkFailureKind, ProviderProfile, ProviderSource, ProviderSyncSource,
     RelayEnvironmentSource, SafeSettingsGroup, ScriptIntegrity, SessionSource, TestProviderProfile,
     UserScriptOrigin, UserScriptRevision, UserScriptSource, ZedRemoteSource,
@@ -22,6 +23,7 @@ use crate::path_picker::{
 use crate::perf::{PerfRecorder, PerfScriptAction};
 use crate::persistence::{self, PersistedUiState};
 use crate::runtime::context::{ContextDispatcher, ContextResponse};
+use crate::runtime::enhancements::{EnhancementDispatcher, EnhancementResponse};
 use crate::runtime::environment::{EnvironmentDispatcher, EnvironmentResponse};
 use crate::runtime::import::{ImportDispatcher, ImportResponse};
 use crate::runtime::maintenance::{MaintenanceDispatcher, MaintenanceResponse};
@@ -35,6 +37,7 @@ use crate::runtime::user_scripts::{UserScriptDispatcher, UserScriptResponse};
 use crate::runtime::zed_remote::{ZedRemoteDispatcher, ZedRemoteResponse};
 use crate::runtime::{DispatchError, OverviewDispatcher};
 use crate::state::context::ContextFailureKind;
+use crate::state::enhancements::{EnhancementFailure, EnhancementLoadPhase};
 use crate::state::environment::EnvironmentFailureKind;
 use crate::state::import::ImportFailureKind;
 use crate::state::maintenance::{
@@ -56,6 +59,7 @@ use crate::state::zed_remote::{ZedRemoteFailureKind, ZedRemoteLoadPhase};
 use crate::state::{AppState, OverviewFailureKind, OverviewPhase, Route};
 use crate::theme;
 use crate::views::context::ContextAction;
+use crate::views::enhancements::EnhancementAction;
 use crate::views::environment::EnvironmentAction;
 use crate::views::import::ImportAction;
 use crate::views::maintenance::MaintenanceAction;
@@ -74,6 +78,7 @@ pub struct NativeManagerSources {
     pub provider_import: Arc<dyn ProviderImportSource>,
     pub environment: Arc<dyn RelayEnvironmentSource>,
     pub context: Arc<dyn ContextToolsSource>,
+    pub enhancements: Arc<dyn EnhancementSettingsSource>,
     pub marketplace: Arc<dyn PluginMarketplaceSource>,
     pub sessions: Arc<dyn SessionSource>,
     pub provider_sync: Arc<dyn ProviderSyncSource>,
@@ -93,6 +98,7 @@ pub struct NativeManagerApp {
     import_dispatcher: ImportDispatcher,
     environment_dispatcher: EnvironmentDispatcher,
     context_dispatcher: ContextDispatcher,
+    enhancement_dispatcher: EnhancementDispatcher,
     marketplace_dispatcher: MarketplaceDispatcher,
     session_dispatcher: SessionDispatcher,
     user_script_dispatcher: UserScriptDispatcher,
@@ -164,6 +170,11 @@ impl NativeManagerApp {
             sources.context,
             Arc::new(move || context_repaint_context.request_repaint()),
         );
+        let enhancement_repaint_context = creation.egui_ctx.clone();
+        let enhancement_dispatcher = EnhancementDispatcher::spawn(
+            sources.enhancements,
+            Arc::new(move || enhancement_repaint_context.request_repaint()),
+        );
         let marketplace_repaint_context = creation.egui_ctx.clone();
         let marketplace_dispatcher = MarketplaceDispatcher::spawn(
             sources.marketplace,
@@ -209,6 +220,7 @@ impl NativeManagerApp {
             import_dispatcher,
             environment_dispatcher,
             context_dispatcher,
+            enhancement_dispatcher,
             marketplace_dispatcher,
             session_dispatcher,
             user_script_dispatcher,
@@ -308,6 +320,17 @@ impl NativeManagerApp {
         }
     }
 
+    fn refresh_enhancements(&mut self) {
+        let request_id = self.state.enhancements.begin_load();
+        if self
+            .enhancement_dispatcher
+            .request_load(request_id)
+            .is_err()
+        {
+            self.state.enhancements.fail_running_operations();
+        }
+    }
+
     fn load_providers(&mut self) {
         let Some(request_id) = self.state.provider.begin_live_load() else {
             return;
@@ -328,6 +351,7 @@ impl NativeManagerApp {
                 Route::Environment => self.inspect_environment(),
                 Route::Sessions => self.refresh_sessions_route(),
                 Route::Scripts => self.refresh_user_scripts_route(),
+                Route::Enhancements => self.refresh_enhancements(),
                 Route::ZedRemote => self.refresh_zed_remote(),
                 Route::Maintenance => self.request_maintenance_refresh(),
                 Route::Settings => self.request_settings_refresh(),
@@ -341,6 +365,7 @@ impl NativeManagerApp {
                 Route::Environment => self.inspect_environment(),
                 Route::Sessions => self.refresh_sessions_route(),
                 Route::Scripts => self.refresh_user_scripts_route(),
+                Route::Enhancements => self.refresh_enhancements(),
                 Route::ZedRemote => self.refresh_zed_remote(),
                 Route::Maintenance => self.request_maintenance_refresh(),
                 Route::Settings => self.request_settings_refresh(),
@@ -362,6 +387,7 @@ impl NativeManagerApp {
             ShellAction::UserScripts(action) => self.apply_user_script_action(action),
             ShellAction::Context(action) => self.apply_context_action(action),
             ShellAction::Marketplace(action) => self.apply_marketplace_action(action),
+            ShellAction::Enhancements(action) => self.apply_enhancement_action(action),
             ShellAction::ZedRemote(action) => self.apply_zed_remote_action(ctx, action),
             ShellAction::Maintenance(action) => self.apply_maintenance_action(ctx, action),
             ShellAction::Settings(action) => self.apply_settings_action(action),
@@ -403,6 +429,8 @@ impl NativeManagerApp {
             self.state.provider.leave_provider_route();
         }
         let entering_context = self.state.route != Route::Context && route == Route::Context;
+        let entering_enhancements =
+            self.state.route != Route::Enhancements && route == Route::Enhancements;
         let entering_sessions = self.state.route != Route::Sessions && route == Route::Sessions;
         let entering_scripts = self.state.route != Route::Scripts && route == Route::Scripts;
         let entering_zed_remote = self.state.route != Route::ZedRemote && route == Route::ZedRemote;
@@ -421,6 +449,9 @@ impl NativeManagerApp {
         if entering_context {
             self.load_context_workspace();
             self.inspect_plugin_marketplaces();
+        }
+        if entering_enhancements {
+            self.refresh_enhancements();
         }
         if entering_sessions {
             self.refresh_sessions_route();
@@ -534,6 +565,7 @@ impl NativeManagerApp {
             ProviderAction::SetAuthRevealed(revealed) => {
                 self.state.provider.set_auth_revealed(revealed);
             }
+            ProviderAction::ExtractCommonConfig => self.extract_provider_common_config(),
             ProviderAction::Save => self.save_providers(),
             ProviderAction::Discard => {
                 self.pending_route = None;
@@ -1140,6 +1172,41 @@ impl NativeManagerApp {
         }
     }
 
+    fn apply_enhancement_action(&mut self, action: EnhancementAction) {
+        match action {
+            EnhancementAction::Refresh => self.refresh_enhancements(),
+            EnhancementAction::Edit(settings) => self.state.enhancements.edit(settings),
+            EnhancementAction::Save => {
+                if let Some((request_id, request)) = self.state.enhancements.begin_save()
+                    && self
+                        .enhancement_dispatcher
+                        .request_save(request_id, request)
+                        .is_err()
+                {
+                    self.state.enhancements.fail_running_operations();
+                }
+            }
+            EnhancementAction::RequestReset => {
+                self.state.enhancements.request_reset();
+            }
+            EnhancementAction::ConfirmReset => {
+                if let Some((request_id, request)) = self.state.enhancements.confirm_reset()
+                    && self
+                        .enhancement_dispatcher
+                        .request_reset(request_id, request)
+                        .is_err()
+                {
+                    self.state.enhancements.fail_running_operations();
+                }
+            }
+            EnhancementAction::CancelReset => self.state.enhancements.cancel_reset(),
+            EnhancementAction::ReloadConflict => {
+                self.state.enhancements.reload_conflict();
+            }
+            EnhancementAction::DiscardChanges => self.state.enhancements.discard_changes(),
+        }
+    }
+
     fn apply_settings_action(&mut self, action: SettingsAction) {
         match action {
             SettingsAction::Refresh => self.request_settings_refresh(),
@@ -1607,6 +1674,24 @@ impl NativeManagerApp {
         }
     }
 
+    fn extract_provider_common_config(&mut self) {
+        let Some((request_id, request)) = self.state.provider.begin_common_config_extraction()
+        else {
+            return;
+        };
+        if self
+            .provider_dispatcher
+            .request_extract_common_config(request_id, request)
+            .is_err()
+        {
+            self.provider_store_worker_stopped = true;
+            self.state.provider.apply_common_config_extraction_response(
+                request_id,
+                Err(ProviderSaveFailureKind::WorkerStopped),
+            );
+        }
+    }
+
     fn dispatch_confirmed_live_mutation(&mut self) {
         let Some((request_id, command)) = self.state.provider.confirm_live_mutation() else {
             return;
@@ -1656,6 +1741,9 @@ impl NativeManagerApp {
             if route == Route::Context {
                 self.load_context_workspace();
                 self.inspect_plugin_marketplaces();
+            }
+            if route == Route::Enhancements {
+                self.refresh_enhancements();
             }
             if route == Route::Sessions {
                 self.refresh_sessions_route();
@@ -1795,6 +1883,16 @@ impl NativeManagerApp {
                         self.complete_pending_provider_transition();
                     }
                 }
+                Ok(Some(StoreResponse::Extract { request_id, result })) => {
+                    let applied = matches!(&result, Ok(ProviderCommonConfigExtraction::Applied(_)));
+                    let accepted = self.state.provider.apply_common_config_extraction_response(
+                        request_id,
+                        result.map_err(|error| map_provider_save_failure(error.kind())),
+                    );
+                    if accepted && applied {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
                 Ok(None) => break,
                 Err(DispatchError::WorkerStopped) => {
                     if !self.provider_store_worker_stopped {
@@ -1811,6 +1909,17 @@ impl NativeManagerApp {
                         if self.state.provider.save.phase == OperationPhase::Running {
                             self.state.provider.apply_save_response(
                                 self.state.provider.save.current_request_id,
+                                Err(ProviderSaveFailureKind::WorkerStopped),
+                            );
+                        }
+                        if self.state.provider.common_config_extraction.phase
+                            == OperationPhase::Running
+                        {
+                            self.state.provider.apply_common_config_extraction_response(
+                                self.state
+                                    .provider
+                                    .common_config_extraction
+                                    .current_request_id,
                                 Err(ProviderSaveFailureKind::WorkerStopped),
                             );
                         }
@@ -2417,6 +2526,44 @@ impl NativeManagerApp {
         }
     }
 
+    fn reduce_enhancement_responses(&mut self) {
+        loop {
+            match self.enhancement_dispatcher.try_recv() {
+                Ok(Some(EnhancementResponse::Loaded { request_id, result })) => {
+                    let accepted = self.state.enhancements.apply_load_response(
+                        request_id,
+                        result.map_err(|error| error.kind().into()),
+                    );
+                    if accepted && self.state.enhancements.load_phase == EnhancementLoadPhase::Ready
+                    {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(EnhancementResponse::Saved { request_id, result })) => {
+                    let succeeded = result.is_ok();
+                    let accepted = self.state.enhancements.apply_save_response(
+                        request_id,
+                        result.map_err(|error| EnhancementFailure::from_service(&error)),
+                    );
+                    self.update_settings_timestamp(accepted && succeeded);
+                }
+                Ok(Some(EnhancementResponse::Reset { request_id, result })) => {
+                    let succeeded = result.is_ok();
+                    let accepted = self.state.enhancements.apply_reset_response(
+                        request_id,
+                        result.map_err(|error| EnhancementFailure::from_service(&error)),
+                    );
+                    self.update_settings_timestamp(accepted && succeeded);
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    self.state.enhancements.fail_running_operations();
+                    break;
+                }
+            }
+        }
+    }
+
     fn reduce_settings_responses(&mut self) {
         loop {
             match self.settings_dispatcher.try_recv() {
@@ -2602,6 +2749,9 @@ impl NativeManagerApp {
             }
             if self.state.route == Route::Scripts {
                 self.refresh_user_scripts_route();
+            }
+            if self.state.route == Route::Enhancements {
+                self.refresh_enhancements();
             }
             if self.state.route == Route::ZedRemote {
                 self.refresh_zed_remote();
@@ -3066,6 +3216,17 @@ impl NativeManagerApp {
             PerfScriptAction::SaveExtraArgsSettings => {
                 Some(ShellAction::Settings(SettingsAction::SaveExtraArgs))
             }
+            PerfScriptAction::NavigateEnhancements => {
+                Some(ShellAction::Navigate(Route::Enhancements))
+            }
+            PerfScriptAction::EditEnhancements => {
+                let mut settings = *self.state.enhancements.draft();
+                settings.enabled = false;
+                Some(ShellAction::Enhancements(EnhancementAction::Edit(settings)))
+            }
+            PerfScriptAction::SaveEnhancements => {
+                Some(ShellAction::Enhancements(EnhancementAction::Save))
+            }
         };
         if let Some(action) = shell_action {
             self.apply_action(ctx, action);
@@ -3084,6 +3245,7 @@ impl eframe::App for NativeManagerApp {
         self.reduce_user_script_responses();
         self.reduce_context_responses();
         self.reduce_marketplace_responses();
+        self.reduce_enhancement_responses();
         self.reduce_zed_remote_responses();
         self.reduce_maintenance_responses();
         self.reduce_settings_responses();
@@ -3108,6 +3270,7 @@ impl eframe::App for NativeManagerApp {
                 provider_import: Some(&self.state.provider_import),
                 environment: Some(&self.state.environment),
                 context: Some(&self.state.context),
+                enhancements: Some(&self.state.enhancements),
                 marketplace: Some(&self.state.marketplace),
                 sessions: Some(&self.state.sessions),
                 user_scripts: Some(&self.state.user_scripts),

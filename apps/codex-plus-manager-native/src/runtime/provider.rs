@@ -2,10 +2,11 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use codex_plus_manager_service::{
-    DiagnoseProviderProfile, FetchProviderModels, ProviderActivationError,
-    ProviderActivationSource, ProviderDoctorReport, ProviderError, ProviderLiveWorkspace,
-    ProviderModelsResult, ProviderMutationOutcome, ProviderNetworkError, ProviderSource,
-    ProviderTestResult, ProviderWorkspace, SaveProviderWorkspace, TestProviderProfile,
+    DiagnoseProviderProfile, ExtractProviderCommonConfig, FetchProviderModels,
+    ProviderActivationError, ProviderActivationSource, ProviderCommonConfigExtraction,
+    ProviderDoctorReport, ProviderError, ProviderLiveWorkspace, ProviderModelsResult,
+    ProviderMutationOutcome, ProviderNetworkError, ProviderSource, ProviderTestResult,
+    ProviderWorkspace, SaveProviderWorkspace, TestProviderProfile,
 };
 
 use super::{DispatchError, try_receive};
@@ -19,6 +20,10 @@ enum StoreRequest {
         request_id: u64,
         request: SaveProviderWorkspace,
     },
+    Extract {
+        request_id: u64,
+        request: ExtractProviderCommonConfig,
+    },
 }
 
 #[derive(Debug)]
@@ -31,12 +36,18 @@ pub enum StoreResponse {
         request_id: u64,
         result: Result<Arc<ProviderWorkspace>, ProviderError>,
     },
+    Extract {
+        request_id: u64,
+        result: Result<ProviderCommonConfigExtraction, ProviderError>,
+    },
 }
 
 impl StoreResponse {
     pub fn request_id(&self) -> u64 {
         match self {
-            Self::Load { request_id, .. } | Self::Save { request_id, .. } => *request_id,
+            Self::Load { request_id, .. }
+            | Self::Save { request_id, .. }
+            | Self::Extract { request_id, .. } => *request_id,
         }
     }
 }
@@ -145,8 +156,9 @@ impl ProviderDispatcher {
                                     StoreRequest::Load {
                                         request_id: next_id,
                                     } => request_id = request_id.max(next_id),
-                                    save @ StoreRequest::Save { .. } => {
-                                        pending = Some(save);
+                                    barrier @ (StoreRequest::Save { .. }
+                                    | StoreRequest::Extract { .. }) => {
+                                        pending = Some(barrier);
                                         break;
                                     }
                                 }
@@ -166,6 +178,16 @@ impl ProviderDispatcher {
                                 log_store_failure("save", error);
                             }
                             StoreResponse::Save { request_id, result }
+                        }
+                        StoreRequest::Extract {
+                            request_id,
+                            request,
+                        } => {
+                            let result = store_source.extract_common_config(request);
+                            if let Err(error) = &result {
+                                log_store_failure("extract_common_config", error);
+                            }
+                            StoreResponse::Extract { request_id, result }
                         }
                     };
                     if store_response_tx.send(response).is_err() {
@@ -279,6 +301,19 @@ impl ProviderDispatcher {
     ) -> Result<(), DispatchError> {
         self.store_requests
             .send(StoreRequest::Save {
+                request_id,
+                request,
+            })
+            .map_err(|_| DispatchError::WorkerStopped)
+    }
+
+    pub fn request_extract_common_config(
+        &self,
+        request_id: u64,
+        request: ExtractProviderCommonConfig,
+    ) -> Result<(), DispatchError> {
+        self.store_requests
+            .send(StoreRequest::Extract {
                 request_id,
                 request,
             })

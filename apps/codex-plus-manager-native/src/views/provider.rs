@@ -11,8 +11,9 @@ use eframe::egui;
 
 use crate::i18n::Locale;
 use crate::state::provider::{
-    GuardResolution, ListDirection, LiveMutationFailureKind, LiveMutationKind, OperationPhase,
-    ProviderEditorTab, ProviderLoadPhase, ProviderSaveFailureKind, ProviderViewState,
+    CommonConfigExtractionOutcome, GuardResolution, ListDirection, LiveMutationFailureKind,
+    LiveMutationKind, OperationPhase, ProviderEditorTab, ProviderLoadPhase,
+    ProviderSaveFailureKind, ProviderViewState,
 };
 use crate::{icons, theme};
 
@@ -93,6 +94,7 @@ pub enum ProviderAction {
     SetSecretRevealed(bool),
     SetConfigRevealed(bool),
     SetAuthRevealed(bool),
+    ExtractCommonConfig,
     Save,
     Discard,
     Test,
@@ -138,6 +140,7 @@ impl fmt::Debug for ProviderAction {
             Self::SetSecretRevealed(_) => "SetSecretRevealed",
             Self::SetConfigRevealed(_) => "SetConfigRevealed",
             Self::SetAuthRevealed(_) => "SetAuthRevealed",
+            Self::ExtractCommonConfig => "ExtractCommonConfig",
             Self::Save => "Save",
             Self::Discard => "Discard",
             Self::Test => "Test",
@@ -242,6 +245,14 @@ enum PText {
     DiscoverModels,
     MergeModels,
     ConfigToml,
+    ExtractCommonConfig,
+    ExtractingCommonConfig,
+    CommonConfigExtracted,
+    CommonConfigNoContent,
+    ExtractConflict,
+    ExtractValidation,
+    ExtractFailed,
+    ExtractWorkerStopped,
     AuthJson,
     Hidden,
     Reveal,
@@ -363,6 +374,23 @@ fn ptext(locale: Locale, key: PText) -> &'static str {
         PText::DiscoverModels => ("获取模型", "Discover models"),
         PText::MergeModels => ("合并已获取模型", "Merge discovered models"),
         PText::ConfigToml => ("config.toml 内容", "config.toml contents"),
+        PText::ExtractCommonConfig => ("提取公共配置", "Extract common config"),
+        PText::ExtractingCommonConfig => ("正在提取公共配置", "Extracting common config"),
+        PText::CommonConfigExtracted => ("公共配置已提取", "Common config extracted"),
+        PText::CommonConfigNoContent => ("没有可提取的公共配置", "No common config found"),
+        PText::ExtractConflict => (
+            "供应商配置已在磁盘上更改。请重新加载后再次提取。",
+            "Provider workspace changed on disk. Reload before extracting again.",
+        ),
+        PText::ExtractValidation => (
+            "无法提取公共配置。请检查当前 config.toml。",
+            "Common config extraction validation failed. Review the current config.toml.",
+        ),
+        PText::ExtractFailed => ("无法提取公共配置。", "Unable to extract common config."),
+        PText::ExtractWorkerStopped => (
+            "供应商后台服务已停止。",
+            "The provider background service has stopped.",
+        ),
         PText::AuthJson => ("auth.json 内容", "auth.json contents"),
         PText::Hidden => ("内容已隐藏", "Contents hidden"),
         PText::Reveal => ("显示内容", "Reveal contents"),
@@ -473,19 +501,22 @@ fn render_workspace(
     };
     let height = ui.available_height();
 
-    ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(list_width, height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| render_list(ui, state, locale, actions),
-        );
-        ui.separator();
-        let editor_width = ui.available_width();
-        ui.allocate_ui_with_layout(
-            egui::vec2(editor_width, height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| render_editor(ui, state, locale, actions),
-        );
+    let enabled = state.common_config_extraction.phase != OperationPhase::Running;
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(list_width, height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| render_list(ui, state, locale, actions),
+            );
+            ui.separator();
+            let editor_width = ui.available_width();
+            ui.allocate_ui_with_layout(
+                egui::vec2(editor_width, height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| render_editor(ui, state, locale, actions),
+            );
+        });
     });
 }
 
@@ -1298,6 +1329,50 @@ fn render_config(
     locale: Locale,
     actions: &mut Vec<ProviderAction>,
 ) {
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(
+                state.common_config_extraction.phase != OperationPhase::Running,
+                egui::Button::image_and_text(
+                    egui::Image::new(icons::file_code_2())
+                        .fit_to_exact_size(egui::vec2(16.0, 16.0)),
+                    ptext(locale, PText::ExtractCommonConfig),
+                ),
+            )
+            .clicked()
+        {
+            actions.push(ProviderAction::ExtractCommonConfig);
+        }
+        match (
+            state.common_config_extraction.phase,
+            state.common_config_extraction.outcome,
+        ) {
+            (OperationPhase::Running, _) => {
+                ui.spinner();
+                ui.label(ptext(locale, PText::ExtractingCommonConfig));
+            }
+            (OperationPhase::Ready, Some(CommonConfigExtractionOutcome::Applied)) => {
+                ui.colored_label(
+                    theme::SUCCESS_COLOR,
+                    ptext(locale, PText::CommonConfigExtracted),
+                );
+            }
+            (OperationPhase::Ready, Some(CommonConfigExtractionOutcome::NoContent)) => {
+                ui.label(ptext(locale, PText::CommonConfigNoContent));
+            }
+            _ => {}
+        }
+    });
+    if let Some(error) = state.common_config_extraction.error {
+        let message = match error {
+            ProviderSaveFailureKind::Conflict => PText::ExtractConflict,
+            ProviderSaveFailureKind::Validation => PText::ExtractValidation,
+            ProviderSaveFailureKind::SaveFailed => PText::ExtractFailed,
+            ProviderSaveFailureKind::WorkerStopped => PText::ExtractWorkerStopped,
+        };
+        ui.colored_label(theme::ERROR_COLOR, ptext(locale, message));
+    }
+    ui.separator();
     render_secret_document(
         ui,
         locale,

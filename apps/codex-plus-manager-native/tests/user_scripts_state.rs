@@ -49,6 +49,7 @@ fn market(revision: u8, integrity: ScriptIntegrity) -> Arc<ScriptMarketWorkspace
             author: "Fixture".to_string(),
             tags: vec!["ui".to_string()],
             source_host: "example.invalid".to_string(),
+            homepage: None,
             integrity,
             installed_version: Some("1".to_string()),
             update_available: true,

@@ -3,6 +3,7 @@ use codex_plus_manager_service::{
 };
 use eframe::egui;
 
+use crate::external_url::ExternalUrl;
 use crate::i18n::{Locale, TextKey, text};
 use crate::state::provider::OperationPhase;
 use crate::state::user_scripts::{
@@ -160,6 +161,19 @@ fn render_market_toolbar(
         if refresh.clicked() {
             actions.push(UserScriptAction::RefreshMarket);
         }
+        let repository =
+            ExternalUrl::parse("https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket")
+                .expect("built-in script market URL is valid");
+        if labeled_icon_button(
+            ui,
+            icons::folder_git_2(),
+            script_link_text(locale, ScriptLinkText::MarketRepository),
+            true,
+        )
+        .clicked()
+        {
+            repository.emit(ui.ctx());
+        }
         if state.market_phase == OperationPhase::Running {
             ui.spinner();
         }
@@ -199,7 +213,7 @@ fn render_market_list(
                     |ui| {
                         let metadata_width = 128.0;
                         let integrity_width = 122.0;
-                        let action_width = 104.0;
+                        let action_width = 136.0;
                         let gaps = ui.spacing().item_spacing.x * 3.0;
                         let details_width = (ui.available_width()
                             - metadata_width
@@ -288,6 +302,20 @@ fn render_market_list(
                                 {
                                     actions
                                         .push(UserScriptAction::RequestInstall(entry.id.clone()));
+                                }
+                                if let Some(homepage) = entry
+                                    .homepage
+                                    .as_ref()
+                                    .and_then(|value| ExternalUrl::parse(value.as_str()).ok())
+                                    && labeled_icon_button(
+                                        ui,
+                                        icons::folder_git_2(),
+                                        script_link_text(locale, ScriptLinkText::ProjectHomepage),
+                                        true,
+                                    )
+                                    .clicked()
+                                {
+                                    homepage.emit(ui.ctx());
                                 }
                             },
                         );
@@ -853,6 +881,21 @@ fn script_toggle_label(locale: Locale, name: &str) -> String {
     match locale {
         Locale::ZhCn => format!("{}: {name}", text(locale, TextKey::EnabledScripts)),
         Locale::En => format!("Enable script: {name}"),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ScriptLinkText {
+    MarketRepository,
+    ProjectHomepage,
+}
+
+fn script_link_text(locale: Locale, key: ScriptLinkText) -> &'static str {
+    match (locale, key) {
+        (Locale::ZhCn, ScriptLinkText::MarketRepository) => "脚本市场仓库",
+        (Locale::En, ScriptLinkText::MarketRepository) => "Script market repository",
+        (Locale::ZhCn, ScriptLinkText::ProjectHomepage) => "打开项目主页",
+        (Locale::En, ScriptLinkText::ProjectHomepage) => "Open project homepage",
     }
 }
 

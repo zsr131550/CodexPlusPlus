@@ -340,6 +340,9 @@ pub enum TextKey {
     Settings,
     SettingsSubtitle,
     SettingsLoadFailed,
+    Enhancements,
+    EnhancementsSubtitle,
+    EnhancementsLoadFailed,
 }
 
 impl TextKey {
@@ -669,6 +672,9 @@ impl TextKey {
         Self::Settings,
         Self::SettingsSubtitle,
         Self::SettingsLoadFailed,
+        Self::Enhancements,
+        Self::EnhancementsSubtitle,
+        Self::EnhancementsLoadFailed,
     ];
 }
 
@@ -1977,6 +1983,18 @@ const CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         zh: "设置加载失败",
         en: "Settings load failed",
+    },
+    CatalogEntry {
+        zh: "增强功能",
+        en: "Enhancements",
+    },
+    CatalogEntry {
+        zh: "管理 Codex 界面、会话与运行时增强",
+        en: "Manage Codex interface, conversation, and runtime enhancements",
+    },
+    CatalogEntry {
+        zh: "增强设置加载失败",
+        en: "Enhancement settings load failed",
     },
 ];
 

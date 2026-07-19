@@ -11,9 +11,10 @@ use codex_plus_manager_native::runtime::provider::{
 use codex_plus_manager_native::state::provider::{LiveMutationCommand, OperationToken};
 use codex_plus_manager_service::{
     ApplyActiveProvider, ClearLiveProvider, DiagnoseProviderProfile, DoctorOutcome,
-    DoctorRecommendation, FetchProviderModels, ProviderActivationError,
-    ProviderActivationErrorKind, ProviderActivationSource, ProviderActivationSummary,
-    ProviderDoctorReport, ProviderDocument, ProviderError, ProviderKind, ProviderLiveFiles,
+    DoctorRecommendation, ExtractProviderCommonConfig, FetchProviderModels,
+    ProviderActivationError, ProviderActivationErrorKind, ProviderActivationSource,
+    ProviderActivationSummary, ProviderCommonConfigExtraction, ProviderDoctorReport,
+    ProviderDocument, ProviderError, ProviderErrorKind, ProviderKind, ProviderLiveFiles,
     ProviderLiveRevision, ProviderLiveWorkspace, ProviderModelsResult, ProviderMutationGuard,
     ProviderMutationOutcome, ProviderNetworkError, ProviderNetworkFailureKind, ProviderProfile,
     ProviderRevision, ProviderRollbackOutcome, ProviderSource, ProviderTestOutcome,
@@ -69,6 +70,15 @@ fn save_request(revision: char) -> SaveProviderWorkspace {
     }
 }
 
+fn extraction_request(revision: char) -> ExtractProviderCommonConfig {
+    let workspace = workspace(revision);
+    ExtractProviderCommonConfig {
+        expected_revision: workspace.revision,
+        document: workspace.document,
+        profile_id: "relay-a".to_string(),
+    }
+}
+
 struct BlockingSource {
     calls: Arc<Mutex<Vec<&'static str>>>,
     load_started: mpsc::Sender<()>,
@@ -99,6 +109,16 @@ impl ProviderSource for BlockingSource {
         let mut saved = workspace('b');
         saved.document = request.document;
         Ok(saved)
+    }
+
+    fn extract_common_config(
+        &self,
+        request: ExtractProviderCommonConfig,
+    ) -> Result<ProviderCommonConfigExtraction, ProviderError> {
+        self.calls.lock().unwrap().push("extract");
+        let mut saved = workspace('c');
+        saved.document = request.document;
+        Ok(ProviderCommonConfigExtraction::Applied(Box::new(saved)))
     }
 
     fn test_profile(
@@ -164,7 +184,7 @@ fn receive_store(dispatcher: &ProviderDispatcher) -> StoreResponse {
 }
 
 #[test]
-fn store_lane_coalesces_adjacent_loads_but_never_reorders_or_coalesces_saves() {
+fn store_lane_coalesces_only_adjacent_loads_and_keeps_extract_and_save_fifo() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let (load_started_tx, load_started_rx) = mpsc::channel();
     let (load_release_tx, load_release_rx) = mpsc::channel();
@@ -191,11 +211,16 @@ fn store_lane_coalesces_adjacent_loads_but_never_reorders_or_coalesces_saves() {
         .unwrap();
     dispatcher.request_load(2).unwrap();
     dispatcher.request_load(3).unwrap();
-    dispatcher.request_save(4, save_request('a')).unwrap();
+    dispatcher
+        .request_extract_common_config(4, extraction_request('a'))
+        .unwrap();
     dispatcher.request_save(5, save_request('a')).unwrap();
+    dispatcher
+        .request_extract_common_config(6, extraction_request('a'))
+        .unwrap();
     load_release_tx.send(()).unwrap();
 
-    let responses = (0..4)
+    let responses = (0..5)
         .map(|_| receive_store(&dispatcher))
         .collect::<Vec<_>>();
     assert_eq!(
@@ -203,14 +228,17 @@ fn store_lane_coalesces_adjacent_loads_but_never_reorders_or_coalesces_saves() {
             .iter()
             .map(StoreResponse::request_id)
             .collect::<Vec<_>>(),
-        [1, 3, 4, 5]
+        [1, 3, 4, 5, 6]
     );
-    assert_eq!(&*calls.lock().unwrap(), &["load", "load", "save", "save"]);
+    assert_eq!(
+        &*calls.lock().unwrap(),
+        &["load", "load", "extract", "save", "extract"]
+    );
     let deadline = Instant::now() + Duration::from_secs(2);
-    while wake_count.load(Ordering::SeqCst) < 4 && Instant::now() < deadline {
+    while wake_count.load(Ordering::SeqCst) < 5 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(wake_count.load(Ordering::SeqCst), 4);
+    assert_eq!(wake_count.load(Ordering::SeqCst), 5);
 }
 
 #[test]
@@ -314,6 +342,12 @@ impl ProviderSource for ExitSource {
         _request: SaveProviderWorkspace,
     ) -> Result<ProviderWorkspace, ProviderError> {
         Ok(workspace('a'))
+    }
+    fn extract_common_config(
+        &self,
+        _request: ExtractProviderCommonConfig,
+    ) -> Result<ProviderCommonConfigExtraction, ProviderError> {
+        Ok(ProviderCommonConfigExtraction::NoContent)
     }
     fn test_profile(
         &self,
@@ -434,6 +468,12 @@ impl ProviderSource for FailingSource {
     ) -> Result<ProviderWorkspace, ProviderError> {
         Ok(workspace('a'))
     }
+    fn extract_common_config(
+        &self,
+        _request: ExtractProviderCommonConfig,
+    ) -> Result<ProviderCommonConfigExtraction, ProviderError> {
+        Err(ProviderErrorKind::Conflict.into())
+    }
     fn test_profile(
         &self,
         _request: TestProviderProfile,
@@ -468,6 +508,14 @@ fn worker_diagnostics_include_only_stable_sanitized_metadata() {
     codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
     let dispatcher = ProviderDispatcher::spawn(Arc::new(FailingSource), Arc::new(|| {}));
     dispatcher
+        .request_extract_common_config(8, extraction_request('a'))
+        .unwrap();
+    let extraction = receive_store(&dispatcher);
+    assert!(matches!(
+        extraction,
+        StoreResponse::Extract { result: Err(_), .. }
+    ));
+    dispatcher
         .request_test(
             token(9),
             TestProviderProfile {
@@ -488,6 +536,9 @@ fn worker_diagnostics_include_only_stable_sanitized_metadata() {
     codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
 
     assert!(log.contains("native_manager.provider_operation_failed"));
+    assert!(log.contains("native_manager.provider_store_failed"));
+    assert!(log.contains("extract_common_config"));
+    assert!(log.contains("Conflict"));
     assert!(log.contains("Timeout"));
     assert!(!log.contains(SECRET));
 }

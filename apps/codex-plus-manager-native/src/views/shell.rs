@@ -5,6 +5,7 @@ use eframe::egui;
 
 use crate::i18n::{Locale, TextKey, ThemeMode, text};
 use crate::state::context::ContextViewState;
+use crate::state::enhancements::{EnhancementLoadPhase, EnhancementViewState};
 use crate::state::environment::EnvironmentViewState;
 use crate::state::import::ImportViewState;
 use crate::state::maintenance::{MaintenanceLoadPhase, MaintenanceViewState};
@@ -19,8 +20,8 @@ use crate::state::{OverviewFailureKind, OverviewPhase, Route};
 use crate::{icons, theme};
 
 use super::{
-    about, context, environment, import, maintenance, marketplace, overview, provider, sessions,
-    settings, user_scripts, zed_remote,
+    about, context, enhancements, environment, import, maintenance, marketplace, overview,
+    provider, sessions, settings, user_scripts, zed_remote,
 };
 
 pub const SIDEBAR_WIDTH: f32 = 176.0;
@@ -41,6 +42,7 @@ pub enum ShellAction {
     UserScripts(user_scripts::UserScriptAction),
     Context(context::ContextAction),
     Marketplace(marketplace::MarketplaceAction),
+    Enhancements(enhancements::EnhancementAction),
     ZedRemote(zed_remote::ZedRemoteAction),
     Maintenance(maintenance::MaintenanceAction),
     Settings(settings::SettingsAction),
@@ -64,6 +66,7 @@ pub struct ShellFeatureStates<'a> {
     pub provider_import: Option<&'a ImportViewState>,
     pub environment: Option<&'a EnvironmentViewState>,
     pub context: Option<&'a ContextViewState>,
+    pub enhancements: Option<&'a EnhancementViewState>,
     pub marketplace: Option<&'a MarketplaceViewState>,
     pub sessions: Option<&'a SessionViewState>,
     pub user_scripts: Option<&'a UserScriptViewState>,
@@ -82,6 +85,7 @@ pub fn render_shell(
         provider_import: import_state,
         environment: environment_state,
         context: context_state,
+        enhancements: enhancements_state,
         marketplace: marketplace_state,
         sessions: sessions_state,
         user_scripts: user_script_state,
@@ -217,6 +221,17 @@ pub fn render_shell(
                     );
                 }
             }
+            Route::Enhancements => {
+                if let Some(state) = enhancements_state {
+                    let mut enhancement_actions = Vec::new();
+                    enhancements::render(ui, state, model.locale, &mut enhancement_actions);
+                    actions.extend(
+                        enhancement_actions
+                            .into_iter()
+                            .map(ShellAction::Enhancements),
+                    );
+                }
+            }
             Route::ZedRemote => {
                 if let Some(state) = zed_remote_state {
                     let mut zed_actions = Vec::new();
@@ -315,6 +330,14 @@ fn render_sidebar(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<S
         text(model.locale, TextKey::ToolsPlugins),
         model.route == Route::Context,
         Route::Context,
+        actions,
+    );
+    navigation_button(
+        ui,
+        icons::circle_check(),
+        text(model.locale, TextKey::Enhancements),
+        model.route == Route::Enhancements,
+        Route::Enhancements,
         actions,
     );
     navigation_button(
@@ -476,6 +499,11 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
                     text(model.locale, TextKey::AppName),
                     text(model.locale, TextKey::ToolsPlugins)
                 ),
+                Route::Enhancements => format!(
+                    "{} {}",
+                    text(model.locale, TextKey::AppName),
+                    text(model.locale, TextKey::Enhancements)
+                ),
                 Route::ZedRemote => format!(
                     "{} {}",
                     text(model.locale, TextKey::AppName),
@@ -505,6 +533,7 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
                 Route::Sessions => TextKey::SessionsSubtitle,
                 Route::Scripts => TextKey::ScriptsSubtitle,
                 Route::Context => TextKey::ToolsPluginsSubtitle,
+                Route::Enhancements => TextKey::EnhancementsSubtitle,
                 Route::ZedRemote => TextKey::ZedRemoteSubtitle,
                 Route::Maintenance => TextKey::MaintenanceSubtitle,
                 Route::Settings => TextKey::SettingsSubtitle,
@@ -553,6 +582,7 @@ fn render_status(ui: &mut egui::Ui, model: &ShellViewModel, states: ShellFeature
         provider: provider_state,
         environment: environment_state,
         context: context_state,
+        enhancements: enhancements_state,
         sessions: sessions_state,
         user_scripts: user_script_state,
         zed_remote: zed_remote_state,
@@ -620,6 +650,34 @@ fn render_status(ui: &mut egui::Ui, model: &ShellViewModel, states: ShellFeature
             OperationPhase::Ready => (text(model.locale, TextKey::Ready), theme::SUCCESS_COLOR),
             OperationPhase::Error => (
                 text(model.locale, TextKey::ContextLoadFailed),
+                theme::ERROR_COLOR,
+            ),
+        };
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                color,
+                format!("{}: {status}", text(model.locale, TextKey::Status)),
+            );
+            render_status_metadata(ui, model);
+        });
+        return;
+    }
+
+    if model.route == Route::Enhancements {
+        let phase = enhancements_state.map_or(EnhancementLoadPhase::Idle, |state| state.load_phase);
+        let (status, color) = match phase {
+            EnhancementLoadPhase::Idle | EnhancementLoadPhase::Loading => {
+                (text(model.locale, TextKey::Loading), theme::WARNING_COLOR)
+            }
+            EnhancementLoadPhase::Ready => {
+                (text(model.locale, TextKey::Ready), theme::SUCCESS_COLOR)
+            }
+            EnhancementLoadPhase::Refreshing => (
+                text(model.locale, TextKey::Refreshing),
+                theme::WARNING_COLOR,
+            ),
+            EnhancementLoadPhase::Error => (
+                text(model.locale, TextKey::EnhancementsLoadFailed),
                 theme::ERROR_COLOR,
             ),
         };
