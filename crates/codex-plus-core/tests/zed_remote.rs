@@ -1,7 +1,9 @@
 use codex_plus_core::zed_remote::{
-    self, SshTarget, ZedOpenStrategy, ZedRemoteError, ZedRemoteProjectSource,
+    self, SshTarget, ZedOpenStrategy, ZedRemoteError, ZedRemoteProject, ZedRemoteProjectSource,
+    ZedRemoteRegistryStore,
 };
 use serde_json::json;
+use std::sync::{Arc, Barrier};
 
 #[test]
 fn build_zed_remote_url_with_user_host_port_and_encoded_path() {
@@ -130,6 +132,75 @@ fn launch_args_for_default_strategy_are_plain_url() {
 }
 
 #[test]
+fn launch_plan_contains_exact_url_and_strategy_but_debug_is_redacted() {
+    let plan = zed_remote::prepare_zed_remote_launch(
+        &SshTarget {
+            user: "zed-user-sentinel".to_string(),
+            host: "host-sentinel.example.test".to_string(),
+            port: Some(2222),
+        },
+        "/workspace-sentinel/a b",
+        ZedOpenStrategy::NewWindow,
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.url(),
+        "ssh://zed-user-sentinel@host-sentinel.example.test:2222/workspace-sentinel/a%20b"
+    );
+    assert_eq!(plan.strategy(), ZedOpenStrategy::NewWindow);
+    assert_eq!(plan.args(), vec!["-n".to_string(), plan.url().to_string()]);
+    let debug = format!("{plan:?}");
+    assert!(debug.contains("NewWindow"));
+    assert!(!debug.contains("sentinel"));
+    assert!(!debug.contains("workspace"));
+    assert!(!debug.contains("ssh://"));
+}
+
+#[test]
+fn zed_domain_debug_output_omits_operational_metadata() {
+    let project = ZedRemoteProject {
+        id: "id-sentinel".to_string(),
+        label: "label-sentinel".to_string(),
+        host_id: "host-id-sentinel".to_string(),
+        ssh: SshTarget {
+            user: "user-sentinel".to_string(),
+            host: "host-sentinel.example.test".to_string(),
+            port: Some(2222),
+        },
+        path: "/path-sentinel/project".to_string(),
+        url: "ssh://url-sentinel/path".to_string(),
+        source: ZedRemoteProjectSource::Recent,
+        last_opened_at_ms: Some(42),
+        is_current: false,
+    };
+
+    let target_debug = format!("{:?}", project.ssh);
+    let project_debug = format!("{project:?}");
+    assert!(!target_debug.contains("sentinel"));
+    assert!(!target_debug.contains("2222"));
+    assert!(project_debug.contains("Recent"));
+    assert!(project_debug.contains("port_present"));
+    assert!(project_debug.contains("last_opened_present"));
+    assert!(!project_debug.contains("sentinel"));
+    assert!(!project_debug.contains("ssh://"));
+}
+
+#[test]
+fn typed_zed_availability_contains_no_executable_paths() {
+    let availability = zed_remote::zed_availability();
+
+    assert_eq!(
+        availability.platform_supported,
+        cfg!(target_os = "macos") || cfg!(target_os = "windows") || cfg!(target_os = "linux")
+    );
+    let debug = format!("{availability:?}");
+    assert!(debug.contains("platform_supported"));
+    assert!(!debug.contains("zed.exe"));
+    assert!(!debug.contains("Zed.app"));
+}
+
+#[test]
 fn target_from_payload_splits_codex_managed_authority() {
     let target =
         zed_remote::target_from_payload(&json!({"ssh": {"host": "longnv@192.168.100.31"}}))
@@ -143,6 +214,262 @@ fn target_from_payload_splits_codex_managed_authority() {
             port: None,
         }
     );
+}
+
+#[test]
+fn registry_revision_distinguishes_missing_empty_and_changed_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("recent.json");
+    let store = ZedRemoteRegistryStore::new(path.clone());
+
+    let missing = store.inspect().unwrap();
+    std::fs::write(&path, br#"{"projects":[]}"#).unwrap();
+    let empty = store.inspect().unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "projects": [{
+                "id": "zed-remote-project:fixture",
+                "label": "fixture",
+                "hostId": "fixture-host",
+                "ssh": {"user": "alice", "host": "example.test", "port": 2222},
+                "path": "/srv/fixture",
+                "url": "ssh://alice@example.test:2222/srv/fixture",
+                "source": "recent",
+                "lastOpenedAtMs": 42,
+                "isCurrent": false
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let populated = store.inspect().unwrap();
+
+    assert_ne!(missing.revision, empty.revision);
+    assert_ne!(empty.revision, populated.revision);
+    assert!(missing.projects.is_empty());
+    assert!(empty.projects.is_empty());
+    assert_eq!(populated.projects.len(), 1);
+}
+
+#[test]
+fn malformed_registry_is_reported_and_never_overwritten() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("recent.json");
+    std::fs::write(&path, b"not json").unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let error = ZedRemoteRegistryStore::new(path.clone())
+        .inspect()
+        .unwrap_err();
+
+    assert!(matches!(error, ZedRemoteError::RegistryParse(_)));
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn discovery_uses_the_supplied_registry_snapshot_without_reopening_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("recent.json");
+    let original = recent_project("original-sentinel", 20);
+    let replacement = recent_project("replacement-sentinel", 30);
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({ "projects": [original.clone()] })).unwrap(),
+    )
+    .unwrap();
+    let snapshot = ZedRemoteRegistryStore::new(path.clone()).inspect().unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({ "projects": [replacement.clone()] })).unwrap(),
+    )
+    .unwrap();
+
+    let projects = zed_remote::list_zed_remote_projects_from_sources(
+        None,
+        &json!({}),
+        &snapshot.projects,
+        None,
+    )
+    .unwrap();
+
+    assert!(projects.iter().any(|project| project.id == original.id));
+    assert!(projects.iter().all(|project| project.id != replacement.id));
+}
+
+#[test]
+fn remember_and_forget_reject_stale_revision_and_preserve_unknown_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("recent.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "custom": {"keep": true},
+            "projects": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let store = ZedRemoteRegistryStore::new(path.clone());
+    let initial = store.inspect().unwrap();
+    let project = recent_project("a", 20);
+
+    let remembered = store
+        .remember_if_revision(&initial.revision, project.clone())
+        .unwrap();
+    let bytes_after_remember = std::fs::read(&path).unwrap();
+    let stale = store.forget_if_revision(&initial.revision, &project.id);
+
+    assert_eq!(remembered.affected, 1);
+    assert!(matches!(stale, Err(ZedRemoteError::RegistryConflict)));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes_after_remember);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["custom"],
+        json!({"keep": true})
+    );
+
+    let current = store.inspect().unwrap();
+    let forgotten = store
+        .forget_if_revision(&current.revision, &project.id)
+        .unwrap();
+    assert_eq!(forgotten.affected, 1);
+    assert!(forgotten.snapshot.projects.is_empty());
+}
+
+#[test]
+fn registry_store_keeps_newest_unique_hundred_and_forgets_exact_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("recent.json");
+    let projects = (0..101)
+        .map(|index| recent_project(&format!("p{index}"), index))
+        .collect::<Vec<_>>();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({ "projects": projects })).unwrap(),
+    )
+    .unwrap();
+    let store = ZedRemoteRegistryStore::new(path);
+
+    let initial = store.inspect().unwrap();
+    let newest = recent_project("newest", 500);
+    let remembered = store
+        .remember_if_revision(&initial.revision, newest.clone())
+        .unwrap();
+    assert_eq!(remembered.snapshot.projects.len(), 100);
+    assert_eq!(remembered.snapshot.projects[0].id, newest.id);
+    assert!(
+        remembered
+            .snapshot
+            .projects
+            .windows(2)
+            .all(|items| items[0].last_opened_at_ms >= items[1].last_opened_at_ms)
+    );
+
+    let duplicate = recent_project("newest", 600);
+    let remembered_again = store
+        .remember_if_revision(&remembered.snapshot.revision, duplicate.clone())
+        .unwrap();
+    assert_eq!(
+        remembered_again
+            .snapshot
+            .projects
+            .iter()
+            .filter(|project| project.id == duplicate.id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        remembered_again.snapshot.projects[0].last_opened_at_ms,
+        Some(600)
+    );
+
+    let exact = remembered_again.snapshot.projects[1].id.clone();
+    let mut similar_project = recent_project("similar", 550);
+    similar_project.id = format!("{exact}-suffix");
+    let with_similar = store
+        .remember_if_revision(&remembered_again.snapshot.revision, similar_project.clone())
+        .unwrap();
+    let forgotten = store
+        .forget_if_revision(&with_similar.snapshot.revision, &exact)
+        .unwrap();
+    assert_eq!(forgotten.affected, 1);
+    assert!(
+        forgotten
+            .snapshot
+            .projects
+            .iter()
+            .all(|project| project.id != exact)
+    );
+    assert!(
+        forgotten
+            .snapshot
+            .projects
+            .iter()
+            .any(|project| project.id == similar_project.id)
+    );
+}
+
+#[test]
+fn registry_store_serializes_two_instances_without_lost_updates() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("recent.json");
+    let first_store = ZedRemoteRegistryStore::new(path.clone());
+    let second_store = ZedRemoteRegistryStore::new(path.clone());
+    let revision = first_store.inspect().unwrap().revision;
+    let barrier = Arc::new(Barrier::new(3));
+
+    let first = {
+        let barrier = Arc::clone(&barrier);
+        let revision = revision.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            first_store.remember_if_revision(&revision, recent_project("a", 20))
+        })
+    };
+    let second = {
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            second_store.remember_if_revision(&revision, recent_project("b", 30))
+        })
+    };
+    barrier.wait();
+
+    let outcomes = [first.join().unwrap(), second.join().unwrap()];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, Err(ZedRemoteError::RegistryConflict)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        ZedRemoteRegistryStore::new(path)
+            .inspect()
+            .unwrap()
+            .projects
+            .len(),
+        1
+    );
+}
+
+fn recent_project(suffix: &str, last_opened_at_ms: i64) -> ZedRemoteProject {
+    ZedRemoteProject {
+        id: format!("zed-remote-project:{suffix}"),
+        label: format!("project-{suffix}"),
+        host_id: format!("host-{suffix}"),
+        ssh: SshTarget {
+            user: "alice".to_string(),
+            host: format!("{suffix}.example.test"),
+            port: Some(2222),
+        },
+        path: format!("/srv/{suffix}"),
+        url: format!("ssh://alice@{suffix}.example.test:2222/srv/{suffix}"),
+        source: ZedRemoteProjectSource::Recent,
+        last_opened_at_ms: Some(last_opened_at_ms),
+        is_current: false,
+    }
 }
 
 #[test]

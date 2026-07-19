@@ -1,10 +1,12 @@
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 use super::{
     SshTarget, ZedRemoteError, build_zed_remote_url, codex_global_state_path,
@@ -14,7 +16,205 @@ use super::{
 
 const REGISTRY_FILE: &str = "zed_remote_projects.json";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct ZedRemoteRegistryRevision([u8; 32]);
+
+impl ZedRemoteRegistryRevision {
+    /// Construct an opaque revision for callers that need to retain a test or
+    /// persisted coordination token without inspecting its bytes.
+    pub fn from_digest(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
+}
+
+impl fmt::Debug for ZedRemoteRegistryRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ZedRemoteRegistryRevision([redacted])")
+    }
+}
+
+#[derive(Clone)]
+pub struct ZedRemoteRegistrySnapshot {
+    pub revision: ZedRemoteRegistryRevision,
+    pub projects: Vec<ZedRemoteProject>,
+}
+
+impl fmt::Debug for ZedRemoteRegistrySnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ZedRemoteRegistrySnapshot")
+            .field("revision", &self.revision)
+            .field("project_count", &self.projects.len())
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct ZedRemoteRegistryMutation {
+    pub snapshot: ZedRemoteRegistrySnapshot,
+    pub affected: usize,
+}
+
+impl fmt::Debug for ZedRemoteRegistryMutation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ZedRemoteRegistryMutation")
+            .field("snapshot", &self.snapshot)
+            .field("affected", &self.affected)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct ZedRemoteRegistryStore {
+    path: PathBuf,
+}
+
+impl fmt::Debug for ZedRemoteRegistryStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ZedRemoteRegistryStore")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ZedRemoteRegistryStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn inspect(&self) -> Result<ZedRemoteRegistrySnapshot, ZedRemoteError> {
+        let data = read_registry_bytes(&self.path)?;
+        let document = parse_registry_document(data.as_deref())?;
+        Ok(ZedRemoteRegistrySnapshot {
+            revision: registry_revision(data.as_deref()),
+            projects: document.projects,
+        })
+    }
+
+    pub fn remember_if_revision(
+        &self,
+        expected: &ZedRemoteRegistryRevision,
+        mut project: ZedRemoteProject,
+    ) -> Result<ZedRemoteRegistryMutation, ZedRemoteError> {
+        project.source = ZedRemoteProjectSource::Recent;
+        project.is_current = false;
+        let (affected, snapshot) = self.mutate_if_revision(expected, move |projects| {
+            push_project(projects, project);
+            projects.sort_by(|left, right| {
+                right
+                    .last_opened_at_ms
+                    .unwrap_or_default()
+                    .cmp(&left.last_opened_at_ms.unwrap_or_default())
+            });
+            projects.truncate(100);
+            Ok(1)
+        })?;
+        Ok(ZedRemoteRegistryMutation { snapshot, affected })
+    }
+
+    pub fn forget_if_revision(
+        &self,
+        expected: &ZedRemoteRegistryRevision,
+        project_id: &str,
+    ) -> Result<ZedRemoteRegistryMutation, ZedRemoteError> {
+        let project_id = project_id.to_string();
+        let (affected, snapshot) = self.mutate_if_revision(expected, move |projects| {
+            let before = projects.len();
+            projects.retain(|project| project.id != project_id);
+            Ok(before.saturating_sub(projects.len()))
+        })?;
+        Ok(ZedRemoteRegistryMutation { snapshot, affected })
+    }
+
+    fn mutate_if_revision<T>(
+        &self,
+        expected: &ZedRemoteRegistryRevision,
+        mutation: impl FnOnce(&mut Vec<ZedRemoteProject>) -> Result<T, ZedRemoteError>,
+    ) -> Result<(T, ZedRemoteRegistrySnapshot), ZedRemoteError> {
+        let lock_path = crate::coordination_lock::sidecar_path(&self.path);
+        let _lock = crate::coordination_lock::acquire_exclusive(&lock_path)
+            .map_err(ZedRemoteError::RegistryLock)?;
+        let data = read_registry_bytes(&self.path)?;
+        if registry_revision(data.as_deref()) != *expected {
+            return Err(ZedRemoteError::RegistryConflict);
+        }
+
+        let mut document = parse_registry_document(data.as_deref())?;
+        let result = mutation(&mut document.projects)?;
+        document.root.insert(
+            "projects".to_string(),
+            serde_json::to_value(&document.projects).map_err(ZedRemoteError::RegistryParse)?,
+        );
+        let bytes = serde_json::to_vec_pretty(&Value::Object(document.root))
+            .map_err(ZedRemoteError::RegistryParse)?;
+        crate::settings::atomic_write(&self.path, &bytes)
+            .map_err(ZedRemoteError::RegistryCommit)?;
+        let snapshot = self.inspect()?;
+        Ok((result, snapshot))
+    }
+}
+
+struct ZedRemoteRegistryDocument {
+    root: Map<String, Value>,
+    projects: Vec<ZedRemoteProject>,
+}
+
+fn read_registry_bytes(path: &Path) -> Result<Option<Vec<u8>>, ZedRemoteError> {
+    match fs::read(path) {
+        Ok(data) => Ok(Some(data)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ZedRemoteError::RegistryRead(error)),
+    }
+}
+
+fn parse_registry_document(
+    data: Option<&[u8]>,
+) -> Result<ZedRemoteRegistryDocument, ZedRemoteError> {
+    let Some(data) = data else {
+        return Ok(ZedRemoteRegistryDocument {
+            root: Map::new(),
+            projects: Vec::new(),
+        });
+    };
+    if data.iter().all(u8::is_ascii_whitespace) {
+        return Ok(ZedRemoteRegistryDocument {
+            root: Map::new(),
+            projects: Vec::new(),
+        });
+    }
+    if let Ok(projects) = serde_json::from_slice::<Vec<ZedRemoteProject>>(data) {
+        return Ok(ZedRemoteRegistryDocument {
+            root: Map::new(),
+            projects,
+        });
+    }
+
+    let root = serde_json::from_slice::<Map<String, Value>>(data)
+        .map_err(ZedRemoteError::RegistryParse)?;
+    let projects = root
+        .get("projects")
+        .cloned()
+        .map(serde_json::from_value::<Vec<ZedRemoteProject>>)
+        .transpose()
+        .map_err(ZedRemoteError::RegistryParse)?
+        .unwrap_or_default();
+    Ok(ZedRemoteRegistryDocument { root, projects })
+}
+
+fn registry_revision(data: Option<&[u8]>) -> ZedRemoteRegistryRevision {
+    let mut hasher = Sha256::new();
+    match data {
+        Some(data) => {
+            hasher.update(b"present\0");
+            hasher.update(data);
+        }
+        None => hasher.update(b"missing\0"),
+    }
+    ZedRemoteRegistryRevision(hasher.finalize().into())
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ZedRemoteProject {
     pub id: String,
@@ -28,6 +228,18 @@ pub struct ZedRemoteProject {
     pub is_current: bool,
 }
 
+impl fmt::Debug for ZedRemoteProject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ZedRemoteProject")
+            .field("source", &self.source)
+            .field("is_current", &self.is_current)
+            .field("port_present", &self.ssh.port.is_some())
+            .field("last_opened_present", &self.last_opened_at_ms.is_some())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ZedRemoteProjectSource {
@@ -36,13 +248,6 @@ pub enum ZedRemoteProjectSource {
     ThreadWorkspaceHint,
     SqliteThreadCwd,
     Recent,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ZedRemoteProjectRegistry {
-    #[serde(default)]
-    projects: Vec<ZedRemoteProject>,
 }
 
 pub fn list_zed_remote_projects_response(payload: &Value) -> Value {
@@ -58,12 +263,15 @@ pub fn list_zed_remote_projects_response(payload: &Value) -> Value {
             return json!({"status": "failed", "message": ZedRemoteError::StateRead(error).to_string()});
         }
     };
-    let result = list_zed_remote_projects_from_optional_state(
-        state.as_ref(),
-        payload,
-        Some(&default_zed_remote_project_registry_path()),
-        Some(&crate::codex_sqlite::codex_session_db_path()),
-    );
+    let registry = ZedRemoteRegistryStore::new(default_zed_remote_project_registry_path());
+    let result = registry.inspect().and_then(|snapshot| {
+        list_zed_remote_projects_from_sources(
+            state.as_ref(),
+            payload,
+            &snapshot.projects,
+            Some(&crate::codex_sqlite::codex_session_db_path()),
+        )
+    });
     match result {
         Ok(projects) => json!({
             "status": "ok",
@@ -79,31 +287,53 @@ pub fn list_zed_remote_projects_from_state(
     registry_path: Option<&Path>,
     sqlite_state_path: Option<&Path>,
 ) -> Result<Vec<ZedRemoteProject>, ZedRemoteError> {
-    list_zed_remote_projects_from_optional_state(
+    let registry_path = registry_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_zed_remote_project_registry_path);
+    let snapshot = ZedRemoteRegistryStore::new(registry_path).inspect()?;
+    list_zed_remote_projects_from_sources(
         Some(state),
         payload,
-        registry_path,
+        &snapshot.projects,
         sqlite_state_path,
     )
 }
 
-fn list_zed_remote_projects_from_optional_state(
+pub fn list_zed_remote_projects_from_sources(
     state: Option<&Value>,
     payload: &Value,
-    registry_path: Option<&Path>,
+    registry_projects: &[ZedRemoteProject],
     sqlite_state_path: Option<&Path>,
+) -> Result<Vec<ZedRemoteProject>, ZedRemoteError> {
+    let sqlite_paths = sqlite_state_path
+        .map(|path| vec![path.to_path_buf()])
+        .unwrap_or_else(|| {
+            crate::codex_sqlite::codex_session_db_paths_from_home(
+                &crate::codex_sqlite::default_codex_home_dir(),
+            )
+        });
+    list_zed_remote_projects_from_sources_with_sqlite_paths(
+        state,
+        payload,
+        registry_projects,
+        &sqlite_paths,
+    )
+}
+
+pub fn list_zed_remote_projects_from_sources_with_sqlite_paths(
+    state: Option<&Value>,
+    payload: &Value,
+    registry_projects: &[ZedRemoteProject],
+    sqlite_paths: &[PathBuf],
 ) -> Result<Vec<ZedRemoteProject>, ZedRemoteError> {
     let mut projects = Vec::new();
     if let Some(state) = state {
         collect_current_project(state, payload, &mut projects);
         collect_codex_remote_projects(state, &mut projects);
         collect_thread_workspace_hints(state, &mut projects);
-        collect_sqlite_thread_cwds(state, sqlite_state_path, &mut projects);
+        collect_sqlite_thread_cwds(state, sqlite_paths, &mut projects);
     }
-    let registry_path = registry_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(default_zed_remote_project_registry_path);
-    for mut project in read_registry_projects(&registry_path)? {
+    for mut project in registry_projects.iter().cloned() {
         project.source = ZedRemoteProjectSource::Recent;
         project.is_current = false;
         push_project(&mut projects, project);
@@ -142,19 +372,10 @@ pub(super) fn remember_zed_remote_project(
         label,
         ZedRemoteProjectSource::Recent,
         Some(now_ms()),
-        false,
     );
-    let registry_path = default_zed_remote_project_registry_path();
-    let mut projects = read_registry_projects(&registry_path)?;
-    push_project(&mut projects, project.clone());
-    projects.sort_by(|left, right| {
-        right
-            .last_opened_at_ms
-            .unwrap_or_default()
-            .cmp(&left.last_opened_at_ms.unwrap_or_default())
-    });
-    projects.truncate(100);
-    write_registry_projects(&registry_path, &projects)?;
+    let store = ZedRemoteRegistryStore::new(default_zed_remote_project_registry_path());
+    let snapshot = store.inspect()?;
+    store.remember_if_revision(&snapshot.revision, project.clone())?;
     Ok(project)
 }
 
@@ -174,13 +395,11 @@ fn forget_zed_remote_project(payload: &Value) -> Result<usize, ZedRemoteError> {
     } else {
         explicit_id
     };
-    let registry_path = default_zed_remote_project_registry_path();
-    let mut projects = read_registry_projects(&registry_path)?;
-    let before = projects.len();
-    projects.retain(|project| project.id != target_id);
-    let removed = before.saturating_sub(projects.len());
-    write_registry_projects(&registry_path, &projects)?;
-    Ok(removed)
+    let store = ZedRemoteRegistryStore::new(default_zed_remote_project_registry_path());
+    let snapshot = store.inspect()?;
+    store
+        .forget_if_revision(&snapshot.revision, &target_id)
+        .map(|mutation| mutation.affected)
 }
 
 fn collect_current_project(state: &Value, payload: &Value, projects: &mut Vec<ZedRemoteProject>) {
@@ -226,7 +445,6 @@ fn collect_current_project(state: &Value, payload: &Value, projects: &mut Vec<Ze
         String::new(),
         ZedRemoteProjectSource::CurrentThread,
         None,
-        true,
     );
     push_project(projects, project);
 }
@@ -257,7 +475,6 @@ fn collect_codex_remote_projects(state: &Value, projects: &mut Vec<ZedRemoteProj
             label,
             ZedRemoteProjectSource::CodexRemoteProject,
             None,
-            false,
         );
         push_project(projects, project);
     }
@@ -294,7 +511,6 @@ fn collect_thread_workspace_hints(state: &Value, projects: &mut Vec<ZedRemotePro
             String::new(),
             ZedRemoteProjectSource::ThreadWorkspaceHint,
             None,
-            false,
         );
         push_project(projects, project);
     }
@@ -302,19 +518,12 @@ fn collect_thread_workspace_hints(state: &Value, projects: &mut Vec<ZedRemotePro
 
 fn collect_sqlite_thread_cwds(
     state: &Value,
-    sqlite_state_path: Option<&Path>,
+    paths: &[PathBuf],
     projects: &mut Vec<ZedRemoteProject>,
 ) {
-    let paths = sqlite_state_path
-        .map(|path| vec![path.to_path_buf()])
-        .unwrap_or_else(|| {
-            crate::codex_sqlite::codex_session_db_paths_from_home(
-                &crate::codex_sqlite::default_codex_home_dir(),
-            )
-        });
     let mut cwds = Vec::new();
     for path in paths {
-        if let Ok(mut items) = sqlite_thread_cwds(&path) {
+        if let Ok(mut items) = sqlite_thread_cwds(path) {
             cwds.append(&mut items);
         }
     }
@@ -340,41 +549,9 @@ fn collect_sqlite_thread_cwds(
             String::new(),
             ZedRemoteProjectSource::SqliteThreadCwd,
             None,
-            false,
         );
         push_project(projects, project);
     }
-}
-
-fn read_registry_projects(path: &Path) -> Result<Vec<ZedRemoteProject>, ZedRemoteError> {
-    let data = match fs::read_to_string(path) {
-        Ok(data) => data,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(ZedRemoteError::RegistryRead(error)),
-    };
-    if data.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    if let Ok(projects) = serde_json::from_str::<Vec<ZedRemoteProject>>(&data) {
-        return Ok(projects);
-    }
-    serde_json::from_str::<ZedRemoteProjectRegistry>(&data)
-        .map(|registry| registry.projects)
-        .map_err(ZedRemoteError::RegistryParse)
-}
-
-fn write_registry_projects(
-    path: &Path,
-    projects: &[ZedRemoteProject],
-) -> Result<(), ZedRemoteError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(ZedRemoteError::RegistryWrite)?;
-    }
-    let registry = ZedRemoteProjectRegistry {
-        projects: projects.to_vec(),
-    };
-    let data = serde_json::to_vec_pretty(&registry).map_err(ZedRemoteError::RegistryParse)?;
-    fs::write(path, data).map_err(ZedRemoteError::RegistryWrite)
 }
 
 fn sqlite_thread_cwds(path: &Path) -> anyhow::Result<Vec<String>> {
@@ -435,9 +612,9 @@ fn project_from_parts(
     label: String,
     source: ZedRemoteProjectSource,
     last_opened_at_ms: Option<i64>,
-    is_current: bool,
 ) -> ZedRemoteProject {
     let label = label.or_else_nonempty(|| label_from_path(path));
+    let is_current = source == ZedRemoteProjectSource::CurrentThread;
     ZedRemoteProject {
         id: project_id(&target, path),
         label,

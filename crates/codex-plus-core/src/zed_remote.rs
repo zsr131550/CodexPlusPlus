@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt;
 use std::fs;
 use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
@@ -22,29 +23,72 @@ pub enum ZedRemoteError {
     RegistryParse(#[source] serde_json::Error),
     #[error("Cannot write Codex++ Zed remote project registry")]
     RegistryWrite(#[source] std::io::Error),
+    #[error("Cannot lock Codex++ Zed remote project registry")]
+    RegistryLock(#[source] anyhow::Error),
+    #[error("Cannot commit Codex++ Zed remote project registry")]
+    RegistryCommit(#[source] anyhow::Error),
+    #[error("Codex++ Zed remote project registry changed")]
+    RegistryConflict,
     #[error("Failed to launch Zed: {0}")]
     Launch(std::io::Error),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshTarget {
     pub user: String,
     pub host: String,
     pub port: Option<u16>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl fmt::Debug for SshTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SshTarget([redacted])")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum ZedOpenStrategy {
+    #[default]
     AddToFocusedWorkspace,
     ReuseWindow,
     NewWindow,
     Default,
 }
 
-impl Default for ZedOpenStrategy {
-    fn default() -> Self {
-        Self::AddToFocusedWorkspace
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZedAvailability {
+    pub platform_supported: bool,
+    pub cli_found: bool,
+    pub app_found: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ZedLaunchPlan {
+    url: String,
+    strategy: ZedOpenStrategy,
+}
+
+impl ZedLaunchPlan {
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn strategy(&self) -> ZedOpenStrategy {
+        self.strategy
+    }
+
+    pub fn args(&self) -> Vec<String> {
+        zed_cli_args_for_strategy(self.strategy, &self.url)
+    }
+}
+
+impl fmt::Debug for ZedLaunchPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ZedLaunchPlan")
+            .field("strategy", &self.strategy)
+            .finish_non_exhaustive()
     }
 }
 
@@ -72,6 +116,16 @@ pub fn find_zed_cli_path() -> String {
     find_executable_on_path("zed")
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+pub fn zed_availability() -> ZedAvailability {
+    ZedAvailability {
+        platform_supported: cfg!(target_os = "macos")
+            || cfg!(target_os = "windows")
+            || cfg!(target_os = "linux"),
+        cli_found: !find_zed_cli_path().is_empty(),
+        app_found: find_zed_app_path().is_some(),
+    }
 }
 
 pub fn zed_remote_status() -> Value {
@@ -310,6 +364,17 @@ pub fn zed_cli_args_for_strategy(strategy: ZedOpenStrategy, url: &str) -> Vec<St
     args
 }
 
+pub fn prepare_zed_remote_launch(
+    target: &SshTarget,
+    path: &str,
+    strategy: ZedOpenStrategy,
+) -> Result<ZedLaunchPlan, ZedRemoteError> {
+    Ok(ZedLaunchPlan {
+        url: build_zed_remote_url(target, path)?,
+        strategy,
+    })
+}
+
 pub fn zed_open_strategy_from_payload(payload: &Value) -> ZedOpenStrategy {
     payload
         .get("strategy")
@@ -321,24 +386,31 @@ pub fn launch_zed_url_with_strategy(
     url: &str,
     strategy: ZedOpenStrategy,
 ) -> Result<(), ZedRemoteError> {
+    launch_zed_remote_plan(&ZedLaunchPlan {
+        url: url.to_string(),
+        strategy,
+    })
+}
+
+pub fn launch_zed_remote_plan(plan: &ZedLaunchPlan) -> Result<(), ZedRemoteError> {
     let cli_path = find_zed_cli_path();
     if !cli_path.is_empty() {
         Command::new(cli_path)
-            .args(zed_cli_args_for_strategy(strategy, url))
+            .args(plan.args())
             .spawn()
             .map_err(ZedRemoteError::Launch)?;
         return Ok(());
     }
-    if cfg!(target_os = "macos") {
-        if let Some(app_path) = find_zed_app_path() {
-            Command::new("open")
-                .arg("-a")
-                .arg(app_path)
-                .arg(url)
-                .spawn()
-                .map_err(ZedRemoteError::Launch)?;
-            return Ok(());
-        }
+    if cfg!(target_os = "macos")
+        && let Some(app_path) = find_zed_app_path()
+    {
+        Command::new("open")
+            .arg("-a")
+            .arg(app_path)
+            .arg(plan.url())
+            .spawn()
+            .map_err(ZedRemoteError::Launch)?;
+        return Ok(());
     }
     Err(ZedRemoteError::Validation(
         "Zed CLI is not installed or not available on PATH",
@@ -426,7 +498,9 @@ pub use fallback::{
     workspace_root_from_sqlite,
 };
 pub use registry::{
-    ZedRemoteProject, ZedRemoteProjectSource, forget_zed_remote_project_response,
+    ZedRemoteProject, ZedRemoteProjectSource, ZedRemoteRegistryMutation, ZedRemoteRegistryRevision,
+    ZedRemoteRegistrySnapshot, ZedRemoteRegistryStore, forget_zed_remote_project_response,
+    list_zed_remote_projects_from_sources, list_zed_remote_projects_from_sources_with_sqlite_paths,
     list_zed_remote_projects_from_state, list_zed_remote_projects_response,
     remember_zed_remote_project_response,
 };
@@ -446,16 +520,16 @@ pub fn open_zed_remote(payload: &Value) -> Value {
     let strategy = zed_open_strategy_from_payload(payload);
     let result = target_from_payload(payload).and_then(|target| {
         let path = string_value(payload.get("path"));
-        let url = build_zed_remote_url(&target, &path)?;
-        launch_zed_url_with_strategy(&url, strategy)?;
+        let plan = prepare_zed_remote_launch(&target, &path, strategy)?;
+        launch_zed_remote_plan(&plan)?;
         if payload
             .get("remember")
             .and_then(Value::as_bool)
             .unwrap_or(true)
         {
-            let _ = registry::remember_zed_remote_project(payload, Some(&target), Some(&url));
+            let _ = registry::remember_zed_remote_project(payload, Some(&target), Some(plan.url()));
         }
-        Ok(url)
+        Ok(plan.url().to_string())
     });
     match result {
         Ok(url) => json!({"status": "ok", "url": url, "strategy": strategy}),
