@@ -263,6 +263,34 @@ pub enum TextKey {
     RefreshLocalScripts,
     SourceHost,
     InstalledVersion,
+    ZedRemote,
+    ZedRemoteSubtitle,
+    ZedSearchProjects,
+    ZedOpenStrategy,
+    ZedRegistry,
+    ZedRemember,
+    ZedSavePreferences,
+    ZedCurrentProject,
+    ZedRecentProjects,
+    ZedDiscoveredProjects,
+    ZedOpen,
+    ZedForget,
+    ZedCopyUrl,
+    ZedOpenConfirmation,
+    ZedForgetConfirmation,
+    ZedConfirm,
+    ZedOpenNow,
+    ZedForgetNow,
+    ZedNoProjects,
+    ZedUnavailable,
+    ZedWorkerStopped,
+    ZedLoadFailed,
+    ZedSettingsConflict,
+    ZedRegistryConflict,
+    ZedProjectConflict,
+    ZedLaunchFailed,
+    ZedLaunchSucceeded,
+    ZedRememberFailed,
 }
 
 impl TextKey {
@@ -515,6 +543,34 @@ impl TextKey {
         Self::RefreshLocalScripts,
         Self::SourceHost,
         Self::InstalledVersion,
+        Self::ZedRemote,
+        Self::ZedRemoteSubtitle,
+        Self::ZedSearchProjects,
+        Self::ZedOpenStrategy,
+        Self::ZedRegistry,
+        Self::ZedRemember,
+        Self::ZedSavePreferences,
+        Self::ZedCurrentProject,
+        Self::ZedRecentProjects,
+        Self::ZedDiscoveredProjects,
+        Self::ZedOpen,
+        Self::ZedForget,
+        Self::ZedCopyUrl,
+        Self::ZedOpenConfirmation,
+        Self::ZedForgetConfirmation,
+        Self::ZedConfirm,
+        Self::ZedOpenNow,
+        Self::ZedForgetNow,
+        Self::ZedNoProjects,
+        Self::ZedUnavailable,
+        Self::ZedWorkerStopped,
+        Self::ZedLoadFailed,
+        Self::ZedSettingsConflict,
+        Self::ZedRegistryConflict,
+        Self::ZedProjectConflict,
+        Self::ZedLaunchFailed,
+        Self::ZedLaunchSucceeded,
+        Self::ZedRememberFailed,
     ];
 }
 
@@ -1515,6 +1571,118 @@ const CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         zh: "已安装版本",
         en: "Installed version",
+    },
+    CatalogEntry {
+        zh: "Zed 远程",
+        en: "Zed Remote",
+    },
+    CatalogEntry {
+        zh: "管理 Zed SSH 工作区并保存最近项目",
+        en: "Manage Zed SSH workspaces and recent projects",
+    },
+    CatalogEntry {
+        zh: "搜索工作区",
+        en: "Search projects",
+    },
+    CatalogEntry {
+        zh: "打开策略",
+        en: "Open strategy",
+    },
+    CatalogEntry {
+        zh: "最近项目目录",
+        en: "Recent project registry",
+    },
+    CatalogEntry {
+        zh: "记住打开的项目",
+        en: "Remember opened projects",
+    },
+    CatalogEntry {
+        zh: "保存 Zed 偏好",
+        en: "Save Zed preferences",
+    },
+    CatalogEntry {
+        zh: "当前工作区",
+        en: "Current project",
+    },
+    CatalogEntry {
+        zh: "最近打开",
+        en: "Recent projects",
+    },
+    CatalogEntry {
+        zh: "自动发现",
+        en: "Discovered projects",
+    },
+    CatalogEntry {
+        zh: "打开",
+        en: "Open",
+    },
+    CatalogEntry {
+        zh: "遗忘",
+        en: "Forget",
+    },
+    CatalogEntry {
+        zh: "复制 URL",
+        en: "Copy URL",
+    },
+    CatalogEntry {
+        zh: "确认打开 Zed 工作区",
+        en: "Confirm opening Zed project",
+    },
+    CatalogEntry {
+        zh: "确认遗忘 Zed 工作区",
+        en: "Confirm forgetting Zed project",
+    },
+    CatalogEntry {
+        zh: "确认",
+        en: "Confirm",
+    },
+    CatalogEntry {
+        zh: "立即打开",
+        en: "Open now",
+    },
+    CatalogEntry {
+        zh: "立即遗忘",
+        en: "Forget now",
+    },
+    CatalogEntry {
+        zh: "没有匹配的工作区",
+        en: "No matching projects",
+    },
+    CatalogEntry {
+        zh: "Zed 暂时不可用",
+        en: "Zed is unavailable",
+    },
+    CatalogEntry {
+        zh: "Zed 后台服务已停止",
+        en: "The Zed worker has stopped",
+    },
+    CatalogEntry {
+        zh: "Zed 工作区加载失败",
+        en: "Zed project load failed",
+    },
+    CatalogEntry {
+        zh: "Zed 偏好已变更",
+        en: "Zed preferences changed",
+    },
+    CatalogEntry {
+        zh: "Zed 目录已变更",
+        en: "Zed registry changed",
+    },
+    CatalogEntry {
+        zh: "Zed 工作区已变更",
+        en: "Zed project changed",
+    },
+    CatalogEntry {
+        zh: "Zed 启动失败",
+        en: "Zed launch failed",
+    },
+    CatalogEntry {
+        zh: "Zed 工作区已打开",
+        en: "Zed project opened",
+    },
+    CatalogEntry {
+        zh: "项目已打开，但最近目录保存失败",
+        en: "Project opened, but saving it to recents failed",
     },
 ];
 

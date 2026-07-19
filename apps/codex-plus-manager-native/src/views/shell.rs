@@ -12,11 +12,13 @@ use crate::state::provider::OperationPhase;
 use crate::state::provider::{ProviderLoadPhase, ProviderViewState};
 use crate::state::sessions::SessionViewState;
 use crate::state::user_scripts::{ScriptsTab, UserScriptViewState};
+use crate::state::zed_remote::{ZedRemoteLoadPhase, ZedRemoteViewState};
 use crate::state::{OverviewFailureKind, OverviewPhase, Route};
 use crate::{icons, theme};
 
 use super::{
     about, context, environment, import, marketplace, overview, provider, sessions, user_scripts,
+    zed_remote,
 };
 
 pub const SIDEBAR_WIDTH: f32 = 176.0;
@@ -37,6 +39,7 @@ pub enum ShellAction {
     UserScripts(user_scripts::UserScriptAction),
     Context(context::ContextAction),
     Marketplace(marketplace::MarketplaceAction),
+    ZedRemote(zed_remote::ZedRemoteAction),
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +63,7 @@ pub struct ShellFeatureStates<'a> {
     pub marketplace: Option<&'a MarketplaceViewState>,
     pub sessions: Option<&'a SessionViewState>,
     pub user_scripts: Option<&'a UserScriptViewState>,
+    pub zed_remote: Option<&'a ZedRemoteViewState>,
 }
 
 pub fn render_shell(
@@ -75,6 +79,7 @@ pub fn render_shell(
         marketplace: marketplace_state,
         sessions: sessions_state,
         user_scripts: user_script_state,
+        zed_remote: zed_remote_state,
     } = states;
     let mut actions = Vec::new();
 
@@ -104,17 +109,7 @@ pub fn render_shell(
                 .fill(ui.visuals().window_fill)
                 .inner_margin(egui::Margin::symmetric(16, 4)),
         )
-        .show(ui, |ui| {
-            render_status(
-                ui,
-                model,
-                provider_state,
-                environment_state,
-                context_state,
-                sessions_state,
-                user_script_state,
-            )
-        });
+        .show(ui, |ui| render_status(ui, model, states));
 
     egui::CentralPanel::default()
         .frame(
@@ -214,6 +209,13 @@ pub fn render_shell(
                     );
                 }
             }
+            Route::ZedRemote => {
+                if let Some(state) = zed_remote_state {
+                    let mut zed_actions = Vec::new();
+                    zed_remote::render(ui, state, model.locale, &mut zed_actions);
+                    actions.extend(zed_actions.into_iter().map(ShellAction::ZedRemote));
+                }
+            }
             Route::About => about::render(ui, model),
         });
 
@@ -287,6 +289,14 @@ fn render_sidebar(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<S
         text(model.locale, TextKey::ToolsPlugins),
         model.route == Route::Context,
         Route::Context,
+        actions,
+    );
+    navigation_button(
+        ui,
+        icons::folder_git_2(),
+        text(model.locale, TextKey::ZedRemote),
+        model.route == Route::ZedRemote,
+        Route::ZedRemote,
         actions,
     );
     navigation_button(
@@ -424,6 +434,11 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
                     text(model.locale, TextKey::AppName),
                     text(model.locale, TextKey::ToolsPlugins)
                 ),
+                Route::ZedRemote => format!(
+                    "{} {}",
+                    text(model.locale, TextKey::AppName),
+                    text(model.locale, TextKey::ZedRemote)
+                ),
                 Route::About => format!(
                     "{} {}",
                     text(model.locale, TextKey::About),
@@ -438,6 +453,7 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
                 Route::Sessions => TextKey::SessionsSubtitle,
                 Route::Scripts => TextKey::ScriptsSubtitle,
                 Route::Context => TextKey::ToolsPluginsSubtitle,
+                Route::ZedRemote => TextKey::ZedRemoteSubtitle,
                 Route::About => TextKey::AboutSubtitle,
             };
             ui.label(
@@ -478,15 +494,16 @@ fn icon_button(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, label: &str)
     response.on_hover_text(label)
 }
 
-fn render_status(
-    ui: &mut egui::Ui,
-    model: &ShellViewModel,
-    provider_state: Option<&ProviderViewState>,
-    environment_state: Option<&EnvironmentViewState>,
-    context_state: Option<&ContextViewState>,
-    sessions_state: Option<&SessionViewState>,
-    user_script_state: Option<&UserScriptViewState>,
-) {
+fn render_status(ui: &mut egui::Ui, model: &ShellViewModel, states: ShellFeatureStates<'_>) {
+    let ShellFeatureStates {
+        provider: provider_state,
+        environment: environment_state,
+        context: context_state,
+        sessions: sessions_state,
+        user_scripts: user_script_state,
+        zed_remote: zed_remote_state,
+        ..
+    } = states;
     if model.route == Route::Providers {
         let phase = provider_state.map_or(ProviderLoadPhase::Idle, |state| state.load_phase);
         let (status, color) = match phase {
@@ -600,6 +617,32 @@ fn render_status(
                 };
                 (text(model.locale, key), theme::ERROR_COLOR)
             }
+        };
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                color,
+                format!("{}: {status}", text(model.locale, TextKey::Status)),
+            );
+            render_status_metadata(ui, model);
+        });
+        return;
+    }
+
+    if model.route == Route::ZedRemote {
+        let phase = zed_remote_state.map_or(ZedRemoteLoadPhase::Idle, |state| state.load_phase);
+        let (status, color) = match phase {
+            ZedRemoteLoadPhase::Idle | ZedRemoteLoadPhase::Loading => {
+                (text(model.locale, TextKey::Loading), theme::WARNING_COLOR)
+            }
+            ZedRemoteLoadPhase::Ready => (text(model.locale, TextKey::Ready), theme::SUCCESS_COLOR),
+            ZedRemoteLoadPhase::Refreshing => (
+                text(model.locale, TextKey::Refreshing),
+                theme::WARNING_COLOR,
+            ),
+            ZedRemoteLoadPhase::Error => (
+                text(model.locale, TextKey::ZedLoadFailed),
+                theme::ERROR_COLOR,
+            ),
         };
         ui.horizontal(|ui| {
             ui.colored_label(

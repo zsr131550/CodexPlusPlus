@@ -66,7 +66,8 @@ fn render(ui: &mut egui::Ui, state: &mut FeatureState) {
             | ShellAction::Sessions(_)
             | ShellAction::UserScripts(_)
             | ShellAction::Context(_)
-            | ShellAction::Marketplace(_) => {}
+            | ShellAction::Marketplace(_)
+            | ShellAction::ZedRemote(_) => {}
             ShellAction::Refresh
             | ShellAction::Retry
             | ShellAction::SetLocale(_)

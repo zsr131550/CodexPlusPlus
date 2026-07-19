@@ -39,7 +39,8 @@ fn render_test_shell(ui: &mut egui::Ui, state: &mut TestShellState) {
             | ShellAction::Sessions(_)
             | ShellAction::UserScripts(_)
             | ShellAction::Context(_)
-            | ShellAction::Marketplace(_) => {}
+            | ShellAction::Marketplace(_)
+            | ShellAction::ZedRemote(_) => {}
         }
         ui.ctx().request_repaint();
     }
