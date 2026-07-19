@@ -1,7 +1,10 @@
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use codex_plus_core::install::{EntryPointState, ShortcutState};
 use codex_plus_core::relay_config::{relay_profile_base_url, test_relay_profile};
 use codex_plus_core::settings::{BackendSettings, SettingsStore};
 use codex_plus_core::settings::{RelayProfile, RelayProtocol};
@@ -19,6 +22,7 @@ use crate::{
 #[derive(Clone)]
 pub struct SystemProviderEnvironment {
     settings: SettingsStore,
+    settings_path: PathBuf,
     codex_home: PathBuf,
     context_ownership_path: PathBuf,
     ccs_db_path: PathBuf,
@@ -31,6 +35,13 @@ pub struct SystemProviderEnvironment {
     zed_registry_path: PathBuf,
     zed_sqlite_paths: Vec<PathBuf>,
     zed_launcher: Arc<dyn crate::ZedLaunchExecutor>,
+    diagnostic_log_path: PathBuf,
+    latest_status_path: PathBuf,
+    watcher_disabled_flag_path: PathBuf,
+    entrypoint_override: Option<codex_plus_core::install::EntryPointState>,
+    codex_launcher: Arc<dyn crate::CodexLaunchExecutor>,
+    stepwise_tester: Arc<dyn crate::StepwiseConnectionTester>,
+    maintenance_isolated: bool,
     script_market_index_url: String,
     script_market_policy: codex_plus_core::script_market::MarketFetchPolicy,
     process_only_env_cleanup: bool,
@@ -77,8 +88,10 @@ impl SystemProviderEnvironment {
         let zed_global_state_path = codex_home.join(".codex-global-state.json");
         let zed_sqlite_paths =
             codex_plus_core::codex_sqlite::codex_session_db_paths_from_home(&codex_home);
+        let runtime = Arc::new(provider_runtime());
         Self {
-            settings: SettingsStore::new(settings_path),
+            settings: SettingsStore::new(settings_path.clone()),
+            settings_path,
             codex_home,
             context_ownership_path,
             ccs_db_path,
@@ -91,10 +104,19 @@ impl SystemProviderEnvironment {
             zed_registry_path: state_dir.join("zed_remote_projects.json"),
             zed_sqlite_paths,
             zed_launcher: Arc::new(SystemZedLaunchExecutor),
+            diagnostic_log_path: state_dir.join("diagnostic.jsonl"),
+            latest_status_path: state_dir.join("latest-status.json"),
+            watcher_disabled_flag_path: state_dir.join("watcher.disabled"),
+            entrypoint_override: None,
+            codex_launcher: Arc::new(SystemCodexLaunchExecutor),
+            stepwise_tester: Arc::new(SystemStepwiseConnectionTester {
+                runtime: runtime.clone(),
+            }),
+            maintenance_isolated: false,
             script_market_index_url: configured_script_market_index_url(),
             script_market_policy: codex_plus_core::script_market::MarketFetchPolicy::https_only(),
             process_only_env_cleanup,
-            runtime: Arc::new(provider_runtime()),
+            runtime,
         }
     }
 
@@ -137,6 +159,65 @@ impl SystemProviderEnvironment {
         self
     }
 
+    pub fn with_maintenance_paths(
+        mut self,
+        diagnostic_log_path: impl Into<PathBuf>,
+        latest_status_path: impl Into<PathBuf>,
+        watcher_disabled_flag_path: impl Into<PathBuf>,
+    ) -> Self {
+        self.diagnostic_log_path = diagnostic_log_path.into();
+        self.latest_status_path = latest_status_path.into();
+        self.watcher_disabled_flag_path = watcher_disabled_flag_path.into();
+        self.maintenance_isolated = true;
+        self
+    }
+
+    pub fn with_entrypoint_override(
+        mut self,
+        silent_installed: bool,
+        management_installed: bool,
+    ) -> Self {
+        use codex_plus_core::install::{EntryPointState, ShortcutState};
+
+        self.entrypoint_override = Some(EntryPointState {
+            silent_shortcut: ShortcutState {
+                installed: silent_installed,
+                path: None,
+            },
+            management_shortcut: ShortcutState {
+                installed: management_installed,
+                path: None,
+            },
+        });
+        self.maintenance_isolated = true;
+        self
+    }
+
+    pub fn with_codex_launch_record_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.codex_launcher = Arc::new(RecordingCodexLaunchExecutor {
+            path: path.into(),
+            calls: AtomicU64::new(0),
+        });
+        self.maintenance_isolated = true;
+        self
+    }
+
+    pub fn with_codex_launch_executor(
+        mut self,
+        launcher: Arc<dyn crate::CodexLaunchExecutor>,
+    ) -> Self {
+        self.codex_launcher = launcher;
+        self
+    }
+
+    pub fn with_stepwise_connection_tester(
+        mut self,
+        tester: Arc<dyn crate::StepwiseConnectionTester>,
+    ) -> Self {
+        self.stepwise_tester = tester;
+        self
+    }
+
     pub fn with_script_market_index_url(mut self, url: impl Into<String>) -> Self {
         self.script_market_index_url = url.into();
         self.script_market_policy = codex_plus_core::script_market::MarketFetchPolicy::https_only();
@@ -174,6 +255,25 @@ impl SystemProviderEnvironment {
         let zed_override_present = zed_global_state_path.is_some()
             || zed_registry_path.is_some()
             || zed_launch_record_path.is_some();
+        let diagnostic_log_path = env_path("CODEX_PLUS_NATIVE_DIAGNOSTIC_LOG_PATH");
+        let latest_status_path = env_path("CODEX_PLUS_NATIVE_LATEST_STATUS_PATH");
+        let watcher_disabled_flag_path = env_path("CODEX_PLUS_NATIVE_WATCHER_DISABLED_FLAG_PATH");
+        let entrypoint_silent_installed = env_bool("CODEX_PLUS_NATIVE_ENTRYPOINT_SILENT_INSTALLED");
+        let entrypoint_management_installed =
+            env_bool("CODEX_PLUS_NATIVE_ENTRYPOINT_MANAGEMENT_INSTALLED");
+        let codex_launch_record_path = env_path("CODEX_PLUS_NATIVE_CODEX_LAUNCH_RECORD_PATH");
+        let maintenance_override_present = diagnostic_log_path.is_some()
+            || latest_status_path.is_some()
+            || watcher_disabled_flag_path.is_some()
+            || entrypoint_silent_installed.is_some()
+            || entrypoint_management_installed.is_some()
+            || codex_launch_record_path.is_some();
+        let stepwise_test_record_path = env_path("CODEX_PLUS_NATIVE_STEPWISE_TEST_RECORD_PATH");
+        let stepwise_test_result = std::env::var("CODEX_PLUS_NATIVE_STEPWISE_TEST_RESULT")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let stepwise_override_present =
+            stepwise_test_record_path.is_some() || stepwise_test_result.is_some();
         let script_market_index_url = std::env::var("CODEX_PLUS_SCRIPT_MARKET_INDEX_URL")
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -192,6 +292,8 @@ impl SystemProviderEnvironment {
             && user_script_user_dir.is_none()
             && user_script_config_path.is_none()
             && !zed_override_present
+            && !maintenance_override_present
+            && !stepwise_override_present
             && script_market_index_url.is_none()
             && !allow_loopback_script_market
         {
@@ -207,9 +309,38 @@ impl SystemProviderEnvironment {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| std::env::temp_dir().join("codex-plus-native-zed"))
         };
+        let maintenance_isolation_root = diagnostic_log_path
+            .as_deref()
+            .or(latest_status_path.as_deref())
+            .or(watcher_disabled_flag_path.as_deref())
+            .or(codex_launch_record_path.as_deref())
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                settings_path
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf)
+            })
+            .unwrap_or_else(|| std::env::temp_dir().join("codex-plus-native-maintenance"));
+        let stepwise_isolation_root = stepwise_test_record_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                settings_path
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf)
+            })
+            .unwrap_or_else(|| std::env::temp_dir().join("codex-plus-native-stepwise"));
         let settings_path = settings_path.unwrap_or_else(|| {
             if zed_override_present {
                 zed_isolation_root().join("settings.json")
+            } else if maintenance_override_present {
+                maintenance_isolation_root.join("settings.json")
+            } else if stepwise_override_present {
+                stepwise_isolation_root.join("settings.json")
             } else {
                 codex_plus_core::paths::default_settings_path()
             }
@@ -223,6 +354,10 @@ impl SystemProviderEnvironment {
             codex_home.unwrap_or_else(|| {
                 if zed_override_present {
                     zed_isolation_root().join("codex")
+                } else if maintenance_override_present {
+                    maintenance_isolation_root.join("codex")
+                } else if stepwise_override_present {
+                    stepwise_isolation_root.join("codex")
                 } else {
                     isolated_codex_home_for_settings(&settings_path)
                 }
@@ -243,6 +378,30 @@ impl SystemProviderEnvironment {
             if let Some(path) = zed_launch_record_path {
                 environment = environment.with_zed_launch_record_path(path);
             }
+        }
+        if maintenance_override_present {
+            environment = environment.with_maintenance_paths(
+                diagnostic_log_path
+                    .unwrap_or_else(|| maintenance_isolation_root.join("diagnostic.jsonl")),
+                latest_status_path
+                    .unwrap_or_else(|| maintenance_isolation_root.join("latest-status.json")),
+                watcher_disabled_flag_path
+                    .unwrap_or_else(|| maintenance_isolation_root.join("watcher.disabled")),
+            );
+            if let (Some(silent), Some(management)) =
+                (entrypoint_silent_installed, entrypoint_management_installed)
+            {
+                environment = environment.with_entrypoint_override(silent, management);
+            }
+            if let Some(path) = codex_launch_record_path {
+                environment = environment.with_codex_launch_record_path(path);
+            }
+        }
+        if stepwise_override_present {
+            environment.stepwise_tester = Arc::new(RecordingStepwiseConnectionTester::new(
+                stepwise_test_record_path,
+                parse_recording_stepwise_result(stepwise_test_result.as_deref()),
+            ));
         }
         if let Some(path) = context_ownership_path {
             environment = environment.with_context_ownership_path(path);
@@ -269,14 +428,26 @@ impl Default for SystemProviderEnvironment {
         let codex_home = codex_plus_core::relay_config::default_codex_home_dir();
         let user_script_config_dir =
             codex_plus_core::user_scripts::default_user_scripts_config_dir();
+        let settings_path = codex_plus_core::paths::default_settings_path();
+        let runtime = Arc::new(provider_runtime());
         Self {
-            settings: SettingsStore::default(),
+            settings: SettingsStore::new(settings_path.clone()),
+            settings_path,
             zed_global_state_path: codex_home.join(".codex-global-state.json"),
             zed_registry_path: state_dir.join("zed_remote_projects.json"),
             zed_sqlite_paths: codex_plus_core::codex_sqlite::codex_session_db_paths_from_home(
                 &codex_home,
             ),
             zed_launcher: Arc::new(SystemZedLaunchExecutor),
+            diagnostic_log_path: codex_plus_core::paths::default_diagnostic_log_path(),
+            latest_status_path: codex_plus_core::paths::default_latest_status_path(),
+            watcher_disabled_flag_path: codex_plus_core::watcher::default_watcher_disabled_flag(),
+            entrypoint_override: None,
+            codex_launcher: Arc::new(SystemCodexLaunchExecutor),
+            stepwise_tester: Arc::new(SystemStepwiseConnectionTester {
+                runtime: runtime.clone(),
+            }),
+            maintenance_isolated: false,
             codex_home,
             context_ownership_path: codex_plus_core::paths::default_context_ownership_path(),
             ccs_db_path: codex_plus_core::ccs_import::default_ccs_db_path(),
@@ -288,8 +459,60 @@ impl Default for SystemProviderEnvironment {
             script_market_index_url: configured_script_market_index_url(),
             script_market_policy: codex_plus_core::script_market::MarketFetchPolicy::https_only(),
             process_only_env_cleanup: false,
-            runtime: Arc::new(provider_runtime()),
+            runtime,
         }
+    }
+}
+
+impl crate::OverviewEnvironment for SystemProviderEnvironment {
+    fn saved_codex_app_path(&self) -> String {
+        self.settings.load().unwrap_or_default().codex_app_path
+    }
+
+    fn resolve_codex_app(&self, saved: &str) -> Option<PathBuf> {
+        if self.maintenance_isolated && saved.trim().is_empty() {
+            return None;
+        }
+        codex_plus_core::app_paths::resolve_codex_app_dir_with_saved(None, Some(saved))
+    }
+
+    fn codex_app_version(&self, path: &Path) -> Option<String> {
+        codex_plus_core::app_paths::codex_app_version(path)
+    }
+
+    fn entrypoints(&self) -> EntryPointState {
+        if let Some(state) = &self.entrypoint_override {
+            return state.clone();
+        }
+        if self.maintenance_isolated {
+            let missing = || ShortcutState {
+                installed: false,
+                path: None,
+            };
+            return EntryPointState {
+                silent_shortcut: missing(),
+                management_shortcut: missing(),
+            };
+        }
+        codex_plus_core::install::inspect_entrypoints()
+    }
+
+    fn latest_launch(&self) -> Option<codex_plus_core::status::LaunchStatus> {
+        codex_plus_core::status::StatusStore::new(self.latest_status_path.clone())
+            .load_latest()
+            .unwrap_or(None)
+    }
+
+    fn current_version(&self) -> String {
+        codex_plus_core::version::VERSION.to_owned()
+    }
+
+    fn settings_path(&self) -> PathBuf {
+        self.settings_path.clone()
+    }
+
+    fn logs_path(&self) -> PathBuf {
+        self.diagnostic_log_path.clone()
     }
 }
 
@@ -441,6 +664,154 @@ impl crate::ZedRemoteEnvironment for SystemProviderEnvironment {
 }
 
 struct SystemZedLaunchExecutor;
+
+struct SystemCodexLaunchExecutor;
+
+struct SystemStepwiseConnectionTester {
+    runtime: Arc<tokio::runtime::Runtime>,
+}
+
+impl crate::StepwiseConnectionTester for SystemStepwiseConnectionTester {
+    fn test(&self, settings: &BackendSettings) -> Result<usize, crate::StepwiseTestFailure> {
+        match self
+            .runtime
+            .block_on(codex_plus_core::stepwise::test_connection(settings))
+        {
+            Ok(value) => map_stepwise_response(&value),
+            Err(error) => {
+                let detail = error.to_string().to_ascii_lowercase();
+                if detail.contains("timed out") || detail.contains("timeout") {
+                    Err(crate::StepwiseTestFailure::Timeout)
+                } else {
+                    Err(crate::StepwiseTestFailure::Network)
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RecordingStepwiseResult {
+    Ok(usize),
+    Failed(crate::StepwiseTestFailure),
+}
+
+struct RecordingStepwiseConnectionTester {
+    path: Option<PathBuf>,
+    result: RecordingStepwiseResult,
+    calls: AtomicU64,
+}
+
+impl RecordingStepwiseConnectionTester {
+    fn new(path: Option<PathBuf>, result: RecordingStepwiseResult) -> Self {
+        Self {
+            path,
+            result,
+            calls: AtomicU64::new(0),
+        }
+    }
+}
+
+impl crate::StepwiseConnectionTester for RecordingStepwiseConnectionTester {
+    fn test(&self, settings: &BackendSettings) -> Result<usize, crate::StepwiseTestFailure> {
+        let call_count = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(path) = &self.path {
+            let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+                "operation": "stepwise_test",
+                "callCount": call_count,
+                "enabled": settings.codex_app_stepwise_enabled,
+                "baseUrlConfigured": !settings.codex_app_stepwise_base_url.trim().is_empty(),
+                "directKeyConfigured": !settings.codex_app_stepwise_api_key.trim().is_empty(),
+                "environmentNameConfigured": !settings.codex_app_stepwise_api_key_env.trim().is_empty(),
+                "modelLength": settings.codex_app_stepwise_model.chars().count(),
+                "maxItems": settings.codex_app_stepwise_max_items,
+                "maxInputChars": settings.codex_app_stepwise_max_input_chars,
+                "maxOutputTokens": settings.codex_app_stepwise_max_output_tokens,
+                "timeoutMs": settings.codex_app_stepwise_timeout_ms,
+            }))
+            .map_err(|_| crate::StepwiseTestFailure::Network)?;
+            write_recording_launch_atomically(path, &bytes)
+                .map_err(|_| crate::StepwiseTestFailure::Network)?;
+        }
+        match self.result {
+            RecordingStepwiseResult::Ok(item_count) => Ok(item_count),
+            RecordingStepwiseResult::Failed(failure) => Err(failure),
+        }
+    }
+}
+
+fn map_stepwise_response(value: &Value) -> Result<usize, crate::StepwiseTestFailure> {
+    if value.get("status").and_then(Value::as_str) == Some("ok") {
+        return Ok(value
+            .get("items")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len));
+    }
+    let error = value
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if error.contains("401")
+        || error.contains("403")
+        || error.contains("unauthorized")
+        || error.contains("forbidden")
+    {
+        Err(crate::StepwiseTestFailure::Unauthorized)
+    } else if error.contains("timed out") || error.contains("timeout") {
+        Err(crate::StepwiseTestFailure::Timeout)
+    } else {
+        Err(crate::StepwiseTestFailure::Rejected)
+    }
+}
+
+fn parse_recording_stepwise_result(value: Option<&str>) -> RecordingStepwiseResult {
+    let value = value.unwrap_or("ok:0").trim().to_ascii_lowercase();
+    if let Some(count) = value
+        .strip_prefix("ok:")
+        .and_then(|count| count.parse::<usize>().ok())
+    {
+        return RecordingStepwiseResult::Ok(count);
+    }
+    match value.as_str() {
+        "ok" => RecordingStepwiseResult::Ok(0),
+        "unauthorized" => RecordingStepwiseResult::Failed(crate::StepwiseTestFailure::Unauthorized),
+        "timeout" => RecordingStepwiseResult::Failed(crate::StepwiseTestFailure::Timeout),
+        "rejected" => RecordingStepwiseResult::Failed(crate::StepwiseTestFailure::Rejected),
+        _ => RecordingStepwiseResult::Failed(crate::StepwiseTestFailure::Network),
+    }
+}
+
+impl crate::CodexLaunchExecutor for SystemCodexLaunchExecutor {
+    fn launch(&self, plan: &crate::CodexLaunchPlan) -> anyhow::Result<()> {
+        codex_plus_core::install::spawn_companion(
+            codex_plus_core::install::SILENT_BINARY,
+            plan.arguments(),
+        )
+        .map(|_| ())
+    }
+}
+
+struct RecordingCodexLaunchExecutor {
+    path: PathBuf,
+    calls: AtomicU64,
+}
+
+impl crate::CodexLaunchExecutor for RecordingCodexLaunchExecutor {
+    fn launch(&self, plan: &crate::CodexLaunchPlan) -> anyhow::Result<()> {
+        let call_count = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "operation": "launch",
+            "callCount": call_count,
+            "debugPort": plan.debug_port(),
+            "helperPort": plan.helper_port(),
+            "pathConfigured": plan.path_configured(),
+            "argumentCount": plan.argument_count(),
+        }))?;
+        write_recording_launch_atomically(&self.path, &bytes)
+            .map_err(|_| anyhow::anyhow!("failed to record Codex launch"))
+    }
+}
 
 impl crate::ZedLaunchExecutor for SystemZedLaunchExecutor {
     fn launch(
@@ -1004,6 +1375,16 @@ pub(crate) fn env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn env_bool(name: &str) -> Option<bool> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| match value.trim() {
+            "1" | "true" | "TRUE" => Some(true),
+            "0" | "false" | "FALSE" => Some(false),
+            _ => None,
+        })
+}
+
 fn isolated_codex_home_for_settings(settings_path: &Path) -> PathBuf {
     settings_path
         .parent()
@@ -1019,10 +1400,314 @@ fn configured_script_market_index_url() -> String {
         .unwrap_or_else(|| codex_plus_core::script_market::DEFAULT_MARKET_INDEX_URL.to_string())
 }
 
+impl crate::MaintenanceEnvironment for SystemProviderEnvironment {
+    fn load_maintenance_settings(&self) -> anyhow::Result<BackendSettings> {
+        self.settings.load()
+    }
+
+    fn update_maintenance_settings_if<F>(
+        &self,
+        payload: Value,
+        predicate: F,
+    ) -> anyhow::Result<Option<BackendSettings>>
+    where
+        F: FnOnce(&BackendSettings) -> bool,
+    {
+        let _lock =
+            codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&self.codex_home)?;
+        self.settings.update_if(payload, predicate)
+    }
+
+    fn inspect_path(&self, path: &Path) -> anyhow::Result<crate::PathKind> {
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => Ok(crate::PathKind::File),
+            Ok(metadata) if metadata.is_dir() => Ok(crate::PathKind::Directory),
+            Ok(_) => Ok(crate::PathKind::Other),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(crate::PathKind::Missing)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn resolve_codex_app(&self, saved: &str) -> Option<PathBuf> {
+        if self.maintenance_isolated && saved.trim().is_empty() {
+            return None;
+        }
+        codex_plus_core::app_paths::resolve_codex_app_dir_with_saved(None, Some(saved))
+    }
+
+    fn codex_app_version(&self, path: &Path) -> Option<String> {
+        codex_plus_core::app_paths::codex_app_version(path)
+    }
+
+    fn inspect_entrypoints(&self) -> anyhow::Result<codex_plus_core::install::EntryPointState> {
+        if let Some(state) = &self.entrypoint_override {
+            return Ok(state.clone());
+        }
+        if self.maintenance_isolated {
+            anyhow::bail!("entrypoint inspection unavailable in isolated maintenance mode")
+        }
+        Ok(codex_plus_core::install::inspect_entrypoints())
+    }
+
+    fn watcher_disabled(&self) -> anyhow::Result<bool> {
+        self.watcher_disabled_flag_path
+            .try_exists()
+            .map_err(Into::into)
+    }
+
+    fn load_latest_launch(&self) -> anyhow::Result<Option<codex_plus_core::status::LaunchStatus>> {
+        codex_plus_core::status::StatusStore::new(self.latest_status_path.clone()).load_latest()
+    }
+
+    fn read_diagnostic_tail(&self, max_bytes: usize) -> anyhow::Result<Vec<u8>> {
+        if max_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let mut file = fs::File::open(&self.diagnostic_log_path)?;
+        let length = file.metadata()?.len();
+        let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+        file.seek(SeekFrom::Start(length.saturating_sub(max_bytes_u64)))?;
+        let capacity = usize::try_from(length.min(max_bytes_u64)).unwrap_or(max_bytes);
+        let mut bytes = Vec::with_capacity(capacity);
+        file.take(max_bytes_u64).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn diagnostic_path_presence(&self) -> crate::DiagnosticPathPresence {
+        crate::DiagnosticPathPresence {
+            settings: self.settings_path.try_exists().unwrap_or(false),
+            logs: self.diagnostic_log_path.try_exists().unwrap_or(false),
+            latest_status: self.latest_status_path.try_exists().unwrap_or(false),
+        }
+    }
+
+    fn launch_codex(&self, plan: &crate::CodexLaunchPlan) -> anyhow::Result<()> {
+        self.codex_launcher.launch(plan)
+    }
+}
+
+impl crate::ManagerSettingsEnvironment for SystemProviderEnvironment {
+    fn load_manager_settings(&self) -> anyhow::Result<BackendSettings> {
+        self.settings.load()
+    }
+
+    fn update_manager_settings_if<F>(
+        &self,
+        payload: Value,
+        predicate: F,
+    ) -> anyhow::Result<Option<BackendSettings>>
+    where
+        F: FnOnce(&BackendSettings) -> bool,
+    {
+        let _lock =
+            codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&self.codex_home)?;
+        self.settings.update_if(payload, predicate)
+    }
+
+    fn inspect_path(&self, path: &Path) -> anyhow::Result<crate::PathKind> {
+        crate::MaintenanceEnvironment::inspect_path(self, path)
+    }
+
+    fn environment_value_present(&self, name: &str) -> bool {
+        std::env::var_os(name).is_some_and(|value| !value.to_string_lossy().trim().is_empty())
+    }
+
+    fn test_stepwise_candidate(
+        &self,
+        settings: &BackendSettings,
+    ) -> Result<usize, crate::StepwiseTestFailure> {
+        self.stepwise_tester.test(settings)
+    }
+}
+
 fn default_builtin_user_scripts_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .map(|path| path.join("user_scripts"))
         .unwrap_or_else(|| PathBuf::from("user_scripts"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::sync::Arc;
+
+    use codex_plus_core::settings::BackendSettings;
+
+    use crate::{
+        LaunchCodex, MaintenanceEnvironment, MaintenanceService, ManagerSettingsEnvironment,
+        OverviewEnvironment, PrivatePath,
+    };
+
+    use super::{
+        RecordingStepwiseConnectionTester, RecordingStepwiseResult, SystemProviderEnvironment,
+    };
+
+    #[test]
+    fn provider_system_maintenance_tail_is_bounded_and_isolation_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let log_path = directory.path().join("diagnostic.jsonl");
+        let status_path = directory.path().join("latest-status.json");
+        let watcher_path = directory.path().join("watcher.disabled");
+        let mut log = std::fs::File::create(&log_path).unwrap();
+        log.write_all(&vec![b'x'; 300 * 1024]).unwrap();
+        log.write_all(b"\nlast-line\n").unwrap();
+        drop(log);
+
+        let environment = SystemProviderEnvironment::for_settings_path(settings_path)
+            .with_maintenance_paths(log_path, status_path, watcher_path);
+
+        let tail = environment.read_diagnostic_tail(256 * 1024).unwrap();
+        assert_eq!(tail.len(), 256 * 1024);
+        assert!(tail.ends_with(b"\nlast-line\n"));
+        assert!(MaintenanceEnvironment::resolve_codex_app(&environment, "").is_none());
+        assert!(environment.inspect_entrypoints().is_err());
+    }
+
+    #[test]
+    fn provider_system_overview_uses_the_same_isolated_paths_and_entrypoint_override() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let log_path = directory.path().join("diagnostic.jsonl");
+        let status_path = directory.path().join("latest-status.json");
+        let watcher_path = directory.path().join("watcher.disabled");
+        let app_path = directory.path().join("Codex.exe");
+        std::fs::write(&app_path, b"fixture").unwrap();
+        std::fs::write(
+            &settings_path,
+            serde_json::to_vec(&serde_json::json!({
+                "codexAppPath": app_path.to_string_lossy()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&log_path, b"").unwrap();
+        codex_plus_core::status::StatusStore::new(status_path.clone())
+            .save_latest(&codex_plus_core::status::LaunchStatus {
+                status: "running".to_owned(),
+                message: "fixture".to_owned(),
+                started_at_ms: 123,
+                debug_port: Some(9229),
+                helper_port: Some(57321),
+                codex_app: None,
+            })
+            .unwrap();
+
+        let environment = SystemProviderEnvironment::for_settings_path(settings_path.clone())
+            .with_maintenance_paths(log_path.clone(), status_path, watcher_path)
+            .with_entrypoint_override(true, false);
+
+        assert_eq!(
+            OverviewEnvironment::saved_codex_app_path(&environment),
+            app_path.to_string_lossy()
+        );
+        assert_eq!(
+            OverviewEnvironment::settings_path(&environment),
+            settings_path
+        );
+        assert_eq!(OverviewEnvironment::logs_path(&environment), log_path);
+        let entrypoints = OverviewEnvironment::entrypoints(&environment);
+        assert!(entrypoints.silent_shortcut.installed);
+        assert!(!entrypoints.management_shortcut.installed);
+        assert_eq!(
+            OverviewEnvironment::latest_launch(&environment)
+                .expect("isolated latest status")
+                .debug_port,
+            Some(9229)
+        );
+    }
+
+    #[test]
+    fn provider_system_recording_launcher_counts_calls_and_writes_only_safe_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let log_path = directory.path().join("diagnostic.jsonl");
+        let status_path = directory.path().join("latest-status.json");
+        let watcher_path = directory.path().join("watcher.disabled");
+        let launch_record_path = directory.path().join("launch-record.json");
+        let private_app_path = directory.path().join("private-app-path-sentinel");
+        std::fs::create_dir_all(&private_app_path).unwrap();
+        std::fs::write(&watcher_path, b"disabled").unwrap();
+
+        let environment = SystemProviderEnvironment::for_settings_path(settings_path)
+            .with_maintenance_paths(log_path, status_path, watcher_path)
+            .with_entrypoint_override(true, false)
+            .with_codex_launch_record_path(&launch_record_path);
+        let entrypoints = environment.inspect_entrypoints().unwrap();
+        assert!(entrypoints.silent_shortcut.installed);
+        assert!(!entrypoints.management_shortcut.installed);
+        assert!(environment.watcher_disabled().unwrap());
+        let service = MaintenanceService::new(environment);
+
+        service
+            .launch(LaunchCodex::native(
+                PrivatePath::new(private_app_path.to_string_lossy()),
+                9229,
+                57321,
+            ))
+            .unwrap();
+        service
+            .launch(LaunchCodex::native(
+                PrivatePath::new(private_app_path.to_string_lossy()),
+                9229,
+                57321,
+            ))
+            .unwrap();
+
+        let text = std::fs::read_to_string(&launch_record_path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "operation": "launch",
+                "callCount": 2,
+                "debugPort": 9229,
+                "helperPort": 57321,
+                "pathConfigured": true,
+                "argumentCount": 6,
+            })
+        );
+        assert!(!text.contains("private-app-path-sentinel"));
+    }
+
+    #[test]
+    fn provider_system_stepwise_recorder_excludes_credentials_urls_and_model_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let record_path = directory.path().join("stepwise-record.json");
+        let mut environment =
+            SystemProviderEnvironment::for_settings_path(directory.path().join("settings.json"));
+        environment.stepwise_tester = Arc::new(RecordingStepwiseConnectionTester::new(
+            Some(record_path.clone()),
+            RecordingStepwiseResult::Ok(2),
+        ));
+        let settings = BackendSettings {
+            codex_app_stepwise_enabled: true,
+            codex_app_stepwise_base_url: "https://private-stepwise.invalid/body-sentinel"
+                .to_owned(),
+            codex_app_stepwise_api_key: "private-key-sentinel".to_owned(),
+            codex_app_stepwise_model: "private-model-sentinel".to_owned(),
+            ..BackendSettings::default()
+        };
+
+        assert_eq!(environment.test_stepwise_candidate(&settings).unwrap(), 2);
+
+        let text = std::fs::read_to_string(record_path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["callCount"], 1);
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["directKeyConfigured"], true);
+        assert_eq!(value["modelLength"], "private-model-sentinel".len());
+        for forbidden in [
+            "private-stepwise.invalid",
+            "body-sentinel",
+            "private-key-sentinel",
+            "private-model-sentinel",
+        ] {
+            assert!(!text.contains(forbidden));
+        }
+    }
 }

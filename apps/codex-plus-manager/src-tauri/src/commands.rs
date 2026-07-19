@@ -1,10 +1,7 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use codex_plus_core::install::SILENT_BINARY;
 use codex_plus_core::models::DeleteResult;
 use codex_plus_core::relay_environment::RelayEnvironmentReport;
 use codex_plus_core::settings::{BackendSettings, RelayProfile, SettingsStore};
@@ -15,15 +12,17 @@ use codex_plus_manager_service::{
     CompatContextDeleteRequest, CompatContextEntryRequest, ConfirmPendingImport,
     ContextToolsEnvironment, ContextToolsService, DiagnoseProviderProfile, DismissPendingImport,
     DoctorCheckStatus, DoctorDetailKind, DoctorOutcome, DoctorRecommendation, FetchProviderModels,
-    ImportCcsProviders, OverviewSnapshot, OverviewSource, PluginMarketplaceCompatibilityWorkspace,
-    PluginMarketplaceEnvironment, PluginMarketplaceKind, PluginMarketplaceRepairOutcome,
-    PluginMarketplaceService, ProviderDoctorCheck as ServiceProviderDoctorCheck,
-    ProviderDoctorCheckId, ProviderDoctorReport, ProviderImportService, ProviderImportSource,
-    ProviderModelsResult, ProviderNetworkError, ProviderNetworkFailureKind,
-    ProviderProfile as ServiceProviderProfile, ProviderService, ProviderSource,
-    ProviderSyncService, ProviderSyncSource, ProviderTestOutcome, ProviderTestResult,
-    RelayEnvironmentService, RelayEnvironmentSource, RemoveEnvironmentConflicts,
-    RepairPluginMarketplace, ResourcePresence, RunProviderSync, SessionEnvironment, SessionService,
+    ImportCcsProviders, LaunchCodex, MaintenanceErrorKind, MaintenanceService, MaintenanceSource,
+    ManagerSettingsErrorKind, ManagerSettingsService, ManagerSettingsSource, OverviewSnapshot,
+    OverviewSource, PluginMarketplaceCompatibilityWorkspace, PluginMarketplaceEnvironment,
+    PluginMarketplaceKind, PluginMarketplaceRepairOutcome, PluginMarketplaceService, PrivatePath,
+    ProviderDoctorCheck as ServiceProviderDoctorCheck, ProviderDoctorCheckId, ProviderDoctorReport,
+    ProviderImportService, ProviderImportSource, ProviderModelsResult, ProviderNetworkError,
+    ProviderNetworkFailureKind, ProviderProfile as ServiceProviderProfile, ProviderService,
+    ProviderSource, ProviderSyncService, ProviderSyncSource, ProviderTestOutcome,
+    ProviderTestResult, RelayEnvironmentService, RelayEnvironmentSource,
+    RemoveEnvironmentConflicts, RepairPluginMarketplace, ResetImageOverlaySettings,
+    ResourcePresence, RunProviderSync, SafeSettingsGroup, SessionEnvironment, SessionService,
     SessionSource, SystemOverviewSource, SystemProviderEnvironment, TestProviderProfile,
     UpdateCheckState, UserScriptService, ZedRemoteService, ZedRemoteSource,
 };
@@ -433,57 +432,48 @@ pub async fn load_overview() -> CommandResult<OverviewPayload> {
 
 #[tauri::command]
 pub fn launch_codex_plus(request: LaunchRequest) -> CommandResult<Value> {
-    spawn_codex_plus_launch(request, "启动任务已在后台开始，可稍后查看概览状态。")
+    launch_codex_plus_with(
+        system_maintenance_source(),
+        request,
+        "启动任务已在后台开始，可稍后查看概览状态。",
+    )
 }
 
 #[tauri::command]
 pub fn restart_codex_plus(request: LaunchRequest) -> CommandResult<Value> {
     codex_plus_core::watcher::stop_launcher_processes_and_wait();
     codex_plus_core::watcher::stop_codex_processes_and_wait();
-    spawn_codex_plus_launch(request, "Codex 已请求重启，启动任务正在后台运行。")
+    launch_codex_plus_with(
+        system_maintenance_source(),
+        request,
+        "Codex 已请求重启，启动任务正在后台运行。",
+    )
 }
 
-fn spawn_codex_plus_launch(request: LaunchRequest, accepted_message: &str) -> CommandResult<Value> {
+fn launch_codex_plus_with(
+    source: &dyn MaintenanceSource,
+    request: LaunchRequest,
+    accepted_message: &str,
+) -> CommandResult<Value> {
     let debug_port = request.debug_port;
     let helper_port = request.helper_port;
-    let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
-        "manager.launch_requested",
+    let launch =
+        LaunchCodex::compatibility(PrivatePath::new(request.app_path), debug_port, helper_port);
+    let payload = || {
         json!({
-            "debug_port": debug_port,
-            "helper_port": helper_port,
-            "app_path": request.app_path.trim()
-        }),
-    );
-    match spawn_silent_launcher(&request) {
-        Ok(()) => CommandResult {
+            "debugPort": debug_port,
+            "helperPort": helper_port
+        })
+    };
+    match source.launch(launch) {
+        Ok(outcome) if outcome.accepted => CommandResult {
             status: "accepted".to_string(),
             message: accepted_message.to_string(),
-            payload: json!({
-                "debugPort": debug_port,
-                "helperPort": helper_port
-            }),
+            payload: payload(),
         },
-        Err(error) => failed(
-            &format!("启动静默入口失败：{error}"),
-            json!({
-                "debugPort": debug_port,
-                "helperPort": helper_port
-            }),
-        ),
+        Ok(_) => failed("启动静默入口未被接受。", payload()),
+        Err(error) => failed(maintenance_launch_error_message(error.kind()), payload()),
     }
-}
-
-fn spawn_silent_launcher(request: &LaunchRequest) -> anyhow::Result<()> {
-    let mut args = Vec::new();
-    if !request.app_path.trim().is_empty() {
-        args.push("--app-path".to_string());
-        args.push(request.app_path.trim().to_string());
-    }
-    args.push("--debug-port".to_string());
-    args.push(request.debug_port.to_string());
-    args.push("--helper-port".to_string());
-    args.push(request.helper_port.to_string());
-    codex_plus_core::install::spawn_companion(SILENT_BINARY, &args).map(|_| ())
 }
 
 #[tauri::command]
@@ -1878,20 +1868,26 @@ pub fn disable_watcher() -> CommandResult<WatcherPayload> {
 
 #[tauri::command]
 pub fn read_latest_logs(request: LogRequest) -> CommandResult<LogsPayload> {
-    let path = codex_plus_core::paths::default_diagnostic_log_path();
-    match read_tail(&path, request.lines) {
-        Ok(text) => ok(
+    read_latest_logs_with(system_maintenance_source(), request)
+}
+
+fn read_latest_logs_with(
+    source: &dyn MaintenanceSource,
+    request: LogRequest,
+) -> CommandResult<LogsPayload> {
+    match source.load_logs(request.lines) {
+        Ok(document) => ok(
             "日志已读取。",
             LogsPayload {
-                path: path.to_string_lossy().to_string(),
-                text,
+                path: "[redacted]".to_owned(),
+                text: document.text().to_owned(),
                 lines: request.lines,
             },
         ),
-        Err(error) => failed(
-            &format!("读取日志失败：{error}"),
+        Err(_) => failed(
+            "读取日志失败。",
             LogsPayload {
-                path: path.to_string_lossy().to_string(),
+                path: "[redacted]".to_owned(),
                 text: String::new(),
                 lines: request.lines,
             },
@@ -1901,12 +1897,24 @@ pub fn read_latest_logs(request: LogRequest) -> CommandResult<LogsPayload> {
 
 #[tauri::command]
 pub fn copy_diagnostics() -> CommandResult<DiagnosticsPayload> {
-    ok(
-        "诊断报告已生成。",
-        DiagnosticsPayload {
-            report: diagnostics_report(),
-        },
-    )
+    copy_diagnostics_with(system_maintenance_source())
+}
+
+fn copy_diagnostics_with(source: &dyn MaintenanceSource) -> CommandResult<DiagnosticsPayload> {
+    match source.build_diagnostics() {
+        Ok(document) => ok(
+            "诊断报告已生成。",
+            DiagnosticsPayload {
+                report: document.text().to_owned(),
+            },
+        ),
+        Err(_) => failed(
+            "生成诊断报告失败。",
+            DiagnosticsPayload {
+                report: String::new(),
+            },
+        ),
+    }
 }
 
 #[tauri::command]
@@ -1930,35 +1938,30 @@ pub fn reset_settings() -> CommandResult<SettingsPayload> {
 
 #[tauri::command]
 pub fn reset_image_overlay_settings() -> CommandResult<SettingsPayload> {
-    let home = codex_plus_core::relay_config::default_codex_home_dir();
-    let _live_guard = match codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&home) {
-        Ok(guard) => guard,
+    reset_image_overlay_settings_with(system_manager_settings_source())
+}
+
+fn reset_image_overlay_settings_with(
+    source: &dyn ManagerSettingsSource,
+) -> CommandResult<SettingsPayload> {
+    let workspace = match source.load_workspace() {
+        Ok(workspace) => workspace,
         Err(error) => {
             return failed(
-                &format!("获取供应商 live 写锁失败：{error}"),
-                settings_payload_value().unwrap_or_else(|(_, payload)| payload),
+                manager_settings_error_message(error.kind()),
+                fallback_settings_payload(),
             );
         }
     };
-    let store = SettingsStore::default();
-    let mut settings = store.load().unwrap_or_default();
-    let defaults = BackendSettings::default();
-    settings.codex_app_image_overlay_enabled = defaults.codex_app_image_overlay_enabled;
-    settings.codex_app_image_overlay_path = defaults.codex_app_image_overlay_path;
-    settings.codex_app_image_overlay_opacity = defaults.codex_app_image_overlay_opacity;
-    settings.codex_app_image_overlay_fit_mode = defaults.codex_app_image_overlay_fit_mode;
-    let settings = normalize_settings_before_save(settings);
-    match store.save(&settings) {
-        Ok(()) => settings_payload("图片覆盖层设置已重置。", "图片覆盖层重置后重新读取失败"),
+    let request = ResetImageOverlaySettings {
+        expected_revision: workspace.image_overlay.revision,
+        confirmed_group: SafeSettingsGroup::ImageOverlay,
+    };
+    match source.reset_image_overlay(request) {
+        Ok(_) => settings_payload("图片覆盖层设置已重置。", "图片覆盖层重置后重新读取失败"),
         Err(error) => failed(
-            &format!("重置图片覆盖层失败：{error}"),
-            SettingsPayload {
-                settings,
-                settings_path: codex_plus_core::paths::default_settings_path()
-                    .to_string_lossy()
-                    .to_string(),
-                user_scripts: user_script_inventory(),
-            },
+            manager_settings_error_message(error.kind()),
+            fallback_settings_payload(),
         ),
     }
 }
@@ -2458,37 +2461,47 @@ pub async fn test_relay_profile(profile: RelayProfile) -> CommandResult<RelayPro
 pub async fn test_stepwise_settings(
     settings: BackendSettings,
 ) -> CommandResult<StepwiseTestPayload> {
-    match codex_plus_core::stepwise::test_connection(&settings).await {
-        Ok(result) => {
-            let error = result
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let item_count = result
-                .get("items")
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or_default();
-            if error.is_empty() {
-                ok(
-                    &format!("Stepwise 连接正常，测试返回 {item_count} 条建议。"),
-                    StepwiseTestPayload { item_count, error },
-                )
-            } else {
-                failed(
-                    &format!("Stepwise 测试失败：{error}"),
-                    StepwiseTestPayload { item_count, error },
-                )
-            }
-        }
-        Err(error) => failed(
-            &format!("Stepwise 测试失败：{error}"),
+    tauri::async_runtime::spawn_blocking(move || {
+        test_stepwise_settings_with(system_manager_settings_source(), settings)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let error = "Stepwise 测试任务已停止。";
+        failed(
+            error,
             StepwiseTestPayload {
                 item_count: 0,
-                error: error.to_string(),
+                error: error.to_owned(),
+            },
+        )
+    })
+}
+
+fn test_stepwise_settings_with(
+    source: &dyn ManagerSettingsSource,
+    settings: BackendSettings,
+) -> CommandResult<StepwiseTestPayload> {
+    match source.test_compatibility_settings(settings) {
+        Ok(outcome) => ok(
+            &format!(
+                "Stepwise 连接正常，测试返回 {} 条建议。",
+                outcome.item_count
+            ),
+            StepwiseTestPayload {
+                item_count: outcome.item_count,
+                error: String::new(),
             },
         ),
+        Err(error) => {
+            let safe_error = manager_settings_error_message(error.kind());
+            failed(
+                &format!("Stepwise 测试失败：{safe_error}"),
+                StepwiseTestPayload {
+                    item_count: 0,
+                    error: safe_error.to_owned(),
+                },
+            )
+        }
     }
 }
 
@@ -3290,33 +3303,6 @@ fn builtin_user_scripts_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("user_scripts"))
 }
 
-fn diagnostics_report() -> String {
-    let overview = match load_overview_payload() {
-        Ok(payload) => ok("概览已加载。", payload),
-        Err(_) => failed("概览后台任务失败。", overview_failure_payload()),
-    };
-    let settings = SettingsStore::default().load().unwrap_or_default();
-    let generated_at_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    serde_json::to_string_pretty(&json!({
-        "generatedAtMs": generated_at_ms,
-        "version": codex_plus_core::version::VERSION,
-        "overview": overview.payload,
-        "settings": settings,
-        "logs": {
-            "diagnosticLogPath": codex_plus_core::paths::default_diagnostic_log_path(),
-            "latestStatusPath": codex_plus_core::paths::default_latest_status_path()
-        },
-        "platform": {
-            "os": std::env::consts::OS,
-            "arch": std::env::consts::ARCH
-        }
-    }))
-    .unwrap_or_else(|error| format!("诊断报告序列化失败：{error}"))
-}
-
 fn load_overview_payload() -> Result<OverviewPayload, codex_plus_manager_service::OverviewError> {
     SystemOverviewSource::default()
         .load_overview()
@@ -3416,11 +3402,14 @@ fn watcher_payload() -> WatcherPayload {
     }
 }
 
-fn read_tail(path: &Path, max_lines: usize) -> std::io::Result<String> {
-    let contents = fs::read_to_string(path)?;
-    let mut lines = contents.lines().rev().take(max_lines).collect::<Vec<_>>();
-    lines.reverse();
-    Ok(lines.join("\n"))
+fn system_maintenance_source() -> &'static MaintenanceService<SystemProviderEnvironment> {
+    static SOURCE: OnceLock<MaintenanceService<SystemProviderEnvironment>> = OnceLock::new();
+    SOURCE.get_or_init(|| MaintenanceService::new(system_provider_environment().clone()))
+}
+
+fn system_manager_settings_source() -> &'static ManagerSettingsService<SystemProviderEnvironment> {
+    static SOURCE: OnceLock<ManagerSettingsService<SystemProviderEnvironment>> = OnceLock::new();
+    SOURCE.get_or_init(|| ManagerSettingsService::new(system_provider_environment().clone()))
 }
 
 fn system_provider_source() -> &'static ProviderService<SystemProviderEnvironment> {
@@ -3453,6 +3442,38 @@ fn system_plugin_marketplace_source() -> &'static PluginMarketplaceService<Syste
 fn system_provider_environment() -> &'static SystemProviderEnvironment {
     static ENVIRONMENT: OnceLock<SystemProviderEnvironment> = OnceLock::new();
     ENVIRONMENT.get_or_init(SystemProviderEnvironment::default)
+}
+
+fn maintenance_launch_error_message(kind: MaintenanceErrorKind) -> &'static str {
+    match kind {
+        MaintenanceErrorKind::InvalidPath => "Codex 应用路径无效。",
+        MaintenanceErrorKind::InvalidPort => "启动端口无效。",
+        MaintenanceErrorKind::WorkerStopped => "启动任务已停止。",
+        _ => "启动静默入口失败。",
+    }
+}
+
+fn manager_settings_error_message(kind: ManagerSettingsErrorKind) -> &'static str {
+    match kind {
+        ManagerSettingsErrorKind::SettingsReadFailed => "读取设置失败。",
+        ManagerSettingsErrorKind::SettingsWriteFailed => "保存设置失败。",
+        ManagerSettingsErrorKind::SettingsConflict => "设置已在其他位置更改，请重新加载。",
+        ManagerSettingsErrorKind::InvalidRevision => "设置版本已失效，请重新加载。",
+        ManagerSettingsErrorKind::InvalidUrl => "Stepwise 地址无效。",
+        ManagerSettingsErrorKind::InvalidEnvironmentVariable => "Stepwise 环境变量名无效。",
+        ManagerSettingsErrorKind::InvalidModel => "Stepwise 模型无效。",
+        ManagerSettingsErrorKind::InvalidNumericField => "Stepwise 数值设置无效。",
+        ManagerSettingsErrorKind::InvalidPath => "图片路径无效。",
+        ManagerSettingsErrorKind::InvalidFitMode => "图片适配模式无效。",
+        ManagerSettingsErrorKind::InvalidArgument => "Codex 启动参数无效。",
+        ManagerSettingsErrorKind::InvalidSecret => "Stepwise 密钥无效。",
+        ManagerSettingsErrorKind::ConfirmationMismatch => "重置确认信息不匹配。",
+        ManagerSettingsErrorKind::StepwiseUnauthorized => "Stepwise 认证失败。",
+        ManagerSettingsErrorKind::StepwiseTimeout => "Stepwise 请求超时。",
+        ManagerSettingsErrorKind::StepwiseRejected => "Stepwise 请求被拒绝。",
+        ManagerSettingsErrorKind::StepwiseNetwork => "Stepwise 网络请求失败。",
+        ManagerSettingsErrorKind::WorkerStopped => "设置任务已停止。",
+    }
 }
 
 fn provider_worker_error() -> ProviderNetworkError {
@@ -3714,8 +3735,227 @@ fn default_log_lines() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_plus_core::install::{EntryPointState, ShortcutState};
     use codex_plus_core::script_market::{MarketScript, ScriptMarketManifest};
+    use codex_plus_core::status::LaunchStatus;
+    use codex_plus_manager_service::{
+        CodexLaunchPlan, DiagnosticPathPresence, MaintenanceEnvironment, MaintenanceService,
+        ManagerSettingsError, ManagerSettingsErrorKind, ManagerSettingsService,
+        ManagerSettingsSource, PathKind, SafeSettingsGroup, StepwiseTestOutcome,
+    };
+    use std::path::Path;
     use std::sync::Arc;
+
+    const COMMAND_PRIVATE_PATH: &str = "C:/private/command-path-sentinel";
+    const COMMAND_PRIVATE_KEY: &str = "command-key-sentinel";
+    const COMMAND_PRIVATE_URL: &str = "https://private.invalid/body-sentinel";
+    const COMMAND_RAW_ERROR: &str = "raw-error-sentinel";
+
+    #[derive(Clone)]
+    struct CommandMaintenanceEnvironment {
+        settings: BackendSettings,
+        log_tail: Vec<u8>,
+        launch_fails: bool,
+    }
+
+    impl CommandMaintenanceEnvironment {
+        fn new(launch_fails: bool) -> Self {
+            let settings = BackendSettings {
+                codex_app_path: COMMAND_PRIVATE_PATH.to_owned(),
+                codex_app_stepwise_base_url: COMMAND_PRIVATE_URL.to_owned(),
+                codex_app_stepwise_api_key: COMMAND_PRIVATE_KEY.to_owned(),
+                codex_extra_args: vec![format!("--private={COMMAND_PRIVATE_KEY}")],
+                ..BackendSettings::default()
+            };
+            let log_tail = format!(
+                "{}\n",
+                json!({
+                    "timestamp_ms": 1,
+                    "event": "manager.launch_requested",
+                    "detail": {
+                        "debug_port": 9229,
+                        "helper_port": 57321,
+                        "path": COMMAND_PRIVATE_PATH,
+                        "key": COMMAND_PRIVATE_KEY,
+                        "url": COMMAND_PRIVATE_URL,
+                        "error": COMMAND_RAW_ERROR,
+                    }
+                })
+            )
+            .into_bytes();
+            Self {
+                settings,
+                log_tail,
+                launch_fails,
+            }
+        }
+    }
+
+    impl MaintenanceEnvironment for CommandMaintenanceEnvironment {
+        fn load_maintenance_settings(&self) -> anyhow::Result<BackendSettings> {
+            Ok(self.settings.clone())
+        }
+
+        fn update_maintenance_settings_if<F>(
+            &self,
+            _payload: Value,
+            _predicate: F,
+        ) -> anyhow::Result<Option<BackendSettings>>
+        where
+            F: FnOnce(&BackendSettings) -> bool,
+        {
+            Ok(Some(self.settings.clone()))
+        }
+
+        fn inspect_path(&self, _path: &Path) -> anyhow::Result<PathKind> {
+            Ok(PathKind::File)
+        }
+
+        fn resolve_codex_app(&self, _saved: &str) -> Option<PathBuf> {
+            None
+        }
+
+        fn codex_app_version(&self, _path: &Path) -> Option<String> {
+            None
+        }
+
+        fn inspect_entrypoints(&self) -> anyhow::Result<EntryPointState> {
+            Ok(EntryPointState {
+                silent_shortcut: ShortcutState {
+                    installed: false,
+                    path: None,
+                },
+                management_shortcut: ShortcutState {
+                    installed: false,
+                    path: None,
+                },
+            })
+        }
+
+        fn watcher_disabled(&self) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        fn load_latest_launch(&self) -> anyhow::Result<Option<LaunchStatus>> {
+            Ok(None)
+        }
+
+        fn read_diagnostic_tail(&self, max_bytes: usize) -> anyhow::Result<Vec<u8>> {
+            let start = self.log_tail.len().saturating_sub(max_bytes);
+            Ok(self.log_tail[start..].to_vec())
+        }
+
+        fn diagnostic_path_presence(&self) -> DiagnosticPathPresence {
+            DiagnosticPathPresence {
+                settings: true,
+                logs: true,
+                latest_status: false,
+            }
+        }
+
+        fn launch_codex(&self, _plan: &CodexLaunchPlan) -> anyhow::Result<()> {
+            if self.launch_fails {
+                anyhow::bail!(COMMAND_RAW_ERROR);
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum FakeStepwiseResult {
+        Success(usize),
+        Failure(ManagerSettingsErrorKind),
+    }
+
+    struct FakeManagerSettingsSource {
+        result: FakeStepwiseResult,
+    }
+
+    impl FakeManagerSettingsSource {
+        fn unsupported(&self) -> ManagerSettingsError {
+            ManagerSettingsError::new(
+                ManagerSettingsErrorKind::SettingsReadFailed,
+                Some(SafeSettingsGroup::Stepwise),
+            )
+        }
+    }
+
+    impl ManagerSettingsSource for FakeManagerSettingsSource {
+        fn load_workspace(
+            &self,
+        ) -> Result<codex_plus_manager_service::ManagerSettingsWorkspace, ManagerSettingsError>
+        {
+            Err(self.unsupported())
+        }
+
+        fn save_stepwise(
+            &self,
+            _request: codex_plus_manager_service::SaveStepwiseSettings,
+        ) -> Result<codex_plus_manager_service::ManagerSettingsWorkspace, ManagerSettingsError>
+        {
+            Err(self.unsupported())
+        }
+
+        fn reset_stepwise(
+            &self,
+            _request: codex_plus_manager_service::ResetStepwiseSettings,
+        ) -> Result<codex_plus_manager_service::ManagerSettingsWorkspace, ManagerSettingsError>
+        {
+            Err(self.unsupported())
+        }
+
+        fn test_stepwise(
+            &self,
+            _request: codex_plus_manager_service::TestStepwiseSettings,
+        ) -> Result<StepwiseTestOutcome, ManagerSettingsError> {
+            Err(self.unsupported())
+        }
+
+        fn save_image_overlay(
+            &self,
+            _request: codex_plus_manager_service::SaveImageOverlaySettings,
+        ) -> Result<codex_plus_manager_service::ManagerSettingsWorkspace, ManagerSettingsError>
+        {
+            Err(self.unsupported())
+        }
+
+        fn reset_image_overlay(
+            &self,
+            _request: codex_plus_manager_service::ResetImageOverlaySettings,
+        ) -> Result<codex_plus_manager_service::ManagerSettingsWorkspace, ManagerSettingsError>
+        {
+            Err(self.unsupported())
+        }
+
+        fn save_extra_args(
+            &self,
+            _request: codex_plus_manager_service::SaveExtraArgs,
+        ) -> Result<codex_plus_manager_service::ManagerSettingsWorkspace, ManagerSettingsError>
+        {
+            Err(self.unsupported())
+        }
+
+        fn reset_extra_args(
+            &self,
+            _request: codex_plus_manager_service::ResetExtraArgs,
+        ) -> Result<codex_plus_manager_service::ManagerSettingsWorkspace, ManagerSettingsError>
+        {
+            Err(self.unsupported())
+        }
+
+        fn test_compatibility_settings(
+            &self,
+            _settings: BackendSettings,
+        ) -> Result<StepwiseTestOutcome, ManagerSettingsError> {
+            match self.result {
+                FakeStepwiseResult::Success(item_count) => Ok(StepwiseTestOutcome { item_count }),
+                FakeStepwiseResult::Failure(kind) => Err(ManagerSettingsError::new(
+                    kind,
+                    Some(SafeSettingsGroup::Stepwise),
+                )),
+            }
+        }
+    }
 
     #[derive(Clone)]
     struct FakeZedSource {
@@ -4334,6 +4574,129 @@ mod tests {
     }
 
     #[test]
+    fn retained_log_and_diagnostic_payloads_keep_shape_but_return_shared_safe_text() {
+        let source = MaintenanceService::new(CommandMaintenanceEnvironment::new(false));
+        let expected_logs = source.load_logs(240).unwrap().text().to_owned();
+        let expected_report = source.build_diagnostics().unwrap().text().to_owned();
+
+        let logs = read_latest_logs_with(&source, LogRequest { lines: 240 });
+        let diagnostics = copy_diagnostics_with(&source);
+
+        assert_eq!(logs.status, "ok");
+        assert_eq!(logs.payload.path, "[redacted]");
+        assert_eq!(logs.payload.lines, 240);
+        assert_eq!(logs.payload.text, expected_logs);
+        assert_eq!(diagnostics.status, "ok");
+        assert_eq!(diagnostics.payload.report, expected_report);
+
+        let log_value = serde_json::to_value(&logs).unwrap();
+        let mut log_fields = log_value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        log_fields.sort();
+        assert_eq!(
+            log_fields,
+            vec!["lines", "message", "path", "status", "text"]
+        );
+        let serialized = format!(
+            "{}\n{}",
+            serde_json::to_string(&logs).unwrap(),
+            serde_json::to_string(&diagnostics).unwrap()
+        );
+        for forbidden in [
+            COMMAND_PRIVATE_PATH,
+            COMMAND_PRIVATE_KEY,
+            "private.invalid",
+            "body-sentinel",
+            COMMAND_RAW_ERROR,
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn retained_launch_payloads_are_compatible_and_never_serialize_private_input_or_raw_errors() {
+        let request = LaunchRequest {
+            app_path: COMMAND_PRIVATE_PATH.to_owned(),
+            debug_port: 9229,
+            helper_port: 57321,
+        };
+        let accepted = launch_codex_plus_with(
+            &MaintenanceService::new(CommandMaintenanceEnvironment::new(false)),
+            request.clone(),
+            "accepted",
+        );
+        let failed = launch_codex_plus_with(
+            &MaintenanceService::new(CommandMaintenanceEnvironment::new(true)),
+            request,
+            "accepted",
+        );
+
+        assert_eq!(accepted.status, "accepted");
+        assert_eq!(accepted.message, "accepted");
+        assert_eq!(accepted.payload["debugPort"], 9229);
+        assert_eq!(accepted.payload["helperPort"], 57321);
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.payload["debugPort"], 9229);
+        assert_eq!(failed.payload["helperPort"], 57321);
+
+        let serialized = format!(
+            "{}\n{}",
+            serde_json::to_string(&accepted).unwrap(),
+            serde_json::to_string(&failed).unwrap()
+        );
+        assert!(!serialized.contains(COMMAND_PRIVATE_PATH));
+        assert!(!serialized.contains(COMMAND_RAW_ERROR));
+    }
+
+    #[test]
+    fn retained_stepwise_payload_uses_safe_success_and_failure_results() {
+        let settings = BackendSettings {
+            codex_app_stepwise_enabled: true,
+            codex_app_stepwise_base_url: COMMAND_PRIVATE_URL.to_owned(),
+            codex_app_stepwise_api_key: COMMAND_PRIVATE_KEY.to_owned(),
+            codex_app_stepwise_model: "private-model-sentinel".to_owned(),
+            ..BackendSettings::default()
+        };
+        let success = test_stepwise_settings_with(
+            &FakeManagerSettingsSource {
+                result: FakeStepwiseResult::Success(3),
+            },
+            settings.clone(),
+        );
+        let failure = test_stepwise_settings_with(
+            &FakeManagerSettingsSource {
+                result: FakeStepwiseResult::Failure(ManagerSettingsErrorKind::StepwiseUnauthorized),
+            },
+            settings,
+        );
+
+        assert_eq!(success.status, "ok");
+        assert_eq!(success.payload.item_count, 3);
+        assert!(success.payload.error.is_empty());
+        assert_eq!(failure.status, "failed");
+        assert_eq!(failure.payload.item_count, 0);
+        assert!(!failure.payload.error.is_empty());
+
+        let serialized = format!(
+            "{}\n{}",
+            serde_json::to_string(&success).unwrap(),
+            serde_json::to_string(&failure).unwrap()
+        );
+        for forbidden in [
+            COMMAND_PRIVATE_KEY,
+            "private.invalid",
+            "body-sentinel",
+            "private-model-sentinel",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
+    }
+
+    #[test]
     fn update_install_requires_release_payload() {
         let result = tauri::async_runtime::block_on(perform_update(None));
 
@@ -4911,7 +5274,8 @@ mod tests {
     fn reset_image_overlay_settings_preserves_supplier_settings() {
         let temp = tempfile::tempdir().unwrap();
         let settings_path = temp.path().join("settings.json");
-        let previous = codex_plus_core::paths::set_settings_path_for_tests(Some(settings_path));
+        let previous =
+            codex_plus_core::paths::set_settings_path_for_tests(Some(settings_path.clone()));
 
         let settings = BackendSettings {
             codex_app_image_overlay_enabled: true,
@@ -4929,8 +5293,11 @@ mod tests {
             ..BackendSettings::default()
         };
         SettingsStore::default().save(&settings).unwrap();
+        let source = ManagerSettingsService::new(SystemProviderEnvironment::for_settings_path(
+            settings_path,
+        ));
 
-        let result = reset_image_overlay_settings();
+        let result = reset_image_overlay_settings_with(&source);
         codex_plus_core::paths::set_settings_path_for_tests(previous);
 
         assert_eq!(result.status, "ok");

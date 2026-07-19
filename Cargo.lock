@@ -966,11 +966,14 @@ dependencies = [
 name = "codex-plus-manager-native"
 version = "1.2.36"
 dependencies = [
+ "anyhow",
  "codex-plus-core",
  "codex-plus-manager-service",
  "eframe",
  "egui_extras",
  "egui_kittest",
+ "pollster",
+ "rfd 0.17.2",
  "serde",
  "serde_json",
  "tempfile",
@@ -993,6 +996,8 @@ dependencies = [
  "toml 0.8.2",
  "toml_edit 0.22.27",
  "url",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -4857,6 +4862,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfd"
+version = "0.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20dafead71c16a34e1ff357ddefc8afc11e7d51d6d2b9fbd07eaa48e3e540220"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "js-sys",
+ "libc",
+ "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "percent-encoding",
+ "pollster",
+ "raw-window-handle",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "web-sys",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rgb"
 version = "0.8.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5880,7 +5912,7 @@ checksum = "65981abb771e74e571a38196c3baa11c459379164791eba0e67abc1a5fac9884"
 dependencies = [
  "log",
  "raw-window-handle",
- "rfd",
+ "rfd 0.16.0",
  "serde",
  "serde_json",
  "tauri",

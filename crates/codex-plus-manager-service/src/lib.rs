@@ -1,5 +1,7 @@
 mod context_tools;
 mod error;
+mod maintenance;
+mod manager_settings;
 mod overview;
 mod plugin_marketplace;
 mod provider;
@@ -11,6 +13,7 @@ mod provider_presets;
 mod provider_sync;
 mod provider_system;
 mod relay_environment;
+mod revision_ledger;
 mod sessions;
 mod system;
 mod user_scripts;
@@ -26,6 +29,26 @@ pub use context_tools::{
     SaveContextEntry, SaveContextEntryMode, SetContextEntryEnabled, SyncContextToLive,
 };
 pub use error::{OverviewError, OverviewErrorKind};
+pub use maintenance::{
+    AppPathRevision, CodexAppSummary, CodexLaunchExecutor, CodexLaunchPlan, DiagnosticPathPresence,
+    EntrypointSummary, LaunchCodex, LaunchOutcome, LaunchState, LaunchSummary, LoadMaintenance,
+    MaintenanceEnvironment, MaintenanceError, MaintenanceErrorKind, MaintenanceIssue,
+    MaintenanceSection, MaintenanceService, MaintenanceSource, MaintenanceWorkspace, PathKind,
+    PrivatePath, RevisionedAppPath, SafeDiagnosticDocument, SafeErrorKind, SafeLogDocument,
+    SafeLogEvent, SafeLogField, SafeLogRecord, SafeLogSeverity, SafeSettingsGroup,
+    SaveCodexAppPath, SectionValue, WatcherSummary,
+};
+pub use manager_settings::{
+    ConfirmedSecretClear, ExtraArgsRevision, ExtraArgsSettings, ImageOverlayFitMode,
+    ImageOverlayRevision, ImageOverlaySettings, ManagerSettingsEnvironment, ManagerSettingsError,
+    ManagerSettingsErrorKind, ManagerSettingsService, ManagerSettingsSource,
+    ManagerSettingsWorkspace, PrivateArgument, PrivateUrl, ResetExtraArgs,
+    ResetImageOverlaySettings, ResetStepwiseSettings, RevisionedExtraArgs,
+    RevisionedImageOverlaySettings, RevisionedStepwiseSettings, SaveExtraArgs,
+    SaveImageOverlaySettings, SaveStepwiseSettings, SecretReplacement, StepwiseConnectionTester,
+    StepwiseRevision, StepwiseSecretChange, StepwiseSettings, StepwiseSettingsInput,
+    StepwiseTestFailure, StepwiseTestOutcome, TestStepwiseSettings,
+};
 pub use overview::{
     LocatedResource, OverviewEnvironment, OverviewService, OverviewSnapshot, OverviewSource,
     ResourcePresence, ShortcutSnapshot, UpdateCheckState,
