@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,6 +27,10 @@ pub struct SystemProviderEnvironment {
     user_script_builtin_dir: PathBuf,
     user_script_user_dir: PathBuf,
     user_script_config_path: PathBuf,
+    zed_global_state_path: PathBuf,
+    zed_registry_path: PathBuf,
+    zed_sqlite_paths: Vec<PathBuf>,
+    zed_launcher: Arc<dyn crate::ZedLaunchExecutor>,
     script_market_index_url: String,
     script_market_policy: codex_plus_core::script_market::MarketFetchPolicy,
     process_only_env_cleanup: bool,
@@ -69,6 +74,9 @@ impl SystemProviderEnvironment {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
+        let zed_global_state_path = codex_home.join(".codex-global-state.json");
+        let zed_sqlite_paths =
+            codex_plus_core::codex_sqlite::codex_session_db_paths_from_home(&codex_home);
         Self {
             settings: SettingsStore::new(settings_path),
             codex_home,
@@ -79,6 +87,10 @@ impl SystemProviderEnvironment {
             user_script_builtin_dir: default_builtin_user_scripts_dir(),
             user_script_user_dir: state_dir.join("user_scripts"),
             user_script_config_path: state_dir.join("user_scripts.json"),
+            zed_global_state_path,
+            zed_registry_path: state_dir.join("zed_remote_projects.json"),
+            zed_sqlite_paths,
+            zed_launcher: Arc::new(SystemZedLaunchExecutor),
             script_market_index_url: configured_script_market_index_url(),
             script_market_policy: codex_plus_core::script_market::MarketFetchPolicy::https_only(),
             process_only_env_cleanup,
@@ -100,6 +112,28 @@ impl SystemProviderEnvironment {
         self.user_script_builtin_dir = builtin_dir.into();
         self.user_script_user_dir = user_dir.into();
         self.user_script_config_path = config_path.into();
+        self
+    }
+
+    pub fn with_zed_remote_paths(
+        mut self,
+        global_state_path: impl Into<PathBuf>,
+        registry_path: impl Into<PathBuf>,
+        sqlite_paths: Vec<PathBuf>,
+    ) -> Self {
+        self.zed_global_state_path = global_state_path.into();
+        self.zed_registry_path = registry_path.into();
+        self.zed_sqlite_paths = sqlite_paths;
+        self
+    }
+
+    pub fn with_zed_launch_record_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.zed_launcher = Arc::new(RecordingZedLaunchExecutor { path: path.into() });
+        self
+    }
+
+    pub fn with_zed_launch_executor(mut self, launcher: Arc<dyn crate::ZedLaunchExecutor>) -> Self {
+        self.zed_launcher = launcher;
         self
     }
 
@@ -134,6 +168,12 @@ impl SystemProviderEnvironment {
         let user_script_builtin_dir = env_path("CODEX_PLUS_NATIVE_USER_SCRIPT_BUILTIN_DIR");
         let user_script_user_dir = env_path("CODEX_PLUS_NATIVE_USER_SCRIPT_USER_DIR");
         let user_script_config_path = env_path("CODEX_PLUS_NATIVE_USER_SCRIPT_CONFIG_PATH");
+        let zed_global_state_path = env_path("CODEX_PLUS_NATIVE_ZED_GLOBAL_STATE_PATH");
+        let zed_registry_path = env_path("CODEX_PLUS_NATIVE_ZED_REGISTRY_PATH");
+        let zed_launch_record_path = env_path("CODEX_PLUS_NATIVE_ZED_LAUNCH_RECORD_PATH");
+        let zed_override_present = zed_global_state_path.is_some()
+            || zed_registry_path.is_some()
+            || zed_launch_record_path.is_some();
         let script_market_index_url = std::env::var("CODEX_PLUS_SCRIPT_MARKET_INDEX_URL")
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -151,26 +191,59 @@ impl SystemProviderEnvironment {
             && user_script_builtin_dir.is_none()
             && user_script_user_dir.is_none()
             && user_script_config_path.is_none()
+            && !zed_override_present
             && script_market_index_url.is_none()
             && !allow_loopback_script_market
         {
             return Self::default();
         }
 
-        let settings_path =
-            settings_path.unwrap_or_else(codex_plus_core::paths::default_settings_path);
+        let zed_isolation_root = || {
+            zed_global_state_path
+                .as_deref()
+                .or(zed_registry_path.as_deref())
+                .or(zed_launch_record_path.as_deref())
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| std::env::temp_dir().join("codex-plus-native-zed"))
+        };
+        let settings_path = settings_path.unwrap_or_else(|| {
+            if zed_override_present {
+                zed_isolation_root().join("settings.json")
+            } else {
+                codex_plus_core::paths::default_settings_path()
+            }
+        });
         let state_dir = settings_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         let mut environment = Self::for_manager_paths(
             settings_path.clone(),
-            codex_home.unwrap_or_else(|| isolated_codex_home_for_settings(&settings_path)),
+            codex_home.unwrap_or_else(|| {
+                if zed_override_present {
+                    zed_isolation_root().join("codex")
+                } else {
+                    isolated_codex_home_for_settings(&settings_path)
+                }
+            }),
             ccs_db_path.unwrap_or_else(|| state_dir.join("cc-switch.db")),
             pending_import_path.unwrap_or_else(|| state_dir.join("pending-provider-import.json")),
             backup_dir.unwrap_or_else(|| state_dir.join("backups")),
             process_only_env_cleanup,
         );
+        if zed_override_present {
+            let global_state_path = zed_global_state_path
+                .unwrap_or_else(|| environment.codex_home.join(".codex-global-state.json"));
+            let registry_path =
+                zed_registry_path.unwrap_or_else(|| state_dir.join("zed_remote_projects.json"));
+            let sqlite_paths = environment.zed_sqlite_paths.clone();
+            environment =
+                environment.with_zed_remote_paths(global_state_path, registry_path, sqlite_paths);
+            if let Some(path) = zed_launch_record_path {
+                environment = environment.with_zed_launch_record_path(path);
+            }
+        }
         if let Some(path) = context_ownership_path {
             environment = environment.with_context_ownership_path(path);
         }
@@ -193,11 +266,18 @@ impl SystemProviderEnvironment {
 impl Default for SystemProviderEnvironment {
     fn default() -> Self {
         let state_dir = codex_plus_core::paths::default_app_state_dir();
+        let codex_home = codex_plus_core::relay_config::default_codex_home_dir();
         let user_script_config_dir =
             codex_plus_core::user_scripts::default_user_scripts_config_dir();
         Self {
             settings: SettingsStore::default(),
-            codex_home: codex_plus_core::relay_config::default_codex_home_dir(),
+            zed_global_state_path: codex_home.join(".codex-global-state.json"),
+            zed_registry_path: state_dir.join("zed_remote_projects.json"),
+            zed_sqlite_paths: codex_plus_core::codex_sqlite::codex_session_db_paths_from_home(
+                &codex_home,
+            ),
+            zed_launcher: Arc::new(SystemZedLaunchExecutor),
+            codex_home,
             context_ownership_path: codex_plus_core::paths::default_context_ownership_path(),
             ccs_db_path: codex_plus_core::ccs_import::default_ccs_db_path(),
             pending_import_path: codex_plus_core::paths::default_pending_provider_import_path(),
@@ -297,6 +377,122 @@ impl ProviderEnvironment for SystemProviderEnvironment {
             codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&self.codex_home)?;
         self.settings.update_if(payload, predicate)
     }
+}
+
+impl crate::ZedRemoteEnvironment for SystemProviderEnvironment {
+    fn load_zed_settings(&self) -> anyhow::Result<BackendSettings> {
+        self.settings.load()
+    }
+
+    fn update_zed_settings_if<F>(
+        &self,
+        payload: Value,
+        predicate: F,
+    ) -> anyhow::Result<Option<BackendSettings>>
+    where
+        F: FnOnce(&BackendSettings) -> bool,
+    {
+        let _lock =
+            codex_plus_core::relay_config::acquire_relay_live_mutation_lock(&self.codex_home)?;
+        self.settings.update_if(payload, predicate)
+    }
+
+    fn load_zed_global_state(
+        &self,
+    ) -> Result<Option<Value>, codex_plus_core::zed_remote::ZedRemoteError> {
+        let data = match fs::read_to_string(&self.zed_global_state_path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(codex_plus_core::zed_remote::ZedRemoteError::StateRead(
+                    error,
+                ));
+            }
+        };
+        serde_json::from_str(&data)
+            .map(Some)
+            .map_err(codex_plus_core::zed_remote::ZedRemoteError::StateParse)
+    }
+
+    fn zed_request_context(&self) -> Value {
+        Value::Object(serde_json::Map::new())
+    }
+
+    fn zed_registry_store(&self) -> codex_plus_core::zed_remote::ZedRemoteRegistryStore {
+        codex_plus_core::zed_remote::ZedRemoteRegistryStore::new(self.zed_registry_path.clone())
+    }
+
+    fn zed_sqlite_paths(&self) -> Vec<PathBuf> {
+        self.zed_sqlite_paths.clone()
+    }
+
+    fn zed_availability(&self) -> codex_plus_core::zed_remote::ZedAvailability {
+        self.zed_launcher
+            .availability_override()
+            .unwrap_or_else(codex_plus_core::zed_remote::zed_availability)
+    }
+
+    fn launch_zed_remote(
+        &self,
+        plan: &codex_plus_core::zed_remote::ZedLaunchPlan,
+    ) -> Result<(), codex_plus_core::zed_remote::ZedRemoteError> {
+        self.zed_launcher.launch(plan)
+    }
+}
+
+struct SystemZedLaunchExecutor;
+
+impl crate::ZedLaunchExecutor for SystemZedLaunchExecutor {
+    fn launch(
+        &self,
+        plan: &codex_plus_core::zed_remote::ZedLaunchPlan,
+    ) -> Result<(), codex_plus_core::zed_remote::ZedRemoteError> {
+        codex_plus_core::zed_remote::launch_zed_remote_plan(plan)
+    }
+}
+
+struct RecordingZedLaunchExecutor {
+    path: PathBuf,
+}
+
+impl crate::ZedLaunchExecutor for RecordingZedLaunchExecutor {
+    fn launch(
+        &self,
+        plan: &codex_plus_core::zed_remote::ZedLaunchPlan,
+    ) -> Result<(), codex_plus_core::zed_remote::ZedRemoteError> {
+        let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "strategy": plan.strategy(),
+            "argumentCount": plan.args().len(),
+        }))
+        .map_err(|_| safe_recording_launch_error())?;
+        write_recording_launch_atomically(&self.path, &bytes)
+            .map_err(|_| safe_recording_launch_error())
+    }
+
+    fn availability_override(&self) -> Option<codex_plus_core::zed_remote::ZedAvailability> {
+        Some(codex_plus_core::zed_remote::ZedAvailability {
+            platform_supported: true,
+            cli_found: true,
+            app_found: false,
+        })
+    }
+}
+
+fn write_recording_launch_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut temp_path = path.as_os_str().to_os_string();
+    temp_path.push(".tmp");
+    let temp_path = PathBuf::from(temp_path);
+    fs::write(&temp_path, bytes)?;
+    fs::rename(temp_path, path)
+}
+
+fn safe_recording_launch_error() -> codex_plus_core::zed_remote::ZedRemoteError {
+    codex_plus_core::zed_remote::ZedRemoteError::Launch(std::io::Error::other(
+        "failed to record Zed launch",
+    ))
 }
 
 impl ProviderActivationEnvironment for SystemProviderEnvironment {

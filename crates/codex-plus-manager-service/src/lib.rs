@@ -14,6 +14,7 @@ mod relay_environment;
 mod sessions;
 mod system;
 mod user_scripts;
+mod zed_remote;
 
 pub use context_tools::{
     CompatContextDeleteRequest, CompatContextEntries, CompatContextEntryRequest, ContextBundle,
@@ -93,4 +94,10 @@ pub use user_scripts::{
     SetUserScriptsEnabled, UserScriptBackupEvidence, UserScriptEnvironment, UserScriptError,
     UserScriptErrorKind, UserScriptMutationOutcome, UserScriptOrigin, UserScriptRevision,
     UserScriptService, UserScriptSource, UserScriptStatus, UserScriptSummary, UserScriptWorkspace,
+};
+pub use zed_remote::{
+    ForgetZedRemoteProject, OpenZedRemoteProject, SaveZedPreferences, ZedLaunchExecutor,
+    ZedProjectRevision, ZedRememberOutcome, ZedRemoteEnvironment, ZedRemoteError,
+    ZedRemoteErrorKind, ZedRemoteOpenOutcome, ZedRemoteProjectSummary, ZedRemoteService,
+    ZedRemoteSource, ZedRemoteWorkspace, ZedSettingsRevision,
 };

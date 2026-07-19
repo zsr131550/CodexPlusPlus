@@ -10,7 +10,7 @@ use codex_plus_core::relay_environment::RelayEnvironmentReport;
 use codex_plus_core::settings::{BackendSettings, RelayProfile, SettingsStore};
 use codex_plus_core::status::LaunchStatus;
 use codex_plus_core::user_scripts::UserScriptManager;
-use codex_plus_core::zed_remote::{ZedOpenStrategy, ZedRemoteProject};
+use codex_plus_core::zed_remote::{ZedOpenStrategy, ZedRemoteProject, ZedRemoteProjectSource};
 use codex_plus_manager_service::{
     CompatContextDeleteRequest, CompatContextEntryRequest, ConfirmPendingImport,
     ContextToolsEnvironment, ContextToolsService, DiagnoseProviderProfile, DismissPendingImport,
@@ -25,7 +25,7 @@ use codex_plus_manager_service::{
     RelayEnvironmentService, RelayEnvironmentSource, RemoveEnvironmentConflicts,
     RepairPluginMarketplace, ResourcePresence, RunProviderSync, SessionEnvironment, SessionService,
     SessionSource, SystemOverviewSource, SystemProviderEnvironment, TestProviderProfile,
-    UpdateCheckState, UserScriptService,
+    UpdateCheckState, UserScriptService, ZedRemoteService, ZedRemoteSource,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -700,75 +700,193 @@ fn list_local_sessions_with_service(
 
 #[tauri::command]
 pub fn list_zed_remote_projects() -> CommandResult<ZedRemoteProjectsPayload> {
-    let result = codex_plus_core::zed_remote::list_zed_remote_projects_response(&json!({}));
-    if result.get("status").and_then(Value::as_str) == Some("ok") {
-        let projects = serde_json::from_value::<Vec<ZedRemoteProject>>(
-            result
-                .get("projects")
-                .cloned()
-                .unwrap_or_else(|| Value::Array(Vec::new())),
-        )
-        .unwrap_or_default();
-        return ok(
-            &format!("已读取 {} 个 Zed 远程项目。", projects.len()),
-            ZedRemoteProjectsPayload { projects },
-        );
-    }
-    failed(
-        result
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("读取 Zed 远程项目失败。"),
-        ZedRemoteProjectsPayload {
-            projects: Vec::new(),
-        },
-    )
+    let service = ZedRemoteService::new(SystemProviderEnvironment::default());
+    list_zed_remote_projects_with_service(&service)
 }
 
 #[tauri::command]
 pub fn open_zed_remote(payload: Value) -> CommandResult<ZedRemoteOpenPayload> {
-    let result = codex_plus_core::zed_remote::open_zed_remote(&payload);
-    let strategy = result
-        .get("strategy")
-        .cloned()
-        .and_then(|value| serde_json::from_value::<ZedOpenStrategy>(value).ok())
-        .unwrap_or_default();
-    let url = result
-        .get("url")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if result.get("status").and_then(Value::as_str) == Some("ok") {
-        return ok(
-            "已在 Zed Remote 打开项目。",
-            ZedRemoteOpenPayload { url, strategy },
-        );
-    }
-    failed(
-        result
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("无法在 Zed Remote 打开项目。"),
-        ZedRemoteOpenPayload { url, strategy },
-    )
+    let service = ZedRemoteService::new(SystemProviderEnvironment::default());
+    open_zed_remote_with_service(&service, payload)
 }
 
 #[tauri::command]
 pub fn forget_zed_remote_project(id: String) -> CommandResult<ZedRemoteProjectsPayload> {
-    let result =
-        codex_plus_core::zed_remote::forget_zed_remote_project_response(&json!({ "id": id }));
-    if result.get("status").and_then(Value::as_str) != Some("ok") {
+    let service = ZedRemoteService::new(SystemProviderEnvironment::default());
+    forget_zed_remote_project_with_service(&service, id)
+}
+
+fn list_zed_remote_projects_with_service(
+    service: &dyn ZedRemoteSource,
+) -> CommandResult<ZedRemoteProjectsPayload> {
+    match service.load_workspace() {
+        Ok(workspace) => {
+            let projects = workspace
+                .projects
+                .iter()
+                .map(legacy_project_from_summary)
+                .collect::<Vec<_>>();
+            ok(
+                &format!("Loaded {} Zed remote projects.", projects.len()),
+                ZedRemoteProjectsPayload { projects },
+            )
+        }
+        Err(error) => failed(
+            &error.to_string(),
+            ZedRemoteProjectsPayload {
+                projects: Vec::new(),
+            },
+        ),
+    }
+}
+
+fn open_zed_remote_with_service(
+    service: &dyn ZedRemoteSource,
+    payload: Value,
+) -> CommandResult<ZedRemoteOpenPayload> {
+    let strategy = codex_plus_core::zed_remote::zed_open_strategy_from_payload(&payload);
+    let target = match codex_plus_core::zed_remote::target_from_payload(&payload) {
+        Ok(target) => target,
+        Err(error) => {
+            return failed(
+                &error.to_string(),
+                ZedRemoteOpenPayload {
+                    url: String::new(),
+                    strategy,
+                },
+            );
+        }
+    };
+    let path = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let url = match codex_plus_core::zed_remote::build_zed_remote_url(&target, &path) {
+        Ok(url) => url,
+        Err(error) => {
+            return failed(
+                &error.to_string(),
+                ZedRemoteOpenPayload {
+                    url: String::new(),
+                    strategy,
+                },
+            );
+        }
+    };
+    let remember = payload
+        .get("remember")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let workspace = match service.load_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            return failed(&error.to_string(), ZedRemoteOpenPayload { url, strategy });
+        }
+    };
+    let Some(project) = workspace.projects.iter().find(|project| project.url == url) else {
         return failed(
-            result
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("移除 Zed 远程项目失败。"),
+            "The requested Zed remote project is not in the current workspace.",
+            ZedRemoteOpenPayload { url, strategy },
+        );
+    };
+    let request = codex_plus_manager_service::OpenZedRemoteProject {
+        project_id: project.id.clone(),
+        confirmed_project_id: project.id.clone(),
+        expected_project_revision: project.revision.clone(),
+        expected_registry_revision: workspace.registry_revision.clone(),
+        strategy,
+        confirmed_strategy: strategy,
+        remember,
+        confirmed_remember: remember,
+    };
+    match service.open_project(request) {
+        Ok(outcome) => {
+            let message = match outcome.remember {
+                codex_plus_manager_service::ZedRememberOutcome::Failed(_) => {
+                    "Opened in Zed; saving the recent project failed."
+                }
+                _ => "Opened the project in Zed Remote.",
+            };
+            ok(
+                message,
+                ZedRemoteOpenPayload {
+                    url: outcome.url,
+                    strategy: outcome.strategy,
+                },
+            )
+        }
+        Err(error) => failed(&error.to_string(), ZedRemoteOpenPayload { url, strategy }),
+    }
+}
+
+fn forget_zed_remote_project_with_service(
+    service: &dyn ZedRemoteSource,
+    id: String,
+) -> CommandResult<ZedRemoteProjectsPayload> {
+    let workspace = match service.load_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            return failed(
+                &error.to_string(),
+                ZedRemoteProjectsPayload {
+                    projects: Vec::new(),
+                },
+            );
+        }
+    };
+    let Some(project) = workspace
+        .projects
+        .iter()
+        .find(|project| project.id == id && project.source == ZedRemoteProjectSource::Recent)
+    else {
+        return failed(
+            "The recent Zed remote project was not found.",
             ZedRemoteProjectsPayload {
                 projects: Vec::new(),
             },
         );
+    };
+    let request = codex_plus_manager_service::ForgetZedRemoteProject {
+        expected_registry_revision: workspace.registry_revision.clone(),
+        project_id: id,
+        confirmed_project_id: project.id.clone(),
+    };
+    match service.forget_project(request) {
+        Ok(workspace) => ok(
+            "Removed the Zed remote project.",
+            ZedRemoteProjectsPayload {
+                projects: workspace
+                    .projects
+                    .iter()
+                    .map(legacy_project_from_summary)
+                    .collect(),
+            },
+        ),
+        Err(error) => failed(
+            &error.to_string(),
+            ZedRemoteProjectsPayload {
+                projects: Vec::new(),
+            },
+        ),
     }
-    list_zed_remote_projects()
+}
+
+fn legacy_project_from_summary(
+    project: &codex_plus_manager_service::ZedRemoteProjectSummary,
+) -> ZedRemoteProject {
+    ZedRemoteProject {
+        id: project.id.clone(),
+        label: project.label.clone(),
+        host_id: project.host_id.clone(),
+        ssh: project.ssh.clone(),
+        path: project.remote_path.clone(),
+        url: project.url.clone(),
+        source: project.source,
+        last_opened_at_ms: project.last_opened_at_ms,
+        is_current: project.is_current,
+    }
 }
 
 #[tauri::command]
@@ -3597,6 +3715,176 @@ fn default_log_lines() -> usize {
 mod tests {
     use super::*;
     use codex_plus_core::script_market::{MarketScript, ScriptMarketManifest};
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct FakeZedSource {
+        workspace: codex_plus_manager_service::ZedRemoteWorkspace,
+        opened: Arc<Mutex<Option<codex_plus_manager_service::OpenZedRemoteProject>>>,
+        forgotten: Arc<Mutex<Option<codex_plus_manager_service::ForgetZedRemoteProject>>>,
+    }
+
+    impl codex_plus_manager_service::ZedRemoteSource for FakeZedSource {
+        fn load_workspace(
+            &self,
+        ) -> Result<
+            codex_plus_manager_service::ZedRemoteWorkspace,
+            codex_plus_manager_service::ZedRemoteError,
+        > {
+            Ok(self.workspace.clone())
+        }
+
+        fn save_preferences(
+            &self,
+            _request: codex_plus_manager_service::SaveZedPreferences,
+        ) -> Result<
+            codex_plus_manager_service::ZedRemoteWorkspace,
+            codex_plus_manager_service::ZedRemoteError,
+        > {
+            Err(codex_plus_manager_service::ZedRemoteError::new(
+                codex_plus_manager_service::ZedRemoteErrorKind::SettingsConflict,
+            ))
+        }
+
+        fn open_project(
+            &self,
+            request: codex_plus_manager_service::OpenZedRemoteProject,
+        ) -> Result<
+            codex_plus_manager_service::ZedRemoteOpenOutcome,
+            codex_plus_manager_service::ZedRemoteError,
+        > {
+            *self.opened.lock().unwrap() = Some(request.clone());
+            let project = self.workspace.projects.first().unwrap();
+            Ok(codex_plus_manager_service::ZedRemoteOpenOutcome {
+                workspace: self.workspace.clone(),
+                strategy: request.strategy,
+                url: project.url.clone(),
+                remember: codex_plus_manager_service::ZedRememberOutcome::NotRequested,
+            })
+        }
+
+        fn forget_project(
+            &self,
+            request: codex_plus_manager_service::ForgetZedRemoteProject,
+        ) -> Result<
+            codex_plus_manager_service::ZedRemoteWorkspace,
+            codex_plus_manager_service::ZedRemoteError,
+        > {
+            *self.forgotten.lock().unwrap() = Some(request);
+            let mut workspace = self.workspace.clone();
+            workspace.projects.clear();
+            Ok(workspace)
+        }
+    }
+
+    fn fake_zed_source() -> FakeZedSource {
+        let temp = tempfile::tempdir().unwrap();
+        let revision = codex_plus_core::zed_remote::ZedRemoteRegistryStore::new(
+            temp.path().join("registry.json"),
+        )
+        .inspect()
+        .unwrap()
+        .revision;
+        let project = codex_plus_manager_service::ZedRemoteProjectSummary {
+            id: "zed-remote-project:tauri".to_string(),
+            revision: codex_plus_manager_service::ZedProjectRevision::from_digest([2; 32]),
+            label: "Tauri Project".to_string(),
+            host_id: "host-tauri".to_string(),
+            ssh: codex_plus_core::zed_remote::SshTarget {
+                user: "alice".to_string(),
+                host: "host.example.test".to_string(),
+                port: Some(2222),
+            },
+            remote_path: "/srv/tauri".to_string(),
+            url: "ssh://alice@host.example.test:2222/srv/tauri".to_string(),
+            source: codex_plus_core::zed_remote::ZedRemoteProjectSource::Recent,
+            last_opened_at_ms: Some(1),
+            is_current: false,
+        };
+        let workspace = codex_plus_manager_service::ZedRemoteWorkspace {
+            settings_revision: codex_plus_manager_service::ZedSettingsRevision::from_digest(
+                [1; 32],
+            ),
+            registry_revision: revision,
+            default_strategy: ZedOpenStrategy::AddToFocusedWorkspace,
+            registry_enabled: true,
+            availability: codex_plus_core::zed_remote::ZedAvailability {
+                platform_supported: true,
+                cli_found: true,
+                app_found: false,
+            },
+            projects: vec![project],
+        };
+        FakeZedSource {
+            workspace,
+            opened: Arc::new(Mutex::new(None)),
+            forgotten: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn zed_tauri_adapters_preserve_legacy_json_keys_and_confirmations() {
+        let source = fake_zed_source();
+        let listed = list_zed_remote_projects_with_service(&source);
+        let listed_json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(listed.status, "ok");
+        assert_eq!(
+            json_object_keys(&listed_json),
+            vec!["message", "projects", "status",]
+        );
+        assert_eq!(
+            json_object_keys(&listed_json["projects"][0]),
+            vec![
+                "hostId",
+                "id",
+                "isCurrent",
+                "label",
+                "lastOpenedAtMs",
+                "path",
+                "source",
+                "ssh",
+                "url",
+            ]
+        );
+
+        let opened = open_zed_remote_with_service(
+            &source,
+            json!({
+                "ssh": {"host": "alice@host.example.test", "port": 2222},
+                "path": "/srv/tauri",
+                "strategy": "newWindow",
+                "remember": false
+            }),
+        );
+        let opened_json = serde_json::to_value(&opened).unwrap();
+        assert_eq!(opened.status, "ok");
+        assert_eq!(
+            json_object_keys(&opened_json),
+            vec!["message", "status", "strategy", "url"]
+        );
+        assert_eq!(opened_json["strategy"], "newWindow");
+        let request = source.opened.lock().unwrap().clone().unwrap();
+        assert_eq!(request.project_id, "zed-remote-project:tauri");
+        assert_eq!(request.confirmed_project_id, request.project_id);
+        assert_eq!(request.confirmed_strategy, ZedOpenStrategy::NewWindow);
+        assert!(!request.confirmed_remember);
+
+        let forgotten =
+            forget_zed_remote_project_with_service(&source, "zed-remote-project:tauri".to_string());
+        assert_eq!(forgotten.status, "ok");
+        assert!(source.forgotten.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn zed_tauri_open_rejects_non_matching_target_without_launch() {
+        let source = fake_zed_source();
+        let result = open_zed_remote_with_service(
+            &source,
+            json!({"ssh": {"host": "other.example.test"}, "path": "/srv/nope"}),
+        );
+        assert_eq!(result.status, "failed");
+        assert!(source.opened.lock().unwrap().is_none());
+    }
 
     #[test]
     fn user_script_market_adapter_preserves_react_json_contract() {
