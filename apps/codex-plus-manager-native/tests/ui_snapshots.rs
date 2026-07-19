@@ -11,6 +11,9 @@ use codex_plus_core::relay_environment::{
     ClashVergeTunCheck, CodexEnvFileCheck, ProxyEnvironmentCheck, RelayEnvironmentReport,
 };
 use codex_plus_core::settings::RelayProtocol;
+use codex_plus_core::zed_remote::{
+    SshTarget, ZedAvailability, ZedOpenStrategy, ZedRemoteProjectSource, ZedRemoteRegistryRevision,
+};
 use codex_plus_manager_native::fonts;
 use codex_plus_manager_native::i18n::{Locale, TextKey, ThemeMode, text};
 use codex_plus_manager_native::state::Route;
@@ -25,6 +28,7 @@ use codex_plus_manager_native::state::sessions::{
 use codex_plus_manager_native::state::user_scripts::{
     ScriptsTab, UserScriptFailureKind, UserScriptViewState,
 };
+use codex_plus_manager_native::state::zed_remote::{ZedRemoteFailureKind, ZedRemoteViewState};
 use codex_plus_manager_native::theme;
 use codex_plus_manager_native::views::shell::{ShellFeatureStates, ShellViewModel, render_shell};
 use codex_plus_manager_service::{
@@ -40,6 +44,8 @@ use codex_plus_manager_service::{
     SessionDeleteBatchOutcome, SessionDeleteOutcome, SessionRevision, SessionSummary,
     SessionWorkspace, UserScriptBackupEvidence, UserScriptErrorKind, UserScriptMutationOutcome,
     UserScriptOrigin, UserScriptRevision, UserScriptStatus, UserScriptSummary, UserScriptWorkspace,
+    ZedProjectRevision, ZedRememberOutcome, ZedRemoteErrorKind, ZedRemoteOpenOutcome,
+    ZedRemoteProjectSummary, ZedRemoteWorkspace, ZedSettingsRevision,
 };
 use eframe::egui;
 use egui_kittest::{Harness, SnapshotOptions, SnapshotResults, kittest::Queryable};
@@ -55,6 +61,12 @@ struct SnapshotState {
     marketplace: Option<MarketplaceViewState>,
     sessions: Option<SessionViewState>,
     user_scripts: Option<UserScriptViewState>,
+    cjk_font: Option<Vec<u8>>,
+}
+
+struct ZedSnapshotState {
+    model: ShellViewModel,
+    zed_remote: ZedRemoteViewState,
     cjk_font: Option<Vec<u8>>,
 }
 
@@ -97,6 +109,15 @@ enum UserScriptSnapshotScenario {
     LocalGlobalOff,
     DeleteConfirmation,
     BackedUpResult,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ZedRemoteSnapshotScenario {
+    Loading,
+    ProjectList,
+    LaunchConfirmation,
+    SettingsConflict,
+    PartialRemember,
 }
 
 const CASES: &[(f32, f32, Locale, ThemeMode, &str)] = &[
@@ -371,6 +392,30 @@ const USER_SCRIPT_SCENARIOS: &[(UserScriptSnapshotScenario, &str)] = &[
     ),
 ];
 
+const ZED_REMOTE_VIEWPORTS: &[(f32, f32, Locale, ThemeMode, &str)] = &[
+    (1180.0, 820.0, Locale::ZhCn, ThemeMode::Dark, "1180_zh_dark"),
+    (1180.0, 820.0, Locale::En, ThemeMode::Light, "1180_en_light"),
+    (960.0, 720.0, Locale::ZhCn, ThemeMode::Light, "960_zh_light"),
+    (960.0, 720.0, Locale::En, ThemeMode::Dark, "960_en_dark"),
+];
+
+const ZED_REMOTE_SCENARIOS: &[(ZedRemoteSnapshotScenario, &str)] = &[
+    (ZedRemoteSnapshotScenario::Loading, "loading"),
+    (ZedRemoteSnapshotScenario::ProjectList, "projects"),
+    (
+        ZedRemoteSnapshotScenario::LaunchConfirmation,
+        "launch_confirmation",
+    ),
+    (
+        ZedRemoteSnapshotScenario::SettingsConflict,
+        "settings_conflict",
+    ),
+    (
+        ZedRemoteSnapshotScenario::PartialRemember,
+        "partial_remember",
+    ),
+];
+
 #[test]
 fn overview_wgpu_snapshot_matrix() {
     if std::env::var_os("CODEX_PLUS_UI_SNAPSHOTS").as_deref() != Some("1".as_ref()) {
@@ -451,6 +496,16 @@ fn scripts_wgpu_snapshot_matrix() {
     run_user_script_snapshot_matrix();
 }
 
+#[test]
+fn zed_remote_wgpu_snapshot_matrix() {
+    if std::env::var_os("CODEX_PLUS_UI_SNAPSHOTS").as_deref() != Some("1".as_ref()) {
+        return;
+    }
+    let _guard = snapshot_test_guard();
+
+    run_zed_remote_snapshot_matrix();
+}
+
 fn snapshot_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -496,6 +551,7 @@ fn run_snapshot_matrix(
                             marketplace: state.marketplace.as_ref(),
                             sessions: state.sessions.as_ref(),
                             user_scripts: state.user_scripts.as_ref(),
+                            zed_remote: None,
                         },
                     );
                 },
@@ -819,6 +875,71 @@ fn run_user_script_snapshot_matrix() {
     results.unwrap();
 }
 
+fn run_zed_remote_snapshot_matrix() {
+    let font = fonts::load_cjk_font().expect("Windows CJK font is required for UI snapshots");
+    let snapshots = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    let mut results = SnapshotResults::new();
+
+    for &(scenario, scenario_name) in ZED_REMOTE_SCENARIOS {
+        for &(width, height, locale, mode, viewport_name) in ZED_REMOTE_VIEWPORTS {
+            let options = SnapshotOptions::new().output_path(&snapshots);
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(width, height))
+                .with_theme(match mode {
+                    ThemeMode::Dark => egui::Theme::Dark,
+                    ThemeMode::Light => egui::Theme::Light,
+                })
+                .with_os(egui::os::OperatingSystem::Windows)
+                .with_options(options)
+                .wgpu()
+                .build_ui_state(
+                    |ui, state: &mut ZedSnapshotState| {
+                        if let Some(bytes) = state.cjk_font.take() {
+                            egui_extras::install_image_loaders(ui.ctx());
+                            fonts::install_cjk_font(ui.ctx(), bytes);
+                            theme::apply(ui.ctx(), state.model.theme);
+                        }
+                        let _ = render_shell(
+                            ui,
+                            &state.model,
+                            ShellFeatureStates {
+                                zed_remote: Some(&state.zed_remote),
+                                ..ShellFeatureStates::default()
+                            },
+                        );
+                    },
+                    ZedSnapshotState {
+                        model: {
+                            let mut model = common::model(locale, mode);
+                            model.route = Route::ZedRemote;
+                            model
+                        },
+                        zed_remote: zed_remote_snapshot_state(scenario),
+                        cjk_font: Some(font.clone()),
+                    },
+                );
+
+            harness.remove_cursor();
+            if matches!(scenario, ZedRemoteSnapshotScenario::Loading) {
+                harness.run_steps(2);
+            } else {
+                harness.run();
+            }
+            assert_zed_remote_layout(&harness, scenario, locale, width, height);
+            let image = harness.render().expect("Zed remote snapshot should render");
+            let distinct = image
+                .pixels()
+                .map(|pixel| pixel.0)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(distinct.len() > 8, "Zed remote snapshot rendered blank");
+            harness.snapshot(format!("zed_remote_{scenario_name}_{viewport_name}"));
+            results.extend_harness(&mut harness);
+        }
+    }
+
+    results.unwrap();
+}
+
 fn assert_context_layout(
     harness: &Harness<'_, SnapshotState>,
     scenario: ContextSnapshotScenario,
@@ -985,6 +1106,36 @@ fn assert_user_script_layout(
     );
 }
 
+fn assert_zed_remote_layout(
+    harness: &Harness<'_, ZedSnapshotState>,
+    scenario: ZedRemoteSnapshotScenario,
+    locale: Locale,
+    width: f32,
+    height: f32,
+) {
+    let header = format!(
+        "{} {}",
+        text(locale, TextKey::AppName),
+        text(locale, TextKey::ZedRemote)
+    );
+    assert_inside(harness.get_by_label(&header).rect(), width, height, &header);
+    let scenario_label = match scenario {
+        ZedRemoteSnapshotScenario::Loading => text(locale, TextKey::Loading),
+        ZedRemoteSnapshotScenario::ProjectList => {
+            "Long Zed workspace label that must truncate without moving command controls"
+        }
+        ZedRemoteSnapshotScenario::LaunchConfirmation => text(locale, TextKey::ZedOpenConfirmation),
+        ZedRemoteSnapshotScenario::SettingsConflict => text(locale, TextKey::ZedSettingsConflict),
+        ZedRemoteSnapshotScenario::PartialRemember => text(locale, TextKey::ZedRememberFailed),
+    };
+    assert_inside(
+        harness.get_by_label(scenario_label).rect(),
+        width,
+        height,
+        scenario_label,
+    );
+}
+
 fn assert_inside(rect: egui::Rect, width: f32, height: f32, label: &str) {
     assert!(rect.is_positive(), "{label}: {rect:?}");
     assert!(rect.min.x >= 0.0 && rect.min.y >= 0.0, "{label}: {rect:?}");
@@ -992,6 +1143,109 @@ fn assert_inside(rect: egui::Rect, width: f32, height: f32, label: &str) {
         rect.max.x <= width && rect.max.y <= height,
         "{label}: {rect:?}"
     );
+}
+
+fn zed_remote_snapshot_state(scenario: ZedRemoteSnapshotScenario) -> ZedRemoteViewState {
+    let mut state = ZedRemoteViewState::default();
+    if matches!(scenario, ZedRemoteSnapshotScenario::Loading) {
+        state.begin_load();
+        return state;
+    }
+
+    let request_id = state.begin_load();
+    state.apply_load_response(request_id, Ok(Arc::new(zed_remote_workspace())));
+    match scenario {
+        ZedRemoteSnapshotScenario::Loading | ZedRemoteSnapshotScenario::ProjectList => {}
+        ZedRemoteSnapshotScenario::LaunchConfirmation => {
+            state.request_open("zed-current", ZedOpenStrategy::NewWindow, true);
+        }
+        ZedRemoteSnapshotScenario::SettingsConflict => {
+            state.set_strategy(ZedOpenStrategy::NewWindow);
+            let (save_id, _) = state.begin_save_preferences().unwrap();
+            state.apply_save_response(
+                save_id,
+                Err(ZedRemoteFailureKind::Service(
+                    ZedRemoteErrorKind::SettingsConflict,
+                )),
+            );
+        }
+        ZedRemoteSnapshotScenario::PartialRemember => {
+            state.request_open("zed-current", ZedOpenStrategy::ReuseWindow, true);
+            let (open_id, _) = state.begin_open().unwrap();
+            state.apply_open_response(
+                open_id,
+                Ok(Arc::new(ZedRemoteOpenOutcome {
+                    workspace: zed_remote_workspace(),
+                    strategy: ZedOpenStrategy::ReuseWindow,
+                    url: "zed://snapshot-redacted".to_owned(),
+                    remember: ZedRememberOutcome::Failed(ZedRemoteErrorKind::RegistryWriteFailed),
+                })),
+            );
+        }
+    }
+    state
+}
+
+fn zed_remote_workspace() -> ZedRemoteWorkspace {
+    ZedRemoteWorkspace {
+        settings_revision: ZedSettingsRevision::from_digest([31; 32]),
+        registry_revision: ZedRemoteRegistryRevision::from_digest([32; 32]),
+        default_strategy: ZedOpenStrategy::ReuseWindow,
+        registry_enabled: true,
+        availability: ZedAvailability {
+            platform_supported: true,
+            cli_found: true,
+            app_found: true,
+        },
+        projects: vec![
+            zed_remote_project(
+                "zed-current",
+                "Long Zed workspace label that must truncate without moving command controls",
+                "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+                &format!("/{}", "snapshot-very-long-segment/".repeat(7)),
+                ZedRemoteProjectSource::CurrentThread,
+            ),
+            zed_remote_project(
+                "zed-recent",
+                "Recent snapshot workspace",
+                "recent.snapshot.example.test",
+                "/srv/recent-snapshot",
+                ZedRemoteProjectSource::Recent,
+            ),
+            zed_remote_project(
+                "zed-discovered",
+                "Discovered snapshot workspace",
+                "discovered.snapshot.example.test",
+                "/srv/discovered-snapshot",
+                ZedRemoteProjectSource::SqliteThreadCwd,
+            ),
+        ],
+    }
+}
+
+fn zed_remote_project(
+    id: &str,
+    label: &str,
+    host: &str,
+    remote_path: &str,
+    source: ZedRemoteProjectSource,
+) -> ZedRemoteProjectSummary {
+    ZedRemoteProjectSummary {
+        id: id.to_owned(),
+        revision: ZedProjectRevision::from_digest([id.len() as u8; 32]),
+        label: label.to_owned(),
+        host_id: format!("snapshot-host-{id}"),
+        ssh: SshTarget {
+            user: "snapshot-user".to_owned(),
+            host: host.to_owned(),
+            port: Some(2222),
+        },
+        remote_path: remote_path.to_owned(),
+        url: format!("zed://ssh/snapshot-user@{host}:2222{remote_path}"),
+        source,
+        last_opened_at_ms: Some(1_700_000_000_000),
+        is_current: source == ZedRemoteProjectSource::CurrentThread,
+    }
 }
 
 fn context_snapshot_state(scenario: ContextSnapshotScenario) -> ContextViewState {

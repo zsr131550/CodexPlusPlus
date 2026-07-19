@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $ColdRunCount = 5
 $ColdExitAfterMs = 3000
 $IdleSampleSeconds = 30
-$IdleExitAfterMs = 35000
+$IdleExitAfterMs = 42000
 $FirstFrameLimitMs = 1500.0
 $CpuP95LimitMs = 16.7
 $MaximumStallLimitMs = 50.0
@@ -76,7 +76,21 @@ $ExpectedScriptActions = @(
     'request_delete_first_user_script',
     'cancel_user_script_delete',
     'request_delete_first_user_script',
-    'confirm_user_script_delete'
+    'confirm_user_script_delete',
+    'navigate_zed_remote',
+    'refresh_zed_remote',
+    'edit_zed_preferences',
+    'save_zed_preferences',
+    'request_zed_open',
+    'cancel_zed_open',
+    'request_zed_open',
+    'confirm_zed_open',
+    'request_zed_forget',
+    'cancel_zed_forget',
+    'request_zed_forget',
+    'confirm_zed_forget',
+    'request_zed_conflict_refresh',
+    'confirm_zed_conflict_refresh'
 )
 
 $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -187,6 +201,12 @@ enabled = true
         relayCommonConfigContents = ''
         relayContextConfigContents = $ContextConfig
         relayTestModel = 'perf-model'
+        zedRemoteOpenStrategy = 'reuseWindow'
+        zedRemoteProjectRegistryEnabled = $false
+        futureZedRoot = [ordered]@{
+            keep = $true
+            label = 'preserved'
+        }
     }
     $Json = $Settings | ConvertTo-Json -Depth 8
     [IO.File]::WriteAllText($Path, $Json, [Text.UTF8Encoding]::new($false))
@@ -283,6 +303,116 @@ connection.close()
     $CreateFixture | & $Python.Source - $DatabasePath
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $DatabasePath -PathType Leaf)) {
         throw 'failed to create the isolated SQLite performance fixture'
+    }
+}
+
+function New-ZedRemoteFixture {
+    param(
+        [Parameter(Mandatory)]
+        [string] $SampleDirectory
+    )
+
+    $Encoding = [Text.UTF8Encoding]::new($false)
+    $GlobalStatePath = Join-Path $SampleDirectory '.codex-global-state.json'
+    $RegistryPath = Join-Path $SampleDirectory 'zed-remote-projects.json'
+    $LaunchRecordPath = Join-Path $SampleDirectory 'zed-launch-record.json'
+    $SshUser = 'zed-perf-user-sentinel'
+    $SshHost = 'zed-perf-host-sentinel.example.test'
+    $SshPort = 2222
+    $HostId = 'perf-zed-managed-host'
+    $CurrentPath = '/zed/perf/current-path-sentinel'
+    $ForgetPath = '/zed/perf/forget-path-sentinel'
+    $StalePath = '/zed/perf/stale-path-sentinel'
+    $CurrentUrl = "ssh://${SshUser}@${SshHost}:$SshPort$CurrentPath"
+    $ForgetUrl = "ssh://${SshUser}@${SshHost}:$SshPort$ForgetPath"
+    $StaleUrl = "ssh://${SshUser}@${SshHost}:$SshPort$StalePath"
+
+    $GlobalState = [ordered]@{
+        'selected-remote-host-id' = $HostId
+        'codex-managed-remote-connections' = @(
+            [ordered]@{
+                hostId = $HostId
+                hostname = "${SshUser}@${SshHost}"
+                sshPort = $SshPort
+            }
+        )
+        'remote-projects' = @(
+            [ordered]@{
+                id = 'perf-zed-current'
+                hostId = $HostId
+                remotePath = $CurrentPath
+                label = 'Performance current Zed workspace'
+            }
+        )
+        'project-order' = @('perf-zed-current')
+    }
+    [IO.File]::WriteAllText(
+        $GlobalStatePath,
+        ($GlobalState | ConvertTo-Json -Depth 8),
+        $Encoding
+    )
+
+    $Registry = [ordered]@{
+        projects = @(
+            [ordered]@{
+                id = 'perf-zed-forget'
+                label = 'Performance forget fixture'
+                hostId = $HostId
+                ssh = [ordered]@{
+                    user = $SshUser
+                    host = $SshHost
+                    port = $SshPort
+                }
+                path = $ForgetPath
+                url = $ForgetUrl
+                source = 'recent'
+                lastOpenedAtMs = 2000
+                isCurrent = $false
+            },
+            [ordered]@{
+                id = 'perf-zed-stale'
+                label = 'Performance stale fixture'
+                hostId = $HostId
+                ssh = [ordered]@{
+                    user = $SshUser
+                    host = $SshHost
+                    port = $SshPort
+                }
+                path = $StalePath
+                url = $StaleUrl
+                source = 'recent'
+                lastOpenedAtMs = 1000
+                isCurrent = $false
+            }
+        )
+        futureRegistry = [ordered]@{
+            keep = $true
+            label = 'preserved'
+        }
+    }
+    [IO.File]::WriteAllText(
+        $RegistryPath,
+        ($Registry | ConvertTo-Json -Depth 8),
+        $Encoding
+    )
+
+    [pscustomobject]@{
+        GlobalStatePath = $GlobalStatePath
+        RegistryPath = $RegistryPath
+        LaunchRecordPath = $LaunchRecordPath
+        CurrentPath = $CurrentPath
+        ForgetPath = $ForgetPath
+        StalePath = $StalePath
+        SensitiveValues = @(
+            $SshUser,
+            $SshHost,
+            $CurrentPath,
+            $ForgetPath,
+            $StalePath,
+            $CurrentUrl,
+            $ForgetUrl,
+            $StaleUrl
+        )
     }
 }
 
@@ -447,6 +577,73 @@ function Start-ScriptMarketFixture {
     }
 }
 
+function Get-NativeDiagnosticLogPath {
+    Join-Path $HOME '.codex-session-delete\codex-plus.log'
+}
+
+function Read-DiagnosticRecordsForProcess {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [Parameter(Mandatory)]
+        [long] $Offset,
+
+        [Parameter(Mandatory)]
+        [int] $ProcessId
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return ''
+    }
+
+    $Stream = [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::ReadWrite
+    )
+    try {
+        if ($Offset -gt $Stream.Length) {
+            $Offset = 0
+        }
+        $null = $Stream.Seek($Offset, [IO.SeekOrigin]::Begin)
+        $Reader = [IO.StreamReader]::new(
+            $Stream,
+            [Text.UTF8Encoding]::new($false),
+            $true,
+            1024,
+            $true
+        )
+        try {
+            $Text = $Reader.ReadToEnd()
+        }
+        finally {
+            $Reader.Dispose()
+        }
+    }
+    finally {
+        $Stream.Dispose()
+    }
+
+    $Records = @()
+    foreach ($Line in @($Text -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($Line)) {
+            continue
+        }
+        try {
+            $Record = $Line | ConvertFrom-Json
+            if ([int]$Record.pid -eq $ProcessId) {
+                $Records += ($Record | ConvertTo-Json -Depth 8 -Compress)
+            }
+        }
+        catch {
+            continue
+        }
+    }
+    $Records -join "`n"
+}
+
 function Invoke-NativeSample {
     param(
         [Parameter(Mandatory)]
@@ -467,13 +664,21 @@ function Invoke-NativeSample {
     $PendingImportPath = Join-Path $SampleDirectory 'pending-provider-import.json'
     $BackupDirectory = Join-Path $SampleDirectory 'backups'
     $ContextOwnershipPath = Join-Path $SampleDirectory 'context-live-ownership.json'
+    $DiagnosticLogPath = Get-NativeDiagnosticLogPath
     New-Item -ItemType Directory -Path $SampleDirectory | Out-Null
     New-ProviderSettingsFixture -Path $SettingsPath
     New-CodexHomeFixture -Path $CodexHome
     New-PendingImportFixture -Path $PendingImportPath
+    $ZedFixture = New-ZedRemoteFixture -SampleDirectory $SampleDirectory
     $MarketFixture = $null
     $Process = $null
     $PrivateMemoryBytes = $null
+    $DiagnosticStartOffset = if (Test-Path -LiteralPath $DiagnosticLogPath -PathType Leaf) {
+        [long](Get-Item -LiteralPath $DiagnosticLogPath).Length
+    }
+    else {
+        0L
+    }
 
     try {
         $MarketFixture = Start-ScriptMarketFixture -SampleDirectory $SampleDirectory
@@ -493,6 +698,9 @@ function Invoke-NativeSample {
         $env:CODEX_PLUS_NATIVE_USER_SCRIPT_CONFIG_PATH = $MarketFixture.ConfigPath
         $env:CODEX_PLUS_SCRIPT_MARKET_INDEX_URL = $MarketFixture.IndexUrl
         $env:CODEX_PLUS_NATIVE_SCRIPT_MARKET_ALLOW_LOOPBACK = '1'
+        $env:CODEX_PLUS_NATIVE_ZED_GLOBAL_STATE_PATH = $ZedFixture.GlobalStatePath
+        $env:CODEX_PLUS_NATIVE_ZED_REGISTRY_PATH = $ZedFixture.RegistryPath
+        $env:CODEX_PLUS_NATIVE_ZED_LAUNCH_RECORD_PATH = $ZedFixture.LaunchRecordPath
         $env:CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY = '1'
         $env:OPENAI_CODEX_PLUS_PERF_SENTINEL = 'present'
 
@@ -521,6 +729,11 @@ function Invoke-NativeSample {
         }
 
         $Report = Wait-ForReport -Path $ReportPath
+        $ReportText = Get-Content -LiteralPath $ReportPath -Raw
+        $DiagnosticText = Read-DiagnosticRecordsForProcess `
+            -Path $DiagnosticLogPath `
+            -Offset $DiagnosticStartOffset `
+            -ProcessId $Process.Id
         if ($null -eq $Report.first_ui_frame_ms) {
             throw "$Name did not record first_ui_frame_ms"
         }
@@ -539,6 +752,8 @@ function Invoke-NativeSample {
             ScriptActions = @($Report.script_actions | ForEach-Object { [string] $_ })
             PrivateMemoryBytes = $PrivateMemoryBytes
             ReportPath = $ReportPath
+            ReportText = $ReportText
+            DiagnosticText = $DiagnosticText
             SettingsPath = $SettingsPath
             CodexHomePath = $CodexHome
             LiveConfigPath = Join-Path $CodexHome 'config.toml'
@@ -558,6 +773,13 @@ function Invoke-NativeSample {
             UserScriptUnrelatedPath = $MarketFixture.UnrelatedPath
             UserScriptMarketAccessLogPath = $MarketFixture.AccessLogPath
             UserScriptMarketProcessId = $MarketFixture.ProcessId
+            ZedGlobalStatePath = $ZedFixture.GlobalStatePath
+            ZedRegistryPath = $ZedFixture.RegistryPath
+            ZedLaunchRecordPath = $ZedFixture.LaunchRecordPath
+            ZedCurrentPath = $ZedFixture.CurrentPath
+            ZedForgetPath = $ZedFixture.ForgetPath
+            ZedStalePath = $ZedFixture.StalePath
+            ZedSensitiveValues = $ZedFixture.SensitiveValues
         }
     }
     finally {
@@ -822,6 +1044,102 @@ function Assert-UserScriptWorkflowResult {
     }
 }
 
+function Assert-ZedRemoteWorkflowResult {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Sample
+    )
+
+    $SampleRoot = [IO.Path]::GetFullPath($Sample.SampleDirectory).TrimEnd('\') + '\'
+    foreach ($FixturePath in @(
+        $Sample.ZedGlobalStatePath,
+        $Sample.ZedRegistryPath,
+        $Sample.ZedLaunchRecordPath
+    )) {
+        $Resolved = [IO.Path]::GetFullPath([string]$FixturePath)
+        if (-not $Resolved.StartsWith($SampleRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Zed fixture escaped the isolated sample root: $Resolved"
+        }
+    }
+
+    $Settings = Get-Content -LiteralPath $Sample.SettingsPath -Raw | ConvertFrom-Json
+    if ($Settings.zedRemoteOpenStrategy -ne 'newWindow') {
+        throw 'the Zed workflow did not persist the new-window strategy'
+    }
+    if ($Settings.zedRemoteProjectRegistryEnabled -ne $true) {
+        throw 'the Zed workflow did not persist the enabled project registry'
+    }
+    if (
+        $Settings.futureZedRoot.keep -ne $true -or
+        $Settings.futureZedRoot.label -ne 'preserved' -or
+        $Settings.activeRelayId -ne 'perf-provider-a'
+    ) {
+        throw 'the Zed preference save did not preserve unrelated settings'
+    }
+
+    if (-not (Test-Path -LiteralPath $Sample.ZedLaunchRecordPath -PathType Leaf)) {
+        throw 'the recording Zed launcher did not write a launch record'
+    }
+    $Launch = Get-Content -LiteralPath $Sample.ZedLaunchRecordPath -Raw | ConvertFrom-Json
+    if ($Launch.strategy -ne 'newWindow' -or [int]$Launch.argumentCount -ne 2) {
+        throw 'the recording Zed launcher captured unexpected launch arguments'
+    }
+    if ((@($Launch.PSObject.Properties.Name | Sort-Object) -join ',') -ne 'argumentCount,strategy') {
+        throw 'the recording Zed launcher disclosed data beyond strategy and argument count'
+    }
+
+    $Registry = Get-Content -LiteralPath $Sample.ZedRegistryPath -Raw | ConvertFrom-Json
+    if ($Registry.futureRegistry.keep -ne $true -or $Registry.futureRegistry.label -ne 'preserved') {
+        throw 'the Zed registry mutation did not preserve unknown root fields'
+    }
+    $Projects = @($Registry.projects)
+    $Remembered = @($Projects | Where-Object { $_.path -eq $Sample.ZedCurrentPath })
+    if (
+        $Remembered.Count -ne 1 -or
+        $Remembered[0].source -ne 'recent' -or
+        $Remembered[0].isCurrent -ne $false
+    ) {
+        throw 'the confirmed Zed launch did not remember the current project exactly once'
+    }
+    if (@($Projects | Where-Object { $_.path -eq $Sample.ZedForgetPath }).Count -ne 0) {
+        throw 'the confirmed Zed forget did not remove its selected fixture'
+    }
+    if (@($Projects | Where-Object { $_.path -eq $Sample.ZedStalePath }).Count -ne 1) {
+        throw 'the stale Zed forget unexpectedly changed the registry'
+    }
+
+    $ConflictRecorded = $false
+    foreach ($Line in @($Sample.DiagnosticText -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($Line)) {
+            continue
+        }
+        $Record = $Line | ConvertFrom-Json
+        if (
+            $Record.event -eq 'native_manager.zed_remote_failed' -and
+            $Record.detail.operation -eq 'forget' -and
+            $Record.detail.kind -eq 'RegistryConflict'
+        ) {
+            $ConflictRecorded = $true
+        }
+    }
+    if (-not $ConflictRecorded) {
+        throw 'the Zed workflow did not exercise the registry-conflict refresh path'
+    }
+
+    $LaunchText = Get-Content -LiteralPath $Sample.ZedLaunchRecordPath -Raw
+    foreach ($Sensitive in @($Sample.ZedSensitiveValues)) {
+        if ($Sample.ReportText.Contains([string]$Sensitive)) {
+            throw 'the performance report disclosed a Zed URL, SSH identity, or remote path'
+        }
+        if ($Sample.DiagnosticText.Contains([string]$Sensitive)) {
+            throw 'the diagnostic log disclosed a Zed URL, SSH identity, or remote path'
+        }
+        if ($LaunchText.Contains([string]$Sensitive)) {
+            throw 'the recording launcher disclosed a Zed URL, SSH identity, or remote path'
+        }
+    }
+}
+
 function Get-Percentile {
     param(
         [Parameter(Mandatory)]
@@ -868,6 +1186,9 @@ foreach ($Name in @(
     'CODEX_PLUS_NATIVE_USER_SCRIPT_CONFIG_PATH',
     'CODEX_PLUS_SCRIPT_MARKET_INDEX_URL',
     'CODEX_PLUS_NATIVE_SCRIPT_MARKET_ALLOW_LOOPBACK',
+    'CODEX_PLUS_NATIVE_ZED_GLOBAL_STATE_PATH',
+    'CODEX_PLUS_NATIVE_ZED_REGISTRY_PATH',
+    'CODEX_PLUS_NATIVE_ZED_LAUNCH_RECORD_PATH',
     'CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY',
     'OPENAI_CODEX_PLUS_PERF_SENTINEL'
 )) {
@@ -910,6 +1231,7 @@ try {
     Assert-ContextWorkflowResult -Sample $IdleSample
     Assert-MarketplaceWorkflowResult -Sample $IdleSample
     Assert-UserScriptWorkflowResult -Sample $IdleSample
+    Assert-ZedRemoteWorkflowResult -Sample $IdleSample
     if ($null -eq $IdleSample.PrivateMemoryBytes) {
         throw 'the 30-second sample did not record private memory'
     }
