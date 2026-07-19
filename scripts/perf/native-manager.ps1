@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $ColdRunCount = 5
 $ColdExitAfterMs = 3000
 $IdleSampleSeconds = 30
-$IdleExitAfterMs = 52000
+$IdleExitAfterMs = 54000
 $FirstFrameLimitMs = 1500.0
 $CpuP95LimitMs = 16.7
 $MaximumStallLimitMs = 50.0
@@ -110,7 +110,10 @@ $ExpectedScriptActions = @(
     'cancel_image_overlay_reset',
     'open_extra_args_settings',
     'edit_extra_args_settings',
-    'save_extra_args_settings'
+    'save_extra_args_settings',
+    'navigate_enhancements',
+    'edit_enhancements',
+    'save_enhancements'
 )
 
 $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -1099,6 +1102,9 @@ function Assert-MaintenanceSettingsWorkflowResult {
     }
     if ((@($Settings.codexExtraArgs) -join "`n") -ne ($Fixture.SavedExtraArgs -join "`n")) {
         throw 'the launch-arguments workflow did not persist the scripted values'
+    }
+    if ($Settings.enhancementsEnabled -ne $false) {
+        throw 'the enhancements workflow did not persist the scripted master setting'
     }
     if (
         $Settings.futureSettingsRoot.keep -ne $true -or

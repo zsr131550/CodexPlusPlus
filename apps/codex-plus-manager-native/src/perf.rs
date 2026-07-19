@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-const SCRIPT_DURATION: Duration = Duration::from_secs(50);
+const SCRIPT_DURATION: Duration = Duration::from_secs(52);
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const FINAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -114,6 +114,9 @@ pub enum PerfScriptAction {
     OpenExtraArgsSettings,
     EditExtraArgsSettings,
     SaveExtraArgsSettings,
+    NavigateEnhancements,
+    EditEnhancements,
+    SaveEnhancements,
 }
 
 enum PerfEvent {
@@ -315,7 +318,7 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> 
         egui::Key::F34,
         egui::Key::F35,
     ];
-    const ACTIONS: [PerfScriptAction; 99] = [
+    const ACTIONS: [PerfScriptAction; 102] = [
         PerfScriptAction::NavigateProviders,
         PerfScriptAction::SelectNextProvider,
         PerfScriptAction::EditProviderName,
@@ -415,6 +418,9 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> 
         PerfScriptAction::OpenExtraArgsSettings,
         PerfScriptAction::EditExtraArgsSettings,
         PerfScriptAction::SaveExtraArgsSettings,
+        PerfScriptAction::NavigateEnhancements,
+        PerfScriptAction::EditEnhancements,
+        PerfScriptAction::SaveEnhancements,
     ];
     ACTIONS.get(index).map(|action| {
         let key = INITIAL_KEYS.get(index).copied().unwrap_or(egui::Key::F35);
@@ -518,6 +524,9 @@ impl PerfScriptAction {
             Self::OpenExtraArgsSettings => "open_extra_args_settings",
             Self::EditExtraArgsSettings => "edit_extra_args_settings",
             Self::SaveExtraArgsSettings => "save_extra_args_settings",
+            Self::NavigateEnhancements => "navigate_enhancements",
+            Self::EditEnhancements => "edit_enhancements",
+            Self::SaveEnhancements => "save_enhancements",
         }
     }
 }
@@ -956,12 +965,41 @@ mod tests {
             );
             assert_eq!(action.name(), name);
         }
-        assert_eq!(script_step(99), None);
+    }
+
+    #[test]
+    fn native_perf_script_appends_the_enhancements_workflow() {
+        let expected = [
+            (
+                50_000,
+                PerfScriptAction::NavigateEnhancements,
+                "navigate_enhancements",
+            ),
+            (
+                50_500,
+                PerfScriptAction::EditEnhancements,
+                "edit_enhancements",
+            ),
+            (
+                51_000,
+                PerfScriptAction::SaveEnhancements,
+                "save_enhancements",
+            ),
+        ];
+
+        for (offset, (milliseconds, action, name)) in expected.into_iter().enumerate() {
+            assert_eq!(
+                script_step(99 + offset),
+                Some((Duration::from_millis(milliseconds), egui::Key::F35, action)),
+            );
+            assert_eq!(action.name(), name);
+        }
+        assert_eq!(script_step(102), None);
     }
 
     #[test]
     fn native_perf_repaint_window_covers_the_complete_script() {
-        let (last_due, _, _) = script_step(98).expect("last scripted action");
+        let (last_due, _, _) = script_step(101).expect("last scripted action");
 
         assert!(SCRIPT_DURATION >= last_due + Duration::from_millis(500));
     }
