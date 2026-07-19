@@ -12,10 +12,11 @@ use codex_plus_manager_native::state::{OverviewPhase, Route};
 use codex_plus_manager_native::views::shell::ShellViewModel;
 use codex_plus_manager_service::{
     CodexLaunchPlan, DiagnosticPathPresence, LocatedResource, MaintenanceEnvironment,
-    MaintenanceService, MaintenanceWorkspace, OverviewSnapshot, PathKind,
-    ProviderActivationSummary, ProviderDocument, ProviderKind, ProviderLiveFiles,
-    ProviderLiveRevision, ProviderLiveWorkspace, ProviderProfile, ProviderRevision,
-    ProviderWorkspace, ResourcePresence, ShortcutSnapshot, UpdateCheckState,
+    MaintenanceService, MaintenanceWorkspace, ManagerSettingsEnvironment, ManagerSettingsService,
+    ManagerSettingsWorkspace, OverviewSnapshot, PathKind, ProviderActivationSummary,
+    ProviderDocument, ProviderKind, ProviderLiveFiles, ProviderLiveRevision, ProviderLiveWorkspace,
+    ProviderProfile, ProviderRevision, ProviderWorkspace, ResourcePresence, ShortcutSnapshot,
+    StepwiseTestFailure, UpdateCheckState,
 };
 
 pub fn snapshot(codex_version: &str) -> Arc<OverviewSnapshot> {
@@ -130,6 +131,38 @@ impl MaintenanceEnvironment for FixtureMaintenanceEnvironment {
     }
 }
 
+impl ManagerSettingsEnvironment for FixtureMaintenanceEnvironment {
+    fn load_manager_settings(&self) -> anyhow::Result<codex_plus_core::settings::BackendSettings> {
+        Ok(self.settings.clone())
+    }
+
+    fn update_manager_settings_if<F>(
+        &self,
+        _payload: serde_json::Value,
+        predicate: F,
+    ) -> anyhow::Result<Option<codex_plus_core::settings::BackendSettings>>
+    where
+        F: FnOnce(&codex_plus_core::settings::BackendSettings) -> bool,
+    {
+        Ok(predicate(&self.settings).then(|| self.settings.clone()))
+    }
+
+    fn inspect_path(&self, _path: &std::path::Path) -> anyhow::Result<PathKind> {
+        Ok(PathKind::File)
+    }
+
+    fn environment_value_present(&self, name: &str) -> bool {
+        name == "CODEX_PLUS_FIXTURE_KEY"
+    }
+
+    fn test_stepwise_candidate(
+        &self,
+        _settings: &codex_plus_core::settings::BackendSettings,
+    ) -> Result<usize, StepwiseTestFailure> {
+        Ok(3)
+    }
+}
+
 #[allow(dead_code)]
 pub fn maintenance_workspace(path: &str) -> Arc<MaintenanceWorkspace> {
     let settings = codex_plus_core::settings::BackendSettings {
@@ -157,6 +190,36 @@ pub fn maintenance_workspace(path: &str) -> Arc<MaintenanceWorkspace> {
         MaintenanceService::new(FixtureMaintenanceEnvironment { settings, log_tail })
             .load_workspace(codex_plus_manager_service::LoadMaintenance { log_lines: 100 })
             .unwrap(),
+    )
+}
+
+#[allow(dead_code)]
+pub fn manager_settings_workspace(seed: u8) -> Arc<ManagerSettingsWorkspace> {
+    let settings = codex_plus_core::settings::BackendSettings {
+        codex_app_stepwise_enabled: true,
+        codex_app_stepwise_direct_send: seed.is_multiple_of(2),
+        codex_app_stepwise_base_url: format!("https://private-{seed}.invalid/body-sentinel"),
+        codex_app_stepwise_api_key: "private-key-sentinel".to_owned(),
+        codex_app_stepwise_api_key_env: "CODEX_PLUS_FIXTURE_KEY".to_owned(),
+        codex_app_stepwise_model: format!("fixture-model-{seed}"),
+        codex_app_stepwise_max_items: seed.min(6),
+        codex_app_stepwise_max_input_chars: 8_000 + u32::from(seed),
+        codex_app_stepwise_max_output_tokens: 1_000 + u32::from(seed),
+        codex_app_stepwise_timeout_ms: 20_000 + u64::from(seed),
+        codex_app_image_overlay_enabled: true,
+        codex_app_image_overlay_path: format!("C:/private/overlay-{seed}.png"),
+        codex_app_image_overlay_opacity: 60 + seed.min(30),
+        codex_app_image_overlay_fit_mode: "fit".to_owned(),
+        codex_extra_args: vec![format!("--fixture-{seed}"), "--safe-mode".to_owned()],
+        ..codex_plus_core::settings::BackendSettings::default()
+    };
+    Arc::new(
+        ManagerSettingsService::new(FixtureMaintenanceEnvironment {
+            settings,
+            log_tail: Vec::new(),
+        })
+        .load_workspace()
+        .unwrap(),
     )
 }
 

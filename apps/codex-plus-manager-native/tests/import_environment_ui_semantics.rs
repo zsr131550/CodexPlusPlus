@@ -68,7 +68,8 @@ fn render(ui: &mut egui::Ui, state: &mut FeatureState) {
             | ShellAction::Context(_)
             | ShellAction::Marketplace(_)
             | ShellAction::ZedRemote(_)
-            | ShellAction::Maintenance(_) => {}
+            | ShellAction::Maintenance(_)
+            | ShellAction::Settings(_) => {}
             ShellAction::Refresh
             | ShellAction::Retry
             | ShellAction::SetLocale(_)

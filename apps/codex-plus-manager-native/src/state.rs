@@ -9,6 +9,7 @@ pub mod maintenance;
 pub mod marketplace;
 pub mod provider;
 pub mod sessions;
+pub mod settings;
 pub mod user_scripts;
 pub mod zed_remote;
 
@@ -29,6 +30,7 @@ pub enum Route {
     Context,
     ZedRemote,
     Maintenance,
+    Settings,
     About,
 }
 
@@ -107,6 +109,7 @@ pub struct AppState {
     pub user_scripts: user_scripts::UserScriptViewState,
     pub zed_remote: zed_remote::ZedRemoteViewState,
     pub maintenance: maintenance::MaintenanceViewState,
+    pub settings: settings::SettingsViewState,
 }
 
 impl AppState {

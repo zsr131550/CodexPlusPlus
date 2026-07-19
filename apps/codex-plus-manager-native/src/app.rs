@@ -6,11 +6,11 @@ use codex_plus_core::zed_remote::{
 };
 use codex_plus_manager_service::{
     ContextKind, ContextToolsSource, DiagnoseProviderProfile, FetchProviderModels,
-    MaintenanceSource, OverviewSource, PluginMarketplaceKind, PluginMarketplaceSource,
-    ProviderActivationSource, ProviderErrorKind, ProviderImportSource, ProviderNetworkFailureKind,
-    ProviderProfile, ProviderSource, ProviderSyncSource, RelayEnvironmentSource, ScriptIntegrity,
-    SessionSource, TestProviderProfile, UserScriptOrigin, UserScriptRevision, UserScriptSource,
-    ZedRemoteSource,
+    MaintenanceSource, ManagerSettingsSource, OverviewSource, PluginMarketplaceKind,
+    PluginMarketplaceSource, ProviderActivationSource, ProviderErrorKind, ProviderImportSource,
+    ProviderNetworkFailureKind, ProviderProfile, ProviderSource, ProviderSyncSource,
+    RelayEnvironmentSource, SafeSettingsGroup, ScriptIntegrity, SessionSource, TestProviderProfile,
+    UserScriptOrigin, UserScriptRevision, UserScriptSource, ZedRemoteSource,
 };
 use eframe::egui;
 
@@ -30,6 +30,7 @@ use crate::runtime::provider::{
     ActivationResponse, ProviderActivationDispatcher, ProviderDispatcher, StoreResponse,
 };
 use crate::runtime::sessions::{SessionDispatcher, SessionResponse};
+use crate::runtime::settings::{SettingsDispatcher, SettingsResponse};
 use crate::runtime::user_scripts::{UserScriptDispatcher, UserScriptResponse};
 use crate::runtime::zed_remote::{ZedRemoteDispatcher, ZedRemoteResponse};
 use crate::runtime::{DispatchError, OverviewDispatcher};
@@ -47,6 +48,9 @@ use crate::state::provider::{
     ProviderLoadPhase, ProviderSaveFailureKind, TransitionResult,
 };
 use crate::state::sessions::{ProviderSyncFailureKind, SessionFailureKind};
+use crate::state::settings::{
+    SettingsFailure, SettingsLoadPhase, SettingsResetRequest, SettingsTransition,
+};
 use crate::state::user_scripts::{ScriptsTab, UserScriptFailureKind};
 use crate::state::zed_remote::{ZedRemoteFailureKind, ZedRemoteLoadPhase};
 use crate::state::{AppState, OverviewFailureKind, OverviewPhase, Route};
@@ -58,6 +62,7 @@ use crate::views::maintenance::MaintenanceAction;
 use crate::views::marketplace::MarketplaceAction;
 use crate::views::provider::{ProviderAction, ProviderEdit};
 use crate::views::sessions::SessionAction;
+use crate::views::settings::SettingsAction;
 use crate::views::shell::{ShellAction, ShellFeatureStates, ShellViewModel, render_shell};
 use crate::views::user_scripts::UserScriptAction;
 use crate::views::zed_remote::ZedRemoteAction;
@@ -75,6 +80,7 @@ pub struct NativeManagerSources {
     pub user_scripts: Arc<dyn UserScriptSource>,
     pub zed_remote: Arc<dyn ZedRemoteSource>,
     pub maintenance: Arc<dyn MaintenanceSource>,
+    pub settings: Arc<dyn ManagerSettingsSource>,
     pub path_picker: Arc<dyn PathPicker>,
 }
 
@@ -92,6 +98,7 @@ pub struct NativeManagerApp {
     user_script_dispatcher: UserScriptDispatcher,
     zed_remote_dispatcher: ZedRemoteDispatcher,
     maintenance_dispatcher: MaintenanceDispatcher,
+    settings_dispatcher: SettingsDispatcher,
     path_picker_dispatcher: PathPickerDispatcher,
     last_updated: Option<String>,
     overview_worker_stopped: bool,
@@ -183,6 +190,11 @@ impl NativeManagerApp {
             sources.maintenance,
             Arc::new(move || maintenance_repaint_context.request_repaint()),
         );
+        let settings_repaint_context = creation.egui_ctx.clone();
+        let settings_dispatcher = SettingsDispatcher::spawn(
+            sources.settings,
+            Arc::new(move || settings_repaint_context.request_repaint()),
+        );
         let picker_repaint_context = creation.egui_ctx.clone();
         let path_picker_dispatcher = PathPickerDispatcher::spawn(
             sources.path_picker,
@@ -202,6 +214,7 @@ impl NativeManagerApp {
             user_script_dispatcher,
             zed_remote_dispatcher,
             maintenance_dispatcher,
+            settings_dispatcher,
             path_picker_dispatcher,
             last_updated: None,
             overview_worker_stopped: false,
@@ -278,6 +291,23 @@ impl NativeManagerApp {
         }
     }
 
+    fn refresh_settings(&mut self) {
+        let request_id = self.state.settings.begin_load();
+        if self.settings_dispatcher.request_load(request_id).is_err() {
+            self.fail_running_settings_operations();
+        }
+    }
+
+    fn request_settings_refresh(&mut self) {
+        if self
+            .state
+            .settings
+            .request_transition(SettingsTransition::Refresh)
+        {
+            self.refresh_settings();
+        }
+    }
+
     fn load_providers(&mut self) {
         let Some(request_id) = self.state.provider.begin_live_load() else {
             return;
@@ -300,6 +330,7 @@ impl NativeManagerApp {
                 Route::Scripts => self.refresh_user_scripts_route(),
                 Route::ZedRemote => self.refresh_zed_remote(),
                 Route::Maintenance => self.request_maintenance_refresh(),
+                Route::Settings => self.request_settings_refresh(),
                 Route::Context => {
                     self.load_context_workspace();
                     self.inspect_plugin_marketplaces();
@@ -312,6 +343,7 @@ impl NativeManagerApp {
                 Route::Scripts => self.refresh_user_scripts_route(),
                 Route::ZedRemote => self.refresh_zed_remote(),
                 Route::Maintenance => self.request_maintenance_refresh(),
+                Route::Settings => self.request_settings_refresh(),
                 Route::Context => {
                     self.load_context_workspace();
                     self.inspect_plugin_marketplaces();
@@ -332,6 +364,7 @@ impl NativeManagerApp {
             ShellAction::Marketplace(action) => self.apply_marketplace_action(action),
             ShellAction::ZedRemote(action) => self.apply_zed_remote_action(ctx, action),
             ShellAction::Maintenance(action) => self.apply_maintenance_action(ctx, action),
+            ShellAction::Settings(action) => self.apply_settings_action(action),
         }
         ctx.request_repaint();
     }
@@ -343,6 +376,15 @@ impl NativeManagerApp {
                 .state
                 .maintenance
                 .request_transition(MaintenanceTransition::Navigate(route))
+        {
+            return;
+        }
+        if self.state.route == Route::Settings
+            && route != Route::Settings
+            && !self
+                .state
+                .settings
+                .request_transition(SettingsTransition::Navigate(route))
         {
             return;
         }
@@ -366,6 +408,7 @@ impl NativeManagerApp {
         let entering_zed_remote = self.state.route != Route::ZedRemote && route == Route::ZedRemote;
         let entering_maintenance =
             self.state.route != Route::Maintenance && route == Route::Maintenance;
+        let entering_settings = self.state.route != Route::Settings && route == Route::Settings;
         self.state.route = route;
         if route == Route::Providers && self.state.provider.load_phase == ProviderLoadPhase::Idle {
             self.load_providers();
@@ -390,6 +433,9 @@ impl NativeManagerApp {
         }
         if entering_maintenance {
             self.refresh_maintenance();
+        }
+        if entering_settings {
+            self.refresh_settings();
         }
     }
 
@@ -1091,6 +1137,164 @@ impl NativeManagerApp {
             self.path_picker_worker_stopped = true;
             self.state.maintenance.invalidate_picker();
             self.state.maintenance.picker_error = Some(PathPickerErrorKind::WorkerStopped);
+        }
+    }
+
+    fn apply_settings_action(&mut self, action: SettingsAction) {
+        match action {
+            SettingsAction::Refresh => self.request_settings_refresh(),
+            SettingsAction::SetTab(tab) => self.state.settings.set_tab(tab),
+            SettingsAction::EditStepwiseEnabled(value) => {
+                self.state.settings.edit_stepwise_enabled(value)
+            }
+            SettingsAction::EditStepwiseDirectSend(value) => {
+                self.state.settings.edit_stepwise_direct_send(value)
+            }
+            SettingsAction::EditStepwiseUrl(value) => self.state.settings.edit_stepwise_url(value),
+            SettingsAction::EditStepwiseEnvironment(value) => {
+                self.state.settings.edit_stepwise_environment(value)
+            }
+            SettingsAction::EditStepwiseModel(value) => {
+                self.state.settings.edit_stepwise_model(value)
+            }
+            SettingsAction::EditStepwiseMaxItems(value) => {
+                self.state.settings.edit_stepwise_max_items(value)
+            }
+            SettingsAction::EditStepwiseMaxInputChars(value) => {
+                self.state.settings.edit_stepwise_max_input_chars(value)
+            }
+            SettingsAction::EditStepwiseMaxOutputTokens(value) => {
+                self.state.settings.edit_stepwise_max_output_tokens(value)
+            }
+            SettingsAction::EditStepwiseTimeoutMs(value) => {
+                self.state.settings.edit_stepwise_timeout_ms(value)
+            }
+            SettingsAction::EditSecretReplacement(value) => {
+                self.state.settings.edit_secret_replacement(value)
+            }
+            SettingsAction::SetPasswordVisible(value) => {
+                self.state.settings.set_password_visible(value)
+            }
+            SettingsAction::RequestSecretClear => {
+                self.state.settings.request_secret_clear();
+            }
+            SettingsAction::ConfirmSecretClear => {
+                if let Some((request_id, request)) = self.state.settings.confirm_secret_clear() {
+                    self.dispatch_stepwise_save(request_id, request);
+                }
+            }
+            SettingsAction::CancelSecretClear => self.state.settings.cancel_secret_clear(),
+            SettingsAction::TestStepwise => {
+                if let Some((request_id, request)) = self.state.settings.begin_stepwise_test()
+                    && self
+                        .settings_dispatcher
+                        .request_test_stepwise(request_id, request)
+                        .is_err()
+                {
+                    self.fail_running_settings_operations();
+                }
+            }
+            SettingsAction::SaveStepwise => {
+                if let Some((request_id, request)) = self.state.settings.begin_stepwise_save() {
+                    self.dispatch_stepwise_save(request_id, request);
+                }
+            }
+            SettingsAction::RequestReset(group) => {
+                self.state.settings.request_reset(group);
+            }
+            SettingsAction::ConfirmReset => {
+                if let Some((request_id, request)) = self.state.settings.confirm_reset() {
+                    self.dispatch_settings_reset(request_id, request);
+                }
+            }
+            SettingsAction::CancelReset => self.state.settings.cancel_reset(),
+            SettingsAction::EditImageEnabled(value) => {
+                self.state.settings.edit_image_enabled(value)
+            }
+            SettingsAction::EditImagePath(value) => self.state.settings.edit_image_path(value),
+            SettingsAction::PickImage => self.request_settings_image_picker(),
+            SettingsAction::EditImageOpacity(value) => {
+                self.state.settings.edit_image_opacity(value)
+            }
+            SettingsAction::EditImageFitMode(value) => {
+                self.state.settings.edit_image_fit_mode(value)
+            }
+            SettingsAction::SaveImage => {
+                if let Some((request_id, request)) = self.state.settings.begin_image_save()
+                    && self
+                        .settings_dispatcher
+                        .request_save_image(request_id, request)
+                        .is_err()
+                {
+                    self.fail_running_settings_operations();
+                }
+            }
+            SettingsAction::EditExtraArgs(value) => self.state.settings.edit_extra_args(value),
+            SettingsAction::SaveExtraArgs => {
+                if let Some((request_id, request)) = self.state.settings.begin_extra_args_save()
+                    && self
+                        .settings_dispatcher
+                        .request_save_args(request_id, request)
+                        .is_err()
+                {
+                    self.fail_running_settings_operations();
+                }
+            }
+            SettingsAction::ConfirmDiscard => {
+                if let Some(transition) = self.state.settings.confirm_discard_transition() {
+                    match transition {
+                        SettingsTransition::Navigate(route) => self.navigate(route),
+                        SettingsTransition::Refresh => self.refresh_settings(),
+                    }
+                }
+            }
+            SettingsAction::CancelDiscard => self.state.settings.cancel_transition(),
+        }
+    }
+
+    fn dispatch_stepwise_save(
+        &mut self,
+        request_id: u64,
+        request: codex_plus_manager_service::SaveStepwiseSettings,
+    ) {
+        if self
+            .settings_dispatcher
+            .request_save_stepwise(request_id, request)
+            .is_err()
+        {
+            self.fail_running_settings_operations();
+        }
+    }
+
+    fn dispatch_settings_reset(&mut self, request_id: u64, request: SettingsResetRequest) {
+        let dispatch = match request {
+            SettingsResetRequest::Stepwise(request) => self
+                .settings_dispatcher
+                .request_reset_stepwise(request_id, request)
+                .map_err(|error| (SafeSettingsGroup::Stepwise, error)),
+            SettingsResetRequest::Image(request) => self
+                .settings_dispatcher
+                .request_reset_image(request_id, request)
+                .map_err(|error| (SafeSettingsGroup::ImageOverlay, error)),
+            SettingsResetRequest::ExtraArgs(request) => self
+                .settings_dispatcher
+                .request_reset_args(request_id, request)
+                .map_err(|error| (SafeSettingsGroup::ExtraArgs, error)),
+        };
+        let Err((_group, _)) = dispatch else {
+            return;
+        };
+        self.fail_running_settings_operations();
+    }
+
+    fn request_settings_image_picker(&mut self) {
+        let Some(request) = self.state.settings.begin_image_picker() else {
+            return;
+        };
+        if self.path_picker_dispatcher.request(request).is_err() {
+            self.path_picker_worker_stopped = true;
+            self.state.settings.invalidate_picker();
+            self.state.settings.picker_error = Some(PathPickerErrorKind::WorkerStopped);
         }
     }
 
@@ -2213,12 +2417,99 @@ impl NativeManagerApp {
         }
     }
 
+    fn reduce_settings_responses(&mut self) {
+        loop {
+            match self.settings_dispatcher.try_recv() {
+                Ok(Some(SettingsResponse::Loaded { request_id, result })) => {
+                    let accepted = self.state.settings.apply_load_response(
+                        request_id,
+                        result.map_err(|error| error.kind().into()),
+                    );
+                    if accepted && self.state.settings.load_phase == SettingsLoadPhase::Ready {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(SettingsResponse::StepwiseSaved { request_id, result })) => {
+                    let succeeded = result.is_ok();
+                    let accepted = self.state.settings.apply_stepwise_save_response(
+                        request_id,
+                        result.map_err(|error| SettingsFailure::from_service(&error)),
+                    );
+                    self.update_settings_timestamp(accepted && succeeded);
+                }
+                Ok(Some(SettingsResponse::StepwiseReset { request_id, result })) => {
+                    let succeeded = result.is_ok();
+                    let accepted = self.state.settings.apply_stepwise_reset_response(
+                        request_id,
+                        result.map_err(|error| SettingsFailure::from_service(&error)),
+                    );
+                    self.update_settings_timestamp(accepted && succeeded);
+                }
+                Ok(Some(SettingsResponse::StepwiseTested { request_id, result })) => {
+                    self.state.settings.apply_stepwise_test_response(
+                        request_id,
+                        result.map_err(|error| SettingsFailure::from_service(&error)),
+                    );
+                }
+                Ok(Some(SettingsResponse::ImageSaved { request_id, result })) => {
+                    let succeeded = result.is_ok();
+                    let accepted = self.state.settings.apply_image_save_response(
+                        request_id,
+                        result.map_err(|error| SettingsFailure::from_service(&error)),
+                    );
+                    self.update_settings_timestamp(accepted && succeeded);
+                }
+                Ok(Some(SettingsResponse::ImageReset { request_id, result })) => {
+                    let succeeded = result.is_ok();
+                    let accepted = self.state.settings.apply_image_reset_response(
+                        request_id,
+                        result.map_err(|error| SettingsFailure::from_service(&error)),
+                    );
+                    self.update_settings_timestamp(accepted && succeeded);
+                }
+                Ok(Some(SettingsResponse::ExtraArgsSaved { request_id, result })) => {
+                    let succeeded = result.is_ok();
+                    let accepted = self.state.settings.apply_extra_args_save_response(
+                        request_id,
+                        result.map_err(|error| SettingsFailure::from_service(&error)),
+                    );
+                    self.update_settings_timestamp(accepted && succeeded);
+                }
+                Ok(Some(SettingsResponse::ExtraArgsReset { request_id, result })) => {
+                    let succeeded = result.is_ok();
+                    let accepted = self.state.settings.apply_extra_args_reset_response(
+                        request_id,
+                        result.map_err(|error| SettingsFailure::from_service(&error)),
+                    );
+                    self.update_settings_timestamp(accepted && succeeded);
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    self.fail_running_settings_operations();
+                    break;
+                }
+            }
+        }
+    }
+
+    fn update_settings_timestamp(&mut self, accepted: bool) {
+        if accepted {
+            self.last_updated = Some(current_utc_time());
+        }
+    }
+
     fn reduce_path_picker_responses(&mut self) {
         loop {
             match self.path_picker_dispatcher.try_recv() {
-                Ok(Some(response)) => {
-                    self.state.maintenance.apply_picker_response(response);
-                }
+                Ok(Some(response)) => match response.target {
+                    PathPickerTarget::MaintenanceExecutable
+                    | PathPickerTarget::MaintenanceDirectory => {
+                        self.state.maintenance.apply_picker_response(response);
+                    }
+                    PathPickerTarget::SettingsOverlayImage => {
+                        self.state.settings.apply_picker_response(response);
+                    }
+                },
                 Ok(None) => break,
                 Err(PathPickerDispatchError::WorkerStopped) => {
                     if !self.path_picker_worker_stopped {
@@ -2226,6 +2517,8 @@ impl NativeManagerApp {
                         self.state.maintenance.invalidate_picker();
                         self.state.maintenance.picker_error =
                             Some(PathPickerErrorKind::WorkerStopped);
+                        self.state.settings.invalidate_picker();
+                        self.state.settings.picker_error = Some(PathPickerErrorKind::WorkerStopped);
                     }
                     break;
                 }
@@ -2257,6 +2550,10 @@ impl NativeManagerApp {
                 Err(MaintenanceFailureKind::WorkerStopped),
             );
         }
+    }
+
+    fn fail_running_settings_operations(&mut self) {
+        self.state.settings.fail_running_operations();
     }
 
     fn fail_running_context_operations(&mut self) {
@@ -2311,6 +2608,9 @@ impl NativeManagerApp {
             }
             if self.state.route == Route::Maintenance {
                 self.refresh_maintenance();
+            }
+            if self.state.route == Route::Settings {
+                self.refresh_settings();
             }
         }
         self.window_focused = focused;
@@ -2708,6 +3008,7 @@ impl eframe::App for NativeManagerApp {
         self.reduce_marketplace_responses();
         self.reduce_zed_remote_responses();
         self.reduce_maintenance_responses();
+        self.reduce_settings_responses();
         self.reduce_path_picker_responses();
         self.refresh_pending_on_focus_regain(ctx);
         if let Some(perf) = &mut self.perf {
@@ -2734,6 +3035,7 @@ impl eframe::App for NativeManagerApp {
                 user_scripts: Some(&self.state.user_scripts),
                 zed_remote: Some(&self.state.zed_remote),
                 maintenance: Some(&self.state.maintenance),
+                settings: Some(&self.state.settings),
             },
         ) {
             self.apply_action(ui.ctx(), action);

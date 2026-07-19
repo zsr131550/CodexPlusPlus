@@ -553,6 +553,7 @@ fn run_snapshot_matrix(
                             user_scripts: state.user_scripts.as_ref(),
                             zed_remote: None,
                             maintenance: None,
+                            settings: None,
                         },
                     );
                 },

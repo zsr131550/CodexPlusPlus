@@ -12,6 +12,7 @@ use crate::state::marketplace::MarketplaceViewState;
 use crate::state::provider::OperationPhase;
 use crate::state::provider::{ProviderLoadPhase, ProviderViewState};
 use crate::state::sessions::SessionViewState;
+use crate::state::settings::{SettingsLoadPhase, SettingsViewState};
 use crate::state::user_scripts::{ScriptsTab, UserScriptViewState};
 use crate::state::zed_remote::{ZedRemoteLoadPhase, ZedRemoteViewState};
 use crate::state::{OverviewFailureKind, OverviewPhase, Route};
@@ -19,7 +20,7 @@ use crate::{icons, theme};
 
 use super::{
     about, context, environment, import, maintenance, marketplace, overview, provider, sessions,
-    user_scripts, zed_remote,
+    settings, user_scripts, zed_remote,
 };
 
 pub const SIDEBAR_WIDTH: f32 = 176.0;
@@ -42,6 +43,7 @@ pub enum ShellAction {
     Marketplace(marketplace::MarketplaceAction),
     ZedRemote(zed_remote::ZedRemoteAction),
     Maintenance(maintenance::MaintenanceAction),
+    Settings(settings::SettingsAction),
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +69,7 @@ pub struct ShellFeatureStates<'a> {
     pub user_scripts: Option<&'a UserScriptViewState>,
     pub zed_remote: Option<&'a ZedRemoteViewState>,
     pub maintenance: Option<&'a MaintenanceViewState>,
+    pub settings: Option<&'a SettingsViewState>,
 }
 
 pub fn render_shell(
@@ -84,6 +87,7 @@ pub fn render_shell(
         user_scripts: user_script_state,
         zed_remote: zed_remote_state,
         maintenance: maintenance_state,
+        settings: settings_state,
     } = states;
     let mut actions = Vec::new();
 
@@ -231,6 +235,13 @@ pub fn render_shell(
                     );
                 }
             }
+            Route::Settings => {
+                if let Some(state) = settings_state {
+                    let mut settings_actions = Vec::new();
+                    settings::render(ui, state, model.locale, &mut settings_actions);
+                    actions.extend(settings_actions.into_iter().map(ShellAction::Settings));
+                }
+            }
             Route::About => about::render(ui, model),
         });
 
@@ -320,6 +331,14 @@ fn render_sidebar(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<S
         text(model.locale, TextKey::Maintenance),
         model.route == Route::Maintenance,
         Route::Maintenance,
+        actions,
+    );
+    navigation_button(
+        ui,
+        icons::settings(),
+        text(model.locale, TextKey::Settings),
+        model.route == Route::Settings,
+        Route::Settings,
         actions,
     );
     navigation_button(
@@ -467,6 +486,11 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
                     text(model.locale, TextKey::AppName),
                     text(model.locale, TextKey::Maintenance)
                 ),
+                Route::Settings => format!(
+                    "{} {}",
+                    text(model.locale, TextKey::AppName),
+                    text(model.locale, TextKey::Settings)
+                ),
                 Route::About => format!(
                     "{} {}",
                     text(model.locale, TextKey::About),
@@ -483,6 +507,7 @@ fn render_header(ui: &mut egui::Ui, model: &ShellViewModel, actions: &mut Vec<Sh
                 Route::Context => TextKey::ToolsPluginsSubtitle,
                 Route::ZedRemote => TextKey::ZedRemoteSubtitle,
                 Route::Maintenance => TextKey::MaintenanceSubtitle,
+                Route::Settings => TextKey::SettingsSubtitle,
                 Route::About => TextKey::AboutSubtitle,
             };
             ui.label(
@@ -532,6 +557,7 @@ fn render_status(ui: &mut egui::Ui, model: &ShellViewModel, states: ShellFeature
         user_scripts: user_script_state,
         zed_remote: zed_remote_state,
         maintenance: maintenance_state,
+        settings: settings_state,
         ..
     } = states;
     if model.route == Route::Providers {
@@ -699,6 +725,32 @@ fn render_status(ui: &mut egui::Ui, model: &ShellViewModel, states: ShellFeature
             ),
             MaintenanceLoadPhase::Error => (
                 text(model.locale, TextKey::MaintenanceLoadFailed),
+                theme::ERROR_COLOR,
+            ),
+        };
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                color,
+                format!("{}: {status}", text(model.locale, TextKey::Status)),
+            );
+            render_status_metadata(ui, model);
+        });
+        return;
+    }
+
+    if model.route == Route::Settings {
+        let phase = settings_state.map_or(SettingsLoadPhase::Idle, |state| state.load_phase);
+        let (status, color) = match phase {
+            SettingsLoadPhase::Idle | SettingsLoadPhase::Loading => {
+                (text(model.locale, TextKey::Loading), theme::WARNING_COLOR)
+            }
+            SettingsLoadPhase::Ready => (text(model.locale, TextKey::Ready), theme::SUCCESS_COLOR),
+            SettingsLoadPhase::Refreshing => (
+                text(model.locale, TextKey::Refreshing),
+                theme::WARNING_COLOR,
+            ),
+            SettingsLoadPhase::Error => (
+                text(model.locale, TextKey::SettingsLoadFailed),
                 theme::ERROR_COLOR,
             ),
         };

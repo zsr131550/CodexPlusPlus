@@ -10,6 +10,7 @@ pub mod maintenance;
 pub mod marketplace;
 pub mod provider;
 pub mod sessions;
+pub mod settings;
 pub mod user_scripts;
 pub mod zed_remote;
 

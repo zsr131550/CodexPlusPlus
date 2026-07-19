@@ -7,6 +7,7 @@ pub mod marketplace;
 pub mod overview;
 pub mod provider;
 pub mod sessions;
+pub mod settings;
 pub mod shell;
 pub mod user_scripts;
 pub mod zed_remote;

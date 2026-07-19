@@ -9,9 +9,10 @@ use codex_plus_manager_native::fonts;
 use codex_plus_manager_native::path_picker::path_picker_from_environment;
 use codex_plus_manager_native::perf::PerfRecorder;
 use codex_plus_manager_service::{
-    ContextToolsService, MaintenanceService, PluginMarketplaceService, ProviderImportService,
-    ProviderService, ProviderSyncService, RelayEnvironmentService, SessionService,
-    SystemOverviewSource, SystemProviderEnvironment, UserScriptService, ZedRemoteService,
+    ContextToolsService, MaintenanceService, ManagerSettingsService, PluginMarketplaceService,
+    ProviderImportService, ProviderService, ProviderSyncService, RelayEnvironmentService,
+    SessionService, SystemOverviewSource, SystemProviderEnvironment, UserScriptService,
+    ZedRemoteService,
 };
 use eframe::egui;
 
@@ -63,6 +64,8 @@ fn main() -> eframe::Result {
             let user_script_service = Arc::new(UserScriptService::new(environment.clone()));
             let zed_remote_service = Arc::new(ZedRemoteService::new(environment.clone()));
             let maintenance_service = Arc::new(MaintenanceService::new(environment.clone()));
+            let manager_settings_service =
+                Arc::new(ManagerSettingsService::new(environment.clone()));
             let environment_service = Arc::new(RelayEnvironmentService::new(environment));
             Ok(Box::new(NativeManagerApp::new(
                 creation,
@@ -80,6 +83,7 @@ fn main() -> eframe::Result {
                     user_scripts: user_script_service,
                     zed_remote: zed_remote_service,
                     maintenance: maintenance_service,
+                    settings: manager_settings_service,
                     path_picker: path_picker_from_environment(),
                 },
                 perf,

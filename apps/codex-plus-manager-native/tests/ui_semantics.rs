@@ -1,4 +1,5 @@
-use codex_plus_manager_native::i18n::{Locale, ThemeMode};
+use codex_plus_manager_native::i18n::{Locale, TextKey, ThemeMode, text};
+use codex_plus_manager_native::state::settings::SettingsViewState;
 use codex_plus_manager_native::state::user_scripts::{UserScriptFailureKind, UserScriptViewState};
 use codex_plus_manager_native::state::{OverviewFailureKind, OverviewPhase, Route};
 use codex_plus_manager_native::theme;
@@ -16,6 +17,7 @@ use common::{model, snapshot};
 struct TestShellState {
     model: ShellViewModel,
     scripts: Option<UserScriptViewState>,
+    settings: Option<SettingsViewState>,
     emitted: Vec<ShellAction>,
 }
 
@@ -24,6 +26,7 @@ fn render_test_shell(ui: &mut egui::Ui, state: &mut TestShellState) {
     theme::apply(ui.ctx(), state.model.theme);
     let feature_states = ShellFeatureStates {
         user_scripts: state.scripts.as_ref(),
+        settings: state.settings.as_ref(),
         ..ShellFeatureStates::default()
     };
     for action in render_shell(ui, &state.model, feature_states) {
@@ -41,7 +44,8 @@ fn render_test_shell(ui: &mut egui::Ui, state: &mut TestShellState) {
             | ShellAction::Context(_)
             | ShellAction::Marketplace(_)
             | ShellAction::ZedRemote(_)
-            | ShellAction::Maintenance(_) => {}
+            | ShellAction::Maintenance(_)
+            | ShellAction::Settings(_) => {}
         }
         ui.ctx().request_repaint();
     }
@@ -55,6 +59,7 @@ fn harness(size: [f32; 2], model: ShellViewModel) -> Harness<'static, TestShellS
             TestShellState {
                 model,
                 scripts: None,
+                settings: None,
                 emitted: Vec::new(),
             },
         )
@@ -72,6 +77,25 @@ fn harness_with_scripts(
             TestShellState {
                 model,
                 scripts: Some(scripts),
+                settings: None,
+                emitted: Vec::new(),
+            },
+        )
+}
+
+fn harness_with_settings(
+    size: [f32; 2],
+    model: ShellViewModel,
+    settings: SettingsViewState,
+) -> Harness<'static, TestShellState> {
+    Harness::builder()
+        .with_size(egui::vec2(size[0], size[1]))
+        .build_ui_state(
+            render_test_shell,
+            TestShellState {
+                model,
+                scripts: None,
+                settings: Some(settings),
                 emitted: Vec::new(),
             },
         )
@@ -120,6 +144,43 @@ fn shell_navigates_to_the_native_scripts_route() {
             .contains(&ShellAction::Navigate(Route::Scripts))
     );
     assert!(harness.get_by_label("Codex++ Scripts").rect().is_positive());
+}
+
+#[test]
+fn settings_route_sits_between_maintenance_and_about_with_ready_shell_copy() {
+    for locale in [Locale::ZhCn, Locale::En] {
+        let mut shell = model(locale, ThemeMode::Dark);
+        shell.route = Route::Settings;
+        let settings = SettingsViewState::from_workspace(common::manager_settings_workspace(1));
+        let harness = harness_with_settings([1180.0, 820.0], shell, settings);
+
+        let maintenance = harness
+            .get_by_label(text(locale, TextKey::Maintenance))
+            .rect();
+        let settings = harness.get_by_label(text(locale, TextKey::Settings)).rect();
+        let about = harness.get_by_label(text(locale, TextKey::About)).rect();
+        assert!(
+            maintenance.max.y <= settings.min.y,
+            "{maintenance:?} {settings:?}"
+        );
+        assert!(settings.max.y <= about.min.y, "{settings:?} {about:?}");
+
+        for label in [
+            format!(
+                "{} {}",
+                text(locale, TextKey::AppName),
+                text(locale, TextKey::Settings)
+            ),
+            text(locale, TextKey::SettingsSubtitle).to_owned(),
+            format!(
+                "{}: {}",
+                text(locale, TextKey::Status),
+                text(locale, TextKey::Ready)
+            ),
+        ] {
+            assert!(harness.get_by_label(&label).rect().is_positive(), "{label}");
+        }
+    }
 }
 
 #[test]

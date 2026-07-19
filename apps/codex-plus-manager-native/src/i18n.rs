@@ -337,6 +337,9 @@ pub enum TextKey {
     KeepEditing,
     UnsavedPathChanges,
     AutomaticDiscovery,
+    Settings,
+    SettingsSubtitle,
+    SettingsLoadFailed,
 }
 
 impl TextKey {
@@ -663,6 +666,9 @@ impl TextKey {
         Self::KeepEditing,
         Self::UnsavedPathChanges,
         Self::AutomaticDiscovery,
+        Self::Settings,
+        Self::SettingsSubtitle,
+        Self::SettingsLoadFailed,
     ];
 }
 
@@ -1959,6 +1965,18 @@ const CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         zh: "自动发现",
         en: "Automatic discovery",
+    },
+    CatalogEntry {
+        zh: "设置",
+        en: "Settings",
+    },
+    CatalogEntry {
+        zh: "配置 Stepwise、图片覆盖与启动参数",
+        en: "Configure Stepwise, image overlay, and launch arguments",
+    },
+    CatalogEntry {
+        zh: "设置加载失败",
+        en: "Settings load failed",
     },
 ];
 
