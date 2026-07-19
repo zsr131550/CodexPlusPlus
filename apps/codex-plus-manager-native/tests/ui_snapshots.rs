@@ -10,7 +10,7 @@ use codex_plus_core::relay_config::CodexContextEntries;
 use codex_plus_core::relay_environment::{
     ClashVergeTunCheck, CodexEnvFileCheck, ProxyEnvironmentCheck, RelayEnvironmentReport,
 };
-use codex_plus_core::settings::RelayProtocol;
+use codex_plus_core::settings::{BackendSettings, RelayProtocol};
 use codex_plus_core::zed_remote::{
     SshTarget, ZedAvailability, ZedOpenStrategy, ZedRemoteProjectSource, ZedRemoteRegistryRevision,
 };
@@ -18,11 +18,16 @@ use codex_plus_manager_native::fonts;
 use codex_plus_manager_native::i18n::{Locale, TextKey, ThemeMode, text};
 use codex_plus_manager_native::state::Route;
 use codex_plus_manager_native::state::context::{ContextFailureKind, ContextViewState};
+use codex_plus_manager_native::state::enhancements::{
+    EnhancementFailure, EnhancementFailureKind, EnhancementViewState,
+};
 use codex_plus_manager_native::state::environment::EnvironmentViewState;
 use codex_plus_manager_native::state::import::ImportViewState;
 use codex_plus_manager_native::state::maintenance::MaintenanceViewState;
 use codex_plus_manager_native::state::marketplace::{MarketplaceFailureKind, MarketplaceViewState};
-use codex_plus_manager_native::state::provider::ProviderViewState;
+use codex_plus_manager_native::state::provider::{
+    ProviderEditorTab, ProviderSaveFailureKind, ProviderViewState,
+};
 use codex_plus_manager_native::state::sessions::{
     ProviderSyncFailureKind, SessionFilter, SessionViewState,
 };
@@ -39,10 +44,11 @@ use codex_plus_manager_service::{
     CcsDiscovery, CcsProviderSummary, ContextBundle, ContextEntryKey, ContextEntryLiveState,
     ContextEntrySummary, ContextKind, ContextOwnershipOutcome, ContextSyncDiffSummary,
     ContextSyncGuard, ContextSyncKeys, ContextSyncOutcome, ContextSyncPreview,
-    ContextToolsErrorKind, ContextWorkspace, LaunchOutcome, MaintenanceSection,
-    ManagerSettingsWorkspace, PluginMarketplaceErrorKind, PluginMarketplaceKind,
-    PluginMarketplaceRevision, PluginMarketplaceStatus, PluginMarketplaceWorkspace,
-    PrivateArgument, PrivatePath, PrivateUrl, ProviderActivationSummary, ProviderDocument,
+    ContextToolsErrorKind, ContextWorkspace, EnhancementSettingsEnvironment,
+    EnhancementSettingsService, LaunchOutcome, MaintenanceSection, ManagerSettingsWorkspace,
+    PluginMarketplaceErrorKind, PluginMarketplaceKind, PluginMarketplaceRevision,
+    PluginMarketplaceStatus, PluginMarketplaceWorkspace, PrivateArgument, PrivatePath, PrivateUrl,
+    ProviderActivationSummary, ProviderCommonConfigExtraction, ProviderDocument,
     ProviderLiveRevision, ProviderRevision, ProviderSyncErrorKind, ProviderSyncRevision,
     ProviderSyncTargetList, ProviderSyncTargetOption, ProviderSyncTargetSource,
     ProviderSyncWorkspace, ProviderWorkspace, RelayEnvironmentWorkspace, SafeSettingsGroup,
@@ -87,6 +93,59 @@ struct SettingsSnapshotState {
     model: ShellViewModel,
     settings: SettingsViewState,
     cjk_font: Option<Vec<u8>>,
+}
+
+struct ProviderExtractionSnapshotState {
+    model: ShellViewModel,
+    provider: ProviderViewState,
+    cjk_font: Option<Vec<u8>>,
+}
+
+struct EnhancementSnapshotState {
+    model: ShellViewModel,
+    enhancements: EnhancementViewState,
+    cjk_font: Option<Vec<u8>>,
+}
+
+#[derive(Clone)]
+struct SnapshotEnhancementEnvironment(BackendSettings);
+
+impl EnhancementSettingsEnvironment for SnapshotEnhancementEnvironment {
+    fn load_enhancement_settings(&self) -> anyhow::Result<BackendSettings> {
+        Ok(self.0.clone())
+    }
+
+    fn update_enhancement_settings_if<F>(
+        &self,
+        _payload: serde_json::Value,
+        predicate: F,
+    ) -> anyhow::Result<Option<BackendSettings>>
+    where
+        F: FnOnce(&BackendSettings) -> bool,
+    {
+        Ok(predicate(&self.0).then(|| self.0.clone()))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProviderExtractionSnapshotScenario {
+    Ready,
+    Running,
+    Applied,
+    NoContent,
+    Conflict,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EnhancementSnapshotScenario {
+    Loading,
+    Ready,
+    MasterOff,
+    Dirty,
+    Saving,
+    ResetConfirmation,
+    Conflict,
+    WorkerStopped,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -458,6 +517,28 @@ const OPERATIONAL_VIEWPORTS: &[(f32, f32, Locale, ThemeMode, &str)] = &[
     (1180.0, 820.0, Locale::En, ThemeMode::Light, "1180_en_light"),
 ];
 
+const PROVIDER_EXTRACTION_SCENARIOS: &[(ProviderExtractionSnapshotScenario, &str)] = &[
+    (ProviderExtractionSnapshotScenario::Ready, "ready"),
+    (ProviderExtractionSnapshotScenario::Running, "running"),
+    (ProviderExtractionSnapshotScenario::Applied, "applied"),
+    (ProviderExtractionSnapshotScenario::NoContent, "no_content"),
+    (ProviderExtractionSnapshotScenario::Conflict, "conflict"),
+];
+
+const ENHANCEMENT_SCENARIOS: &[(EnhancementSnapshotScenario, &str)] = &[
+    (EnhancementSnapshotScenario::Loading, "loading"),
+    (EnhancementSnapshotScenario::Ready, "ready"),
+    (EnhancementSnapshotScenario::MasterOff, "master_off"),
+    (EnhancementSnapshotScenario::Dirty, "dirty"),
+    (EnhancementSnapshotScenario::Saving, "saving"),
+    (
+        EnhancementSnapshotScenario::ResetConfirmation,
+        "reset_confirmation",
+    ),
+    (EnhancementSnapshotScenario::Conflict, "conflict"),
+    (EnhancementSnapshotScenario::WorkerStopped, "worker_stopped"),
+];
+
 const MAINTENANCE_SCENARIOS: &[(MaintenanceSnapshotScenario, &str)] = &[
     (MaintenanceSnapshotScenario::Loading, "loading"),
     (MaintenanceSnapshotScenario::Ready, "ready"),
@@ -499,6 +580,26 @@ fn provider_wgpu_snapshot_matrix() {
     let _guard = snapshot_test_guard();
 
     run_snapshot_matrix(PROVIDER_CASES, Route::Providers, false);
+}
+
+#[test]
+fn provider_common_config_wgpu_snapshot_matrix() {
+    if std::env::var_os("CODEX_PLUS_UI_SNAPSHOTS").as_deref() != Some("1".as_ref()) {
+        return;
+    }
+    let _guard = snapshot_test_guard();
+
+    run_provider_extraction_snapshot_matrix();
+}
+
+#[test]
+fn enhancements_wgpu_snapshot_matrix() {
+    if std::env::var_os("CODEX_PLUS_UI_SNAPSHOTS").as_deref() != Some("1".as_ref()) {
+        return;
+    }
+    let _guard = snapshot_test_guard();
+
+    run_enhancement_snapshot_matrix();
 }
 
 #[test]
@@ -673,6 +774,7 @@ fn run_snapshot_matrix(
                             marketplace: state.marketplace.as_ref(),
                             sessions: state.sessions.as_ref(),
                             user_scripts: state.user_scripts.as_ref(),
+                            enhancements: None,
                             zed_remote: None,
                             maintenance: None,
                             settings: None,
@@ -703,6 +805,324 @@ fn run_snapshot_matrix(
     }
 
     results.unwrap();
+}
+
+fn run_provider_extraction_snapshot_matrix() {
+    let font = fonts::load_cjk_font().expect("Windows CJK font is required for UI snapshots");
+    let snapshots = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    let mut results = SnapshotResults::new();
+
+    for &(scenario, scenario_name) in PROVIDER_EXTRACTION_SCENARIOS {
+        for &(width, height, locale, mode, viewport_name) in OPERATIONAL_VIEWPORTS {
+            let options = SnapshotOptions::new().output_path(&snapshots);
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(width, height))
+                .with_theme(match mode {
+                    ThemeMode::Dark => egui::Theme::Dark,
+                    ThemeMode::Light => egui::Theme::Light,
+                })
+                .with_os(egui::os::OperatingSystem::Windows)
+                .with_options(options)
+                .wgpu()
+                .build_ui_state(
+                    |ui, state: &mut ProviderExtractionSnapshotState| {
+                        if let Some(bytes) = state.cjk_font.take() {
+                            egui_extras::install_image_loaders(ui.ctx());
+                            fonts::install_cjk_font(ui.ctx(), bytes);
+                            theme::apply(ui.ctx(), state.model.theme);
+                        }
+                        let _ = render_shell(
+                            ui,
+                            &state.model,
+                            ShellFeatureStates {
+                                provider: Some(&state.provider),
+                                ..ShellFeatureStates::default()
+                            },
+                        );
+                    },
+                    ProviderExtractionSnapshotState {
+                        model: {
+                            let mut model = common::model(locale, mode);
+                            model.route = Route::Providers;
+                            model
+                        },
+                        provider: provider_extraction_snapshot_state(scenario),
+                        cjk_font: Some(font.clone()),
+                    },
+                );
+
+            harness.remove_cursor();
+            if matches!(scenario, ProviderExtractionSnapshotScenario::Running) {
+                harness.run_steps(2);
+            } else {
+                harness.run();
+            }
+            assert_provider_extraction_snapshot_layout(&harness, scenario, locale, width, height);
+            let image = harness
+                .render()
+                .expect("provider extraction snapshot should render");
+            let snapshot_name = format!("provider_extract_{scenario_name}_{viewport_name}");
+            assert_nonblank_render!(image, snapshot_name.as_str());
+            harness.snapshot(snapshot_name);
+            results.extend_harness(&mut harness);
+        }
+    }
+
+    results.unwrap();
+}
+
+fn provider_extraction_snapshot_state(
+    scenario: ProviderExtractionSnapshotScenario,
+) -> ProviderViewState {
+    let mut state = common::provider_state();
+    state.editor_tab = ProviderEditorTab::Config;
+    match scenario {
+        ProviderExtractionSnapshotScenario::Ready => {}
+        ProviderExtractionSnapshotScenario::Running => {
+            let _ = state.begin_common_config_extraction().unwrap();
+        }
+        ProviderExtractionSnapshotScenario::Applied => {
+            let (request_id, request) = state.begin_common_config_extraction().unwrap();
+            let mut saved = (**state.baseline.as_ref().unwrap()).clone();
+            saved.document = request.document;
+            saved.document.common_config_contents =
+                "approval_policy = \"on-request\"\n".to_string();
+            assert!(state.apply_common_config_extraction_response(
+                request_id,
+                Ok(ProviderCommonConfigExtraction::Applied(Box::new(saved))),
+            ));
+        }
+        ProviderExtractionSnapshotScenario::NoContent => {
+            let (request_id, _) = state.begin_common_config_extraction().unwrap();
+            assert!(state.apply_common_config_extraction_response(
+                request_id,
+                Ok(ProviderCommonConfigExtraction::NoContent),
+            ));
+        }
+        ProviderExtractionSnapshotScenario::Conflict => {
+            let (request_id, _) = state.begin_common_config_extraction().unwrap();
+            assert!(state.apply_common_config_extraction_response(
+                request_id,
+                Err(ProviderSaveFailureKind::Conflict),
+            ));
+        }
+    }
+    state
+}
+
+fn assert_provider_extraction_snapshot_layout(
+    harness: &Harness<'_, ProviderExtractionSnapshotState>,
+    scenario: ProviderExtractionSnapshotScenario,
+    locale: Locale,
+    width: f32,
+    height: f32,
+) {
+    let action = match locale {
+        Locale::ZhCn => "提取公共配置",
+        Locale::En => "Extract common config",
+    };
+    assert_inside(harness.get_by_label(action).rect(), width, height, action);
+
+    let signal = match (locale, scenario) {
+        (_, ProviderExtractionSnapshotScenario::Ready) => action,
+        (Locale::ZhCn, ProviderExtractionSnapshotScenario::Running) => "正在提取公共配置",
+        (Locale::En, ProviderExtractionSnapshotScenario::Running) => "Extracting common config",
+        (Locale::ZhCn, ProviderExtractionSnapshotScenario::Applied) => "公共配置已提取",
+        (Locale::En, ProviderExtractionSnapshotScenario::Applied) => "Common config extracted",
+        (Locale::ZhCn, ProviderExtractionSnapshotScenario::NoContent) => "没有可提取的公共配置",
+        (Locale::En, ProviderExtractionSnapshotScenario::NoContent) => "No common config found",
+        (Locale::ZhCn, ProviderExtractionSnapshotScenario::Conflict) => {
+            "供应商配置已在磁盘上更改。请重新加载后再次提取。"
+        }
+        (Locale::En, ProviderExtractionSnapshotScenario::Conflict) => {
+            "Provider workspace changed on disk. Reload before extracting again."
+        }
+    };
+    assert_inside(harness.get_by_label(signal).rect(), width, height, signal);
+    let tree = format!("{:#?}", harness.root());
+    assert!(!tree.contains("sentinel"), "{tree}");
+}
+
+fn run_enhancement_snapshot_matrix() {
+    let font = fonts::load_cjk_font().expect("Windows CJK font is required for UI snapshots");
+    let snapshots = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    let mut results = SnapshotResults::new();
+
+    for &(scenario, scenario_name) in ENHANCEMENT_SCENARIOS {
+        for &(width, height, locale, mode, viewport_name) in OPERATIONAL_VIEWPORTS {
+            let options = SnapshotOptions::new().output_path(&snapshots);
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(width, height))
+                .with_theme(match mode {
+                    ThemeMode::Dark => egui::Theme::Dark,
+                    ThemeMode::Light => egui::Theme::Light,
+                })
+                .with_os(egui::os::OperatingSystem::Windows)
+                .with_options(options)
+                .wgpu()
+                .build_ui_state(
+                    |ui, state: &mut EnhancementSnapshotState| {
+                        if let Some(bytes) = state.cjk_font.take() {
+                            egui_extras::install_image_loaders(ui.ctx());
+                            fonts::install_cjk_font(ui.ctx(), bytes);
+                            theme::apply(ui.ctx(), state.model.theme);
+                        }
+                        let _ = render_shell(
+                            ui,
+                            &state.model,
+                            ShellFeatureStates {
+                                enhancements: Some(&state.enhancements),
+                                ..ShellFeatureStates::default()
+                            },
+                        );
+                    },
+                    EnhancementSnapshotState {
+                        model: {
+                            let mut model = common::model(locale, mode);
+                            model.route = Route::Enhancements;
+                            model
+                        },
+                        enhancements: enhancement_snapshot_state(scenario),
+                        cjk_font: Some(font.clone()),
+                    },
+                );
+
+            harness.remove_cursor();
+            if matches!(scenario, EnhancementSnapshotScenario::Loading) {
+                harness.run_steps(2);
+            } else {
+                harness.run();
+            }
+            assert_enhancement_snapshot_layout(&harness, scenario, locale, width, height);
+            let image = harness
+                .render()
+                .expect("enhancement snapshot should render");
+            let snapshot_name = format!("enhancements_{scenario_name}_{viewport_name}");
+            assert_nonblank_render!(image, snapshot_name.as_str());
+            harness.snapshot(snapshot_name);
+            results.extend_harness(&mut harness);
+        }
+    }
+
+    results.unwrap();
+}
+
+fn enhancement_snapshot_state(scenario: EnhancementSnapshotScenario) -> EnhancementViewState {
+    if matches!(scenario, EnhancementSnapshotScenario::Loading) {
+        let mut state = EnhancementViewState::default();
+        let _ = state.begin_load();
+        return state;
+    }
+
+    let settings = BackendSettings {
+        enhancements_enabled: !matches!(scenario, EnhancementSnapshotScenario::MasterOff),
+        computer_use_guard_enabled: true,
+        codex_app_plugin_marketplace_unlock: true,
+        codex_app_session_delete: true,
+        codex_app_fast_startup: true,
+        codex_app_zed_remote_open: true,
+        ..BackendSettings::default()
+    };
+    let workspace = Arc::new(
+        EnhancementSettingsService::new(SnapshotEnhancementEnvironment(settings))
+            .load()
+            .unwrap(),
+    );
+    let mut state = EnhancementViewState::from_workspace(Arc::clone(&workspace));
+    match scenario {
+        EnhancementSnapshotScenario::Loading
+        | EnhancementSnapshotScenario::Ready
+        | EnhancementSnapshotScenario::MasterOff => {}
+        EnhancementSnapshotScenario::Dirty => {
+            let mut draft = *state.draft();
+            draft.markdown_export = !draft.markdown_export;
+            state.edit(draft);
+        }
+        EnhancementSnapshotScenario::Saving => {
+            let mut draft = *state.draft();
+            draft.markdown_export = !draft.markdown_export;
+            state.edit(draft);
+            let _ = state.begin_save().unwrap();
+        }
+        EnhancementSnapshotScenario::ResetConfirmation => {
+            assert!(state.request_reset());
+        }
+        EnhancementSnapshotScenario::Conflict => {
+            let mut draft = *state.draft();
+            draft.markdown_export = !draft.markdown_export;
+            state.edit(draft);
+            let (request_id, _) = state.begin_save().unwrap();
+            assert!(state.apply_save_response(
+                request_id,
+                Err(EnhancementFailure::with_workspace(
+                    EnhancementFailureKind::SettingsConflict,
+                    Arc::clone(&workspace),
+                )),
+            ));
+        }
+        EnhancementSnapshotScenario::WorkerStopped => {
+            let mut draft = *state.draft();
+            draft.markdown_export = !draft.markdown_export;
+            state.edit(draft);
+            let _ = state.begin_save().unwrap();
+            state.fail_running_operations();
+        }
+    }
+    state
+}
+
+fn assert_enhancement_snapshot_layout(
+    harness: &Harness<'_, EnhancementSnapshotState>,
+    scenario: EnhancementSnapshotScenario,
+    locale: Locale,
+    width: f32,
+    height: f32,
+) {
+    let signal = match (locale, scenario) {
+        (Locale::ZhCn, EnhancementSnapshotScenario::Loading) => "正在加载增强设置",
+        (Locale::En, EnhancementSnapshotScenario::Loading) => "Loading enhancement settings",
+        (Locale::ZhCn, EnhancementSnapshotScenario::Ready)
+        | (Locale::ZhCn, EnhancementSnapshotScenario::MasterOff) => "启用增强功能",
+        (Locale::En, EnhancementSnapshotScenario::Ready)
+        | (Locale::En, EnhancementSnapshotScenario::MasterOff) => "Enable enhancements",
+        (Locale::ZhCn, EnhancementSnapshotScenario::Dirty)
+        | (Locale::ZhCn, EnhancementSnapshotScenario::Saving) => "增强设置有未保存更改",
+        (Locale::En, EnhancementSnapshotScenario::Dirty)
+        | (Locale::En, EnhancementSnapshotScenario::Saving) => {
+            "Enhancement settings have unsaved changes"
+        }
+        (Locale::ZhCn, EnhancementSnapshotScenario::ResetConfirmation) => "重置增强设置？",
+        (Locale::En, EnhancementSnapshotScenario::ResetConfirmation) => {
+            "Reset enhancement settings?"
+        }
+        (Locale::ZhCn, EnhancementSnapshotScenario::Conflict) => "增强设置已在磁盘上更改",
+        (Locale::En, EnhancementSnapshotScenario::Conflict) => {
+            "Enhancement settings changed on disk"
+        }
+        (Locale::ZhCn, EnhancementSnapshotScenario::WorkerStopped) => "增强设置后台服务已停止",
+        (Locale::En, EnhancementSnapshotScenario::WorkerStopped) => {
+            "The enhancement settings worker has stopped"
+        }
+    };
+    assert_inside(harness.get_by_label(signal).rect(), width, height, signal);
+    if !matches!(scenario, EnhancementSnapshotScenario::Loading) {
+        let save = match locale {
+            Locale::ZhCn => "保存增强设置",
+            Locale::En => "Save enhancements",
+        };
+        assert_inside(harness.get_by_label(save).rect(), width, height, save);
+    }
+    if matches!(scenario, EnhancementSnapshotScenario::MasterOff) {
+        assert!(
+            harness
+                .query_by(|node| {
+                    node.label().as_deref() == Some("Computer Use Guard") && node.is_disabled()
+                })
+                .is_some()
+        );
+    }
+    let tree = format!("{:#?}", harness.root());
+    assert!(!tree.contains("sentinel"), "{tree}");
 }
 
 fn run_context_snapshot_matrix() {
@@ -2005,6 +2425,7 @@ fn script_market_workspace(integrity: ScriptIntegrity) -> ScriptMarketWorkspace 
                 author: "Snapshot fixture".to_owned(),
                 tags: vec!["workflow".to_owned(), "metadata".to_owned()],
                 source_host: "snapshot.invalid".to_owned(),
+                homepage: None,
                 integrity,
                 installed_version: Some("1".to_owned()),
                 update_available: true,
@@ -2017,6 +2438,7 @@ fn script_market_workspace(integrity: ScriptIntegrity) -> ScriptMarketWorkspace 
                 author: "Snapshot fixture".to_owned(),
                 tags: vec!["utility".to_owned()],
                 source_host: "snapshot.invalid".to_owned(),
+                homepage: None,
                 integrity: ScriptIntegrity::Verified,
                 installed_version: None,
                 update_available: false,
