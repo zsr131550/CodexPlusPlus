@@ -1,11 +1,10 @@
-use codex_plus_core::watcher::{
-    build_spawn_launcher_command, build_watcher_install_plan, cdp_listening, codex_process_ids,
-    disable_watcher_at, enable_watcher_at, filter_killable_launcher_processes,
-    process_ids_still_running, should_recover_stale_launcher, watcher_disabled_flag,
+use codex_plus_core::process_monitor::{
+    cdp_listening, codex_process_ids, filter_killable_launcher_processes,
+    should_recover_stale_launcher,
 };
 
 #[cfg(windows)]
-use codex_plus_core::watcher::{WindowsProcessInfo, find_codex_processes_from_snapshot};
+use codex_plus_core::process_monitor::{WindowsProcessInfo, find_codex_processes_from_snapshot};
 
 #[test]
 fn cdp_listening_returns_true_for_bound_loopback_port() {
@@ -31,42 +30,6 @@ fn cdp_listening_returns_false_for_closed_port() {
     };
 
     assert!(!cdp_listening(port));
-}
-
-#[test]
-fn watcher_enable_and_disable_toggle_flag() {
-    let dir = tempfile::tempdir().unwrap();
-    let flag = watcher_disabled_flag(dir.path());
-
-    disable_watcher_at(dir.path()).unwrap();
-    assert!(flag.exists());
-
-    enable_watcher_at(dir.path()).unwrap();
-    assert!(!flag.exists());
-}
-
-#[test]
-fn watcher_install_plan_registers_rust_launcher_at_logon() {
-    let plan = build_watcher_install_plan("C:/Tools/codex-plus-plus.exe".into(), 9333);
-
-    assert_eq!(plan.run_value_name, "CodexPlusPlusWatcher");
-    assert_eq!(
-        plan.run_value,
-        "\"C:/Tools/codex-plus-plus.exe\" --debug-port 9333"
-    );
-    assert_eq!(plan.shortcut_name, "CodexPlusPlusWatcher.lnk");
-    assert_eq!(plan.shortcut_target, "C:/Tools/codex-plus-plus.exe");
-    assert_eq!(plan.shortcut_arguments, "--debug-port 9333");
-}
-
-#[test]
-fn spawn_launcher_command_points_to_silent_binary_only() {
-    let command = build_spawn_launcher_command("C:/Tools/codex-plus-plus.exe", 9444);
-
-    assert_eq!(command[0], "C:/Tools/codex-plus-plus.exe");
-    assert!(command.contains(&"--debug-port".to_string()));
-    assert!(command.contains(&"9444".to_string()));
-    assert!(!command.iter().any(|part| part.contains("manager")));
 }
 
 #[test]
@@ -131,17 +94,9 @@ fn stale_launcher_recovery_only_runs_when_codex_and_cdp_are_absent() {
     assert!(!should_recover_stale_launcher(true, true));
 }
 
-#[test]
-fn stop_wait_tracks_only_expected_process_ids() {
-    assert_eq!(
-        process_ids_still_running(&[10, 20, 30], [5, 20, 40, 30]),
-        vec![20, 30]
-    );
-}
-
 #[cfg(windows)]
 #[test]
-fn find_codex_processes_finds_local_install_with_capitial_c() {
+fn find_codex_processes_finds_local_install_with_capital_c() {
     let processes = [WindowsProcessInfo {
         process_id: 42,
         parent_process_id: 0,

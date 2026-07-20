@@ -80,7 +80,7 @@ fn acquire_single_instance_guard_with_retry(
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             log_launcher_already_running(debug_port);
             if allow_stale_recovery && should_recover_stale_launcher(debug_port) {
-                codex_plus_core::watcher::stop_launcher_processes();
+                codex_plus_core::process_monitor::stop_launcher_processes();
                 std::thread::sleep(std::time::Duration::from_millis(250));
                 return acquire_single_instance_guard_with_retry(debug_port, false);
             }
@@ -115,10 +115,12 @@ fn log_launcher_guard_fallback(fallback_lock_path: &Path) {
 }
 
 fn should_recover_stale_launcher(debug_port: u16) -> bool {
-    let has_codex_process = !codex_plus_core::watcher::find_codex_processes().is_empty();
-    let cdp_listening = codex_plus_core::watcher::cdp_listening(debug_port);
-    let recover =
-        codex_plus_core::watcher::should_recover_stale_launcher(has_codex_process, cdp_listening);
+    let has_codex_process = !codex_plus_core::process_monitor::find_codex_processes().is_empty();
+    let cdp_listening = codex_plus_core::process_monitor::cdp_listening(debug_port);
+    let recover = codex_plus_core::process_monitor::should_recover_stale_launcher(
+        has_codex_process,
+        cdp_listening,
+    );
     let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
         "launcher.stale_recovery_check",
         json!({
@@ -146,7 +148,7 @@ async fn activate_existing_codex_app(options: &LaunchOptions) -> anyhow::Result<
     if settings.enhancements_enabled {
         hooks.start_helper(options.helper_port).await?;
     }
-    let process_ids = codex_plus_core::watcher::find_codex_processes();
+    let process_ids = codex_plus_core::process_monitor::find_codex_processes();
     let mut activated = false;
     #[cfg(windows)]
     {

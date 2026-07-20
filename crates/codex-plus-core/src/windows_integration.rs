@@ -5,7 +5,7 @@ use std::iter::once;
 #[cfg(windows)]
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 #[cfg(windows)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::sync::OnceLock;
 
@@ -16,7 +16,7 @@ use windows::Win32::Foundation::{BOOL, CloseHandle, HANDLE, HWND, LPARAM, MAX_PA
 #[cfg(windows)]
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-    CoTaskMemFree, CoUninitialize, IPersistFile,
+    CoTaskMemFree, CoUninitialize, IPersistFile, STGM_READ,
 };
 #[cfg(windows)]
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -37,8 +37,8 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 #[cfg(windows)]
 use windows::Win32::UI::Shell::{
-    ExtractIconExW, FOLDERID_Desktop, IShellLinkW, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
-    ShellExecuteW, ShellLink,
+    ExtractIconExW, FOLDERID_Desktop, FOLDERID_Programs, FOLDERID_Startup, IShellLinkW,
+    KF_FLAG_DEFAULT, SHGetKnownFolderPath, SLGP_RAWPATH, ShellExecuteW, ShellLink,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWMINNOACTIVE;
@@ -144,8 +144,53 @@ pub fn create_shortcut(spec: &ShortcutSpec) -> anyhow::Result<()> {
 
 #[cfg(windows)]
 pub fn desktop_dir() -> Option<PathBuf> {
+    known_folder_dir(&FOLDERID_Desktop)
+}
+
+#[cfg(windows)]
+pub fn programs_dir() -> Option<PathBuf> {
+    known_folder_dir(&FOLDERID_Programs)
+}
+
+#[cfg(windows)]
+pub fn startup_dir() -> Option<PathBuf> {
+    known_folder_dir(&FOLDERID_Startup)
+}
+
+#[cfg(windows)]
+pub fn read_shortcut(
+    path: &std::path::Path,
+) -> anyhow::Result<Option<crate::desktop_integration::ShortcutSnapshot>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let _com = ComApartment::init().context("initialize COM for shortcut inspection")?;
     unsafe {
-        let path = SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, None).ok()?;
+        let shell_link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+            .context("create ShellLink for inspection")?;
+        let persist_file: IPersistFile = shell_link.cast().context("get shortcut IPersistFile")?;
+        persist_file
+            .Load(PCWSTR(wide_null(path.as_os_str()).as_ptr()), STGM_READ)
+            .context("load shortcut")?;
+        let mut target = vec![0u16; 32_768];
+        shell_link
+            .GetPath(&mut target, std::ptr::null_mut(), SLGP_RAWPATH.0 as u32)
+            .context("read shortcut target")?;
+        let mut arguments = vec![0u16; 32_768];
+        shell_link
+            .GetArguments(&mut arguments)
+            .context("read shortcut arguments")?;
+        Ok(Some(crate::desktop_integration::ShortcutSnapshot {
+            target: PathBuf::from(nul_terminated_wide_to_string(&target)),
+            arguments: nul_terminated_wide_to_string(&arguments),
+        }))
+    }
+}
+
+#[cfg(windows)]
+fn known_folder_dir(id: &windows::core::GUID) -> Option<PathBuf> {
+    unsafe {
+        let path = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
         let value = path.to_string().ok().map(PathBuf::from);
         CoTaskMemFree(Some(path.as_ptr().cast()));
         value
@@ -501,7 +546,7 @@ fn is_auxiliary_window_class(class_name: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn apply_window_icons(hwnd: HWND, icon_resource_path: &PathBuf) -> bool {
+fn apply_window_icons(hwnd: HWND, icon_resource_path: &Path) -> bool {
     let Some((large_icon, small_icon)) = load_cached_icons(icon_resource_path) else {
         return false;
     };
@@ -523,7 +568,7 @@ fn apply_window_icons(hwnd: HWND, icon_resource_path: &PathBuf) -> bool {
 }
 
 #[cfg(windows)]
-fn load_cached_icons(icon_resource_path: &PathBuf) -> Option<(HICON, HICON)> {
+fn load_cached_icons(icon_resource_path: &Path) -> Option<(HICON, HICON)> {
     static ICONS: OnceLock<(usize, usize)> = OnceLock::new();
     let icons = ICONS.get_or_init(|| {
         let path = wide_null(icon_resource_path.as_os_str());
@@ -555,7 +600,7 @@ fn load_cached_icons(icon_resource_path: &PathBuf) -> Option<(HICON, HICON)> {
 }
 
 #[cfg(windows)]
-fn apply_taskbar_properties(hwnd: HWND, icon_resource_path: &PathBuf) -> anyhow::Result<()> {
+fn apply_taskbar_properties(hwnd: HWND, icon_resource_path: &Path) -> anyhow::Result<()> {
     use windows::Win32::Storage::EnhancedStorage::{
         PKEY_AppUserModel_ID, PKEY_AppUserModel_RelaunchCommand,
         PKEY_AppUserModel_RelaunchDisplayNameResource, PKEY_AppUserModel_RelaunchIconResource,

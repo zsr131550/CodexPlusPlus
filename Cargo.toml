@@ -24,6 +24,7 @@ eframe = { version = "=0.35.0", default-features = false, features = ["accesskit
 egui_extras = { version = "=0.35.0", features = ["svg"] }
 fs2 = "0.4"
 futures-util = "0.3"
+plist = "1"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "system-proxy"], default-features = false }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

@@ -369,10 +369,10 @@ where
             if helper_started {
                 hooks.shutdown_helper(helper_port).await;
             }
-            if let Some(launch) = &launched {
-                if !keep_launched_on_error {
-                    hooks.terminate_codex(launch).await;
-                }
+            if let Some(launch) = &launched
+                && !keep_launched_on_error
+            {
+                hooks.terminate_codex(launch).await;
             }
             let message = error.to_string();
             let failure = launch_status("failed", &message, debug_port, helper_port, &app_dir);
@@ -876,7 +876,7 @@ impl LaunchHooks for DefaultLaunchHooks {
         }
         let mut empty_streak = 0u32;
         loop {
-            if crate::watcher::find_codex_processes().is_empty() {
+            if crate::process_monitor::find_codex_processes().is_empty() {
                 empty_streak = empty_streak.saturating_add(1);
                 if empty_streak >= 3 {
                     break;
@@ -1070,9 +1070,7 @@ async fn handle_helper_connection(
         }),
     );
     let response = if method == "OPTIONS" {
-        format!(
-            "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        )
+        "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
     } else {
         format!(
             "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1562,10 +1560,10 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> anyhow::Result
                 content_length = content_length_from_headers(&buffer[..end]).unwrap_or(0);
             }
         }
-        if let Some(end) = header_end {
-            if buffer.len() >= end + 4 + content_length {
-                break;
-            }
+        if let Some(end) = header_end
+            && buffer.len() >= end + 4 + content_length
+        {
+            break;
         }
         if buffer.len() > 32 * 1024 * 1024 {
             anyhow::bail!("HTTP 请求过大");
@@ -1944,16 +1942,14 @@ async fn run_pet_real_mouse_cursor_driver(debug_port: u16) {
         for target in targets.iter().cloned() {
             drivers.spawn(run_pet_real_mouse_target_driver(debug_port, target));
         }
-        if let Some(result) = drivers.join_next().await {
-            if let Err(error) = result {
-                let _ = crate::diagnostic_log::append_diagnostic_log(
-                    "pet.real_mouse_cursor_driver_join_failed",
-                    serde_json::json!({
-                        "debug_port": debug_port,
-                        "message": error.to_string()
-                    }),
-                );
-            }
+        if let Some(Err(error)) = drivers.join_next().await {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "pet.real_mouse_cursor_driver_join_failed",
+                serde_json::json!({
+                    "debug_port": debug_port,
+                    "message": error.to_string()
+                }),
+            );
         }
         for target in &targets {
             if let Some(websocket_url) = target.web_socket_debugger_url.as_deref() {

@@ -897,6 +897,7 @@ dependencies = [
  "directories",
  "fs2",
  "futures-util",
+ "plist",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
