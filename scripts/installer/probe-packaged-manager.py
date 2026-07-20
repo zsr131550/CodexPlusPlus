@@ -105,8 +105,13 @@ def provider_url() -> str:
     return f"codexplusplus://v1/import/provider?{query}"
 
 
-def previous_state_directories(root: Path, profile_state: Path | None) -> list[Path]:
-    candidates = [root / "user" / ".codex-session-delete"]
+def previous_state_directories(
+    root: Path, profile_state: Path | None, binary_parent: Path
+) -> list[Path]:
+    candidates = [
+        root / "user" / ".codex-session-delete",
+        binary_parent / ".codex-session-delete",
+    ]
     if profile_state is not None:
         candidates.insert(0, profile_state)
     return list(dict.fromkeys(candidates))
@@ -323,19 +328,26 @@ def disposable_profile_state() -> Path:
         fail("disposable Windows profile was requested on another platform")
     if os.environ.get("CODEX_PLUS_PACKAGE_DISPOSABLE_PROFILE") != "1":
         fail("previous Windows package probes require a disposable runner profile")
-    state = Path.home() / ".codex-session-delete"
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        configured_profile = os.environ.get("CODEX_PLUS_PACKAGE_WINDOWS_PROFILE", "")
+        if not configured_profile:
+            fail("GitHub package probes require the Windows Known Folder profile")
+        profile = Path(configured_profile)
+        if not profile.is_absolute():
+            fail("Windows Known Folder profile must be absolute")
+    else:
+        profile = Path.home()
+    state = profile / ".codex-session-delete"
     marker = state / PROFILE_MARKER
-    if state.exists() and not marker.is_file():
-        fail("disposable runner profile already contains unmanaged application state")
-    state.mkdir(parents=True, exist_ok=True)
-    marker.write_text("schema=1\n", encoding="ascii", newline="\n")
+    if not marker.is_file():
+        fail("disposable runner profile is missing its ownership marker")
     return state
 
 
 def run_previous(binary: Path, mode: str, root: Path) -> None:
     environment = isolated_environment(root, available_port())
     profile_state = disposable_profile_state() if os.name == "nt" else None
-    state_directories = previous_state_directories(root, profile_state)
+    state_directories = previous_state_directories(root, profile_state, binary.parent)
     pending_before = {
         state / "pending-provider-import.json": file_signature(
             state / "pending-provider-import.json"

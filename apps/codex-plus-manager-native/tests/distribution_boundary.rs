@@ -109,6 +109,8 @@ fn package_workflows_upload_bounded_manifests_and_cannot_publish_from_prs() {
     assert!(pr.contains("Run pinned package lifecycle fixture"));
     assert!(pr.contains("Mark disposable package profile"));
     assert!(pr.contains("package lifecycle profile ownership requires GitHub Actions"));
+    assert!(pr.contains("CODEX_PLUS_PACKAGE_WINDOWS_PROFILE"));
+    assert!(pr.contains("Environment+SpecialFolder]::UserProfile"));
     assert!(pr.contains(
         "PREVIOUS_SHA256: 40e7603223a0e8fef43d546f94ad594a3f3a97717ef01d31401edb5ce86e62ef"
     ));
@@ -123,6 +125,7 @@ fn package_workflows_upload_bounded_manifests_and_cannot_publish_from_prs() {
     assert!(lifecycle.contains("previous_sha256"));
     assert!(!lifecycle.contains("latest"));
     assert!(probe.contains("CODEX_PLUS_PACKAGE_DISPOSABLE_PROFILE"));
+    assert!(probe.contains("CODEX_PLUS_PACKAGE_WINDOWS_PROFILE"));
     assert!(probe.contains("manager.provider_import_url.pending"));
     assert!(probe.contains("MAX_STATE_EVIDENCE_BYTES"));
     assert!(probe.contains("process.pid"));

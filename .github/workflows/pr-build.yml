@@ -26,9 +26,16 @@ jobs:
           if ($env:GITHUB_ACTIONS -ne "true") {
             throw "package lifecycle profile ownership requires GitHub Actions"
           }
-          $state = Join-Path $HOME ".codex-session-delete"
-          New-Item -ItemType Directory -Force $state | Out-Null
-          Set-Content -LiteralPath (Join-Path $state ".codex-plus-package-disposable-profile") -Value "schema=1" -Encoding ascii
+          $windowsProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+          if ([string]::IsNullOrWhiteSpace($windowsProfile)) {
+            throw "Windows Known Folder profile is unavailable"
+          }
+          @($HOME, $windowsProfile) | Select-Object -Unique | ForEach-Object {
+            $state = Join-Path $_ ".codex-session-delete"
+            New-Item -ItemType Directory -Force $state | Out-Null
+            Set-Content -LiteralPath (Join-Path $state ".codex-plus-package-disposable-profile") -Value "schema=1" -Encoding ascii
+          }
+          "CODEX_PLUS_PACKAGE_WINDOWS_PROFILE=$windowsProfile" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install NSIS
         run: choco install nsis -y
