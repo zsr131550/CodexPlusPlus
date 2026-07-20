@@ -269,7 +269,7 @@ fn memory_efficient_wgpu_configuration_for(
         unreachable!("default WGPU configuration must create a device")
     };
     setup.instance_descriptor.backends =
-        backend_override.unwrap_or(platform_default_wgpu_backends());
+        backend_override.unwrap_or_else(platform_default_wgpu_backends);
     let default_device_descriptor = Arc::clone(&setup.device_descriptor);
     setup.device_descriptor = Arc::new(move |adapter| {
         let mut descriptor = default_device_descriptor(adapter);
@@ -283,7 +283,21 @@ fn memory_efficient_wgpu_configuration_for(
 
 #[cfg(windows)]
 fn platform_default_wgpu_backends() -> eframe::wgpu::Backends {
-    eframe::wgpu::Backends::GL
+    let gl = eframe::wgpu::Backends::GL;
+    let mut descriptor = eframe::wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = gl;
+    let instance = eframe::wgpu::Instance::new(descriptor);
+    let gl_available = !pollster::block_on(instance.enumerate_adapters(gl)).is_empty();
+    windows_default_wgpu_backend(gl_available)
+}
+
+#[cfg(windows)]
+fn windows_default_wgpu_backend(gl_available: bool) -> eframe::wgpu::Backends {
+    if gl_available {
+        eframe::wgpu::Backends::GL
+    } else {
+        eframe::wgpu::Backends::DX12
+    }
 }
 
 #[cfg(not(windows))]
@@ -585,21 +599,42 @@ mod tests {
             panic!("configuration should create a WGPU device")
         };
         #[cfg(windows)]
-        assert_eq!(
-            setup.instance_descriptor.backends,
-            eframe::wgpu::Backends::GL
-        );
+        {
+            assert!(
+                setup.instance_descriptor.backends == eframe::wgpu::Backends::GL
+                    || setup.instance_descriptor.backends == eframe::wgpu::Backends::DX12
+            );
+            assert!(setup.native_adapter_selector.is_none());
+        }
     }
 
     #[test]
     fn wgpu_backend_environment_override_is_preserved() {
-        let configuration =
-            memory_efficient_wgpu_configuration_for(Some(eframe::wgpu::Backends::DX12));
-        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = configuration.wgpu_setup else {
-            panic!("configuration should create a WGPU device")
-        };
+        for backend in [
+            eframe::wgpu::Backends::GL,
+            eframe::wgpu::Backends::DX12,
+            eframe::wgpu::Backends::VULKAN,
+            eframe::wgpu::Backends::GL | eframe::wgpu::Backends::DX12,
+        ] {
+            let configuration = memory_efficient_wgpu_configuration_for(Some(backend));
+            let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = configuration.wgpu_setup else {
+                panic!("configuration should create a WGPU device")
+            };
+            assert_eq!(setup.instance_descriptor.backends, backend);
+            #[cfg(windows)]
+            assert!(setup.native_adapter_selector.is_none());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_wgpu_backend_prefers_gl_and_falls_back_to_dx12() {
         assert_eq!(
-            setup.instance_descriptor.backends,
+            windows_default_wgpu_backend(true),
+            eframe::wgpu::Backends::GL
+        );
+        assert_eq!(
+            windows_default_wgpu_backend(false),
             eframe::wgpu::Backends::DX12
         );
     }
