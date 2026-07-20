@@ -12,7 +12,6 @@ InstallDir "$LOCALAPPDATA\Programs\Codex++"
 InstallDirRegKey HKCU "Software\CodexPlusPlus" "InstallDir"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
-SetShellVarContext current
 
 !define MUI_ICON "${ROOT}\apps\codex-plus-manager-native\assets\packaging\icon.ico"
 !define MUI_UNICON "${ROOT}\apps\codex-plus-manager-native\assets\packaging\icon.ico"
@@ -27,6 +26,7 @@ SetShellVarContext current
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Install"
+  SetShellVarContext current
   SetOutPath "$INSTDIR"
 
   nsExec::ExecToLog 'taskkill /IM codex-plus-plus.exe /F'
@@ -70,6 +70,7 @@ package_upgrade_complete:
 SectionEnd
 
 Section "Uninstall"
+  SetShellVarContext current
   nsExec::ExecToLog 'taskkill /IM codex-plus-plus.exe /F'
   Pop $0
   nsExec::ExecToLog 'taskkill /IM codex-plus-plus-manager.exe /F'

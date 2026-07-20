@@ -34,6 +34,20 @@ fn native_manager_is_staged_under_the_stable_contract() {
         .unwrap()
         .0;
     let macos_package_job = pr.split_once("  macos-dmg:").unwrap().1;
+    let nsis_install = nsis
+        .split_once("Section \"Install\"")
+        .unwrap()
+        .1
+        .split_once("SectionEnd")
+        .unwrap()
+        .0;
+    let nsis_uninstall = nsis
+        .split_once("Section \"Uninstall\"")
+        .unwrap()
+        .1
+        .split_once("SectionEnd")
+        .unwrap()
+        .0;
 
     assert!(pr.contains("cargo test --workspace --exclude codex-plus-manager"));
     assert!(
@@ -71,7 +85,8 @@ fn native_manager_is_staged_under_the_stable_contract() {
     assert!(pr.contains("cargo test -p codex-plus-manager --jobs 1"));
 
     assert!(nsis.contains("apps\\codex-plus-manager-native\\assets\\packaging\\icon.ico"));
-    assert!(nsis.contains("SetShellVarContext current"));
+    assert!(nsis_install.contains("SetShellVarContext current"));
+    assert!(nsis_uninstall.contains("SetShellVarContext current"));
     assert!(nsis.contains("Software\\Classes\\codexplusplus"));
     assert!(nsis.contains("CodexPlusPlus"));
     assert!(dmg.contains("apps/codex-plus-manager-native/assets/packaging/icon.png"));
