@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from typing import NoReturn
 import zipfile
 
@@ -270,18 +271,27 @@ def run_probes(probe: Path, binary: Path, fixture_root: Path, version: str) -> l
     outcomes: list[dict[str, object]] = []
     for mode in MODES:
         try:
-            result = subprocess.run(
-                probe_command(probe, binary, mode, fixture_root, version),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=90,
-                check=False,
-            )
+            with tempfile.TemporaryFile() as error_stream:
+                result = subprocess.run(
+                    probe_command(probe, binary, mode, fixture_root, version),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=error_stream,
+                    timeout=90,
+                    check=False,
+                )
+                error_stream.seek(0, os.SEEK_END)
+                error_size = error_stream.tell()
+                error_stream.seek(max(0, error_size - 512))
+                error_detail = error_stream.read(512).decode("utf-8", errors="replace").strip()
         except (OSError, subprocess.TimeoutExpired):
             fail(f"{version} {mode} launch probe could not complete")
         if result.returncode != 0:
-            fail(f"{version} {mode} launch probe failed with exit code {result.returncode}")
+            detail = error_detail.splitlines()[-1] if error_detail else "no bounded probe detail"
+            fail(
+                f"{version} {mode} launch probe failed with exit code "
+                f"{result.returncode}: {detail}"
+            )
         outcomes.append({"mode": mode, "exit_code": result.returncode})
     return outcomes
 

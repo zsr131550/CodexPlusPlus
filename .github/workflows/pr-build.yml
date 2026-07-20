@@ -20,6 +20,16 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Mark disposable package profile
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_ACTIONS -ne "true") {
+            throw "package lifecycle profile ownership requires GitHub Actions"
+          }
+          $state = Join-Path $HOME ".codex-session-delete"
+          New-Item -ItemType Directory -Force $state | Out-Null
+          Set-Content -LiteralPath (Join-Path $state ".codex-plus-package-disposable-profile") -Value "schema=1" -Encoding ascii
+
       - name: Install NSIS
         run: choco install nsis -y
 

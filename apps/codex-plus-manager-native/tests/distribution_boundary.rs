@@ -107,6 +107,8 @@ fn package_workflows_upload_bounded_manifests_and_cannot_publish_from_prs() {
     assert!(pr.contains("generate-package-manifest.py"));
     assert!(pr.contains("native-package-manifest"));
     assert!(pr.contains("Run pinned package lifecycle fixture"));
+    assert!(pr.contains("Mark disposable package profile"));
+    assert!(pr.contains("package lifecycle profile ownership requires GitHub Actions"));
     assert!(pr.contains(
         "PREVIOUS_SHA256: 40e7603223a0e8fef43d546f94ad594a3f3a97717ef01d31401edb5ce86e62ef"
     ));
