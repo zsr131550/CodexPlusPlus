@@ -109,6 +109,7 @@ def previous_state_directories(
     root: Path, profile_state: Path | None, binary_parent: Path
 ) -> list[Path]:
     candidates = [
+        root / ".codex-session-delete",
         root / "user" / ".codex-session-delete",
         binary_parent / ".codex-session-delete",
     ]
@@ -239,7 +240,8 @@ def isolated_environment(root: Path, port: int) -> dict[str, str]:
     local = user / "local"
     roaming = user / "roaming"
     temp = root / "temp"
-    for directory in (user, local, roaming, temp):
+    webview2 = root / "webview2"
+    for directory in (user, local, roaming, temp, webview2):
         directory.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     environment.update(
@@ -255,6 +257,7 @@ def isolated_environment(root: Path, port: int) -> dict[str, str]:
             "TMP": str(temp),
             "TEMP": str(temp),
             "TMPDIR": str(temp),
+            "WEBVIEW2_USER_DATA_FOLDER": str(webview2),
             "CODEX_HOME": str(root / "codex-home"),
             "CODEX_PLUS_GUARD_PORT": str(port),
         }
@@ -314,11 +317,16 @@ def native_environment(root: Path, port: int, mode: str) -> tuple[dict[str, str]
     return environment, state / "manager-instance-endpoint.json", pending
 
 
-def start_manager(binary: Path, arguments: list[str], environment: dict[str, str]) -> subprocess.Popen[bytes]:
+def start_manager(
+    binary: Path,
+    arguments: list[str],
+    environment: dict[str, str],
+    working_directory: Path,
+) -> subprocess.Popen[bytes]:
     try:
         return subprocess.Popen(
             [str(binary), *arguments],
-            cwd=binary.parent,
+            cwd=working_directory,
             env=environment,
             **process_options(),
         )
@@ -328,12 +336,12 @@ def start_manager(binary: Path, arguments: list[str], environment: dict[str, str
 
 def run_native(binary: Path, mode: str, root: Path) -> None:
     environment, endpoint, pending = native_environment(root, available_port(), mode)
-    primary = start_manager(binary, [], environment)
+    primary = start_manager(binary, [], environment, root)
     try:
         wait_for_file(endpoint, primary, 25)
         if mode != "ordinary":
             argument = "--show-update" if mode == "show-update" else provider_url()
-            secondary = start_manager(binary, [argument], environment)
+            secondary = start_manager(binary, [argument], environment, root)
             try:
                 secondary_code = wait_for_exit(secondary, 10)
             finally:
@@ -400,7 +408,7 @@ def run_previous(binary: Path, mode: str, root: Path) -> None:
         arguments.append("--show-update")
     elif mode == "provider-import":
         arguments.append(provider_url())
-    process = start_manager(binary, arguments, environment)
+    process = start_manager(binary, arguments, environment, root)
     try:
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:

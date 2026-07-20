@@ -130,6 +130,11 @@ fn package_workflows_upload_bounded_manifests_and_cannot_publish_from_prs() {
     assert!(probe.contains("native_manager.run_failed"));
     assert!(probe.contains("MAX_STATE_EVIDENCE_BYTES"));
     assert!(probe.contains("process.pid"));
+    assert!(probe.contains("WEBVIEW2_USER_DATA_FOLDER"));
+    assert!(probe.contains("cwd=working_directory"));
+    assert!(
+        lifecycle.contains("assert_install_root_empty(install_root, \"previous package removal\")")
+    );
 }
 
 #[test]

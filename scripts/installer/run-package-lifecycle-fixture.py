@@ -138,7 +138,7 @@ def remove_owned(install_root: Path, owned: list[str]) -> None:
             pass
 
 
-def assert_install_root_empty(install_root: Path) -> None:
+def assert_install_root_empty(install_root: Path, context: str = "package uninstall") -> None:
     residual = sorted(
         path.relative_to(install_root).as_posix()
         for path in install_root.rglob("*")
@@ -147,7 +147,7 @@ def assert_install_root_empty(install_root: Path) -> None:
         preview = ", ".join(residual[:16])
         suffix = "..." if len(residual) > 16 else ""
         fail(
-            "package uninstall left package-owned directories or links: "
+            f"{context} left package-owned directories or links: "
             f"count={len(residual)} [{preview}{suffix}]"
         )
 
@@ -349,6 +349,7 @@ def main() -> int:
     assert_data_unchanged(data_root, baseline)
 
     remove_owned(install_root, previous_owned)
+    assert_install_root_empty(install_root, "previous package removal")
     native_owned = copy_package(native_root, install_root)
     native_launches = run_probes(
         probe,
