@@ -19,6 +19,9 @@ use codex_plus_manager_native::fonts;
 use codex_plus_manager_native::i18n::{Locale, TextKey, ThemeMode, text};
 use codex_plus_manager_native::state::Route;
 use codex_plus_manager_native::state::context::{ContextFailureKind, ContextViewState};
+use codex_plus_manager_native::state::desktop_integration::{
+    DesktopIntegrationFailureKind, DesktopIntegrationViewState,
+};
 use codex_plus_manager_native::state::enhancements::{
     EnhancementFailure, EnhancementFailureKind, EnhancementViewState,
 };
@@ -47,19 +50,19 @@ use codex_plus_manager_service::{
     ContextEntrySummary, ContextKind, ContextOwnershipOutcome, ContextSyncDiffSummary,
     ContextSyncGuard, ContextSyncKeys, ContextSyncOutcome, ContextSyncPreview,
     ContextToolsErrorKind, ContextWorkspace, EnhancementSettingsEnvironment,
-    EnhancementSettingsService, InstallStarted, LaunchOutcome, MaintenanceSection,
-    ManagerSettingsWorkspace, PluginMarketplaceErrorKind, PluginMarketplaceKind,
-    PluginMarketplaceRevision, PluginMarketplaceStatus, PluginMarketplaceWorkspace,
-    PrivateArgument, PrivatePath, PrivateUrl, ProviderActivationSummary,
-    ProviderCommonConfigExtraction, ProviderDocument, ProviderLiveRevision, ProviderRevision,
-    ProviderSyncErrorKind, ProviderSyncRevision, ProviderSyncTargetList, ProviderSyncTargetOption,
-    ProviderSyncTargetSource, ProviderSyncWorkspace, ProviderWorkspace, RelayEnvironmentWorkspace,
-    SafeSettingsGroup, ScriptIntegrity, ScriptMarketRevision, ScriptMarketSummary,
-    ScriptMarketWorkspace, SectionValue, SessionDeleteBatchOutcome, SessionDeleteOutcome,
-    SessionRevision, SessionSummary, SessionWorkspace, StepwiseTestOutcome, UpdateAvailability,
-    UpdateCheckResult, UpdateDownload, UpdateEnvironment, UpdateEnvironmentError, UpdateProgress,
-    UpdateService, UserScriptBackupEvidence, UserScriptErrorKind, UserScriptMutationOutcome,
-    UserScriptOrigin, UserScriptRevision, UserScriptStatus, UserScriptSummary, UserScriptWorkspace,
+    EnhancementSettingsService, InstallStarted, ManagerSettingsWorkspace,
+    PluginMarketplaceErrorKind, PluginMarketplaceKind, PluginMarketplaceRevision,
+    PluginMarketplaceStatus, PluginMarketplaceWorkspace, PrivateArgument, PrivatePath, PrivateUrl,
+    ProviderActivationSummary, ProviderCommonConfigExtraction, ProviderDocument,
+    ProviderLiveRevision, ProviderRevision, ProviderSyncErrorKind, ProviderSyncRevision,
+    ProviderSyncTargetList, ProviderSyncTargetOption, ProviderSyncTargetSource,
+    ProviderSyncWorkspace, ProviderWorkspace, RelayEnvironmentWorkspace, SafeSettingsGroup,
+    ScriptIntegrity, ScriptMarketRevision, ScriptMarketSummary, ScriptMarketWorkspace,
+    SessionDeleteBatchOutcome, SessionDeleteOutcome, SessionRevision, SessionSummary,
+    SessionWorkspace, StepwiseTestOutcome, UpdateAvailability, UpdateCheckResult, UpdateDownload,
+    UpdateEnvironment, UpdateEnvironmentError, UpdateProgress, UpdateService,
+    UserScriptBackupEvidence, UserScriptErrorKind, UserScriptMutationOutcome, UserScriptOrigin,
+    UserScriptRevision, UserScriptStatus, UserScriptSummary, UserScriptWorkspace,
     ZedProjectRevision, ZedRememberOutcome, ZedRemoteErrorKind, ZedRemoteOpenOutcome,
     ZedRemoteProjectSummary, ZedRemoteWorkspace, ZedSettingsRevision,
 };
@@ -89,6 +92,7 @@ struct ZedSnapshotState {
 struct MaintenanceSnapshotState {
     model: ShellViewModel,
     maintenance: MaintenanceViewState,
+    desktop_integration: DesktopIntegrationViewState,
     cjk_font: Option<Vec<u8>>,
 }
 
@@ -203,10 +207,11 @@ enum ZedRemoteSnapshotScenario {
 
 #[derive(Debug, Clone, Copy)]
 enum MaintenanceSnapshotScenario {
-    Loading,
-    Ready,
-    Partial,
-    LaunchSuccess,
+    Current,
+    RepairConfirmation,
+    NeedsMigration,
+    MutationRunning,
+    Error,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -555,10 +560,20 @@ const ENHANCEMENT_SCENARIOS: &[(EnhancementSnapshotScenario, &str)] = &[
 ];
 
 const MAINTENANCE_SCENARIOS: &[(MaintenanceSnapshotScenario, &str)] = &[
-    (MaintenanceSnapshotScenario::Loading, "loading"),
-    (MaintenanceSnapshotScenario::Ready, "ready"),
-    (MaintenanceSnapshotScenario::Partial, "partial"),
-    (MaintenanceSnapshotScenario::LaunchSuccess, "launch_success"),
+    (MaintenanceSnapshotScenario::Current, "current"),
+    (
+        MaintenanceSnapshotScenario::RepairConfirmation,
+        "repair_confirmation",
+    ),
+    (
+        MaintenanceSnapshotScenario::NeedsMigration,
+        "needs_migration",
+    ),
+    (
+        MaintenanceSnapshotScenario::MutationRunning,
+        "mutation_running",
+    ),
+    (MaintenanceSnapshotScenario::Error, "error"),
 ];
 
 const SETTINGS_SCENARIOS: &[(SettingsSnapshotScenario, &str)] = &[
@@ -813,6 +828,7 @@ fn run_snapshot_matrix(
                             enhancements: None,
                             zed_remote: None,
                             maintenance: None,
+                            desktop_integration: None,
                             settings: None,
                         },
                     );
@@ -1549,6 +1565,7 @@ fn run_maintenance_snapshot_matrix() {
                             &state.model,
                             ShellFeatureStates {
                                 maintenance: Some(&state.maintenance),
+                                desktop_integration: Some(&state.desktop_integration),
                                 ..ShellFeatureStates::default()
                             },
                         );
@@ -1560,16 +1577,13 @@ fn run_maintenance_snapshot_matrix() {
                             model
                         },
                         maintenance: maintenance_snapshot_state(scenario),
+                        desktop_integration: desktop_integration_snapshot_state(scenario),
                         cjk_font: Some(font.clone()),
                     },
                 );
 
             harness.remove_cursor();
-            if matches!(scenario, MaintenanceSnapshotScenario::Loading) {
-                harness.run_steps(2);
-            } else {
-                harness.run();
-            }
+            harness.run();
             assert_maintenance_snapshot_layout(&harness, scenario, locale, width, height);
             let image = harness
                 .render()
@@ -1931,66 +1945,56 @@ fn assert_maintenance_snapshot_layout(
         text(locale, TextKey::Diagnostics),
     );
 
+    let path = "C:/fixture/Codex";
+    let path_editor = harness.get_by(|node| {
+        node.role() == egui::accesskit::Role::TextInput && node.value().as_deref() == Some(path)
+    });
+    assert_inside(path_editor.rect(), width, height, path);
+
     match scenario {
-        MaintenanceSnapshotScenario::Loading => {
-            let loading = format!(
-                "{}: {}",
-                text(locale, TextKey::Status),
-                text(locale, TextKey::Loading)
-            );
-            assert_inside(
-                harness.get_by_label(&loading).rect(),
-                width,
-                height,
-                &loading,
-            );
+        MaintenanceSnapshotScenario::Current => {
+            let current = text(locale, TextKey::Current);
+            let current_node = harness
+                .query_all_by(|node| {
+                    node.label().as_deref() == Some(current)
+                        || node.value().as_deref() == Some(current)
+                })
+                .next()
+                .expect("current integration status should be visible");
+            assert_inside(current_node.rect(), width, height, current);
         }
-        MaintenanceSnapshotScenario::Ready => {
-            let path = "C:/fixture/Codex";
-            let path_editor = harness.get_by(|node| {
-                node.role() == egui::accesskit::Role::TextInput
-                    && node.value().as_deref() == Some(path)
-            });
-            assert_inside(path_editor.rect(), width, height, path);
+        MaintenanceSnapshotScenario::RepairConfirmation => {
+            let title = text(locale, TextKey::RepairDesktopIntegrationTitle);
+            assert_inside(harness.get_by_label(title).rect(), width, height, title);
+            let repair = text(locale, TextKey::Repair);
+            assert_inside(harness.get_by_label(repair).rect(), width, height, repair);
         }
-        MaintenanceSnapshotScenario::Partial => {
-            let unavailable = text(locale, TextKey::SafeDocumentUnavailable);
-            assert_inside(
-                harness.get_by_label(unavailable).rect(),
-                width,
-                height,
-                unavailable,
-            );
+        MaintenanceSnapshotScenario::NeedsMigration => {
+            let warning = text(locale, TextKey::LegacySignInActive);
+            assert_inside(harness.get_by_label(warning).rect(), width, height, warning);
+            let migrate = text(locale, TextKey::MigrateSignIn);
+            assert_inside(harness.get_by_label(migrate).rect(), width, height, migrate);
         }
-        MaintenanceSnapshotScenario::LaunchSuccess => {
-            let accepted = text(locale, TextKey::LaunchAccepted);
-            assert_inside(
-                harness.get_by_label(accepted).rect(),
-                width,
-                height,
-                accepted,
-            );
+        MaintenanceSnapshotScenario::MutationRunning => {
+            let toggle = text(locale, TextKey::StartAtSignIn);
+            let disabled = harness
+                .get_by(|node| node.label().as_deref() == Some(toggle) && node.is_disabled());
+            assert_inside(disabled.rect(), width, height, toggle);
+        }
+        MaintenanceSnapshotScenario::Error => {
+            let error = text(locale, TextKey::DesktopIntegrationLoadFailed);
+            assert_inside(harness.get_by_label(error).rect(), width, height, error);
         }
     }
 
-    if width <= 960.0 {
-        let path_label = harness
-            .get_by_label(text(locale, TextKey::ApplicationPath))
-            .rect();
-        assert!(
-            diagnostics.min.y > path_label.max.y + 120.0,
-            "compact maintenance must stack: {path_label:?} {diagnostics:?}"
-        );
-    } else {
-        assert!(
-            diagnostics.min.x > application.min.x + 300.0,
-            "wide maintenance must use columns: {application:?} {diagnostics:?}"
-        );
-        assert!(
-            (diagnostics.min.y - application.min.y).abs() < 8.0,
-            "wide maintenance columns must align: {application:?} {diagnostics:?}"
-        );
-    }
+    assert!(
+        diagnostics.min.x > application.min.x + 300.0,
+        "maintenance snapshot matrix must use columns: {application:?} {diagnostics:?}"
+    );
+    assert!(
+        (diagnostics.min.y - application.min.y).abs() < 8.0,
+        "maintenance snapshot columns must align: {application:?} {diagnostics:?}"
+    );
 
     let tree = format!("{:#?}", harness.root());
     assert!(!tree.contains("private-"), "{tree}");
@@ -2250,34 +2254,44 @@ fn assert_inside(rect: egui::Rect, width: f32, height: f32, label: &str) {
     );
 }
 
-fn maintenance_snapshot_state(scenario: MaintenanceSnapshotScenario) -> MaintenanceViewState {
+fn maintenance_snapshot_state(_scenario: MaintenanceSnapshotScenario) -> MaintenanceViewState {
     let mut state = MaintenanceViewState::default();
-    if matches!(scenario, MaintenanceSnapshotScenario::Loading) {
-        state.begin_load();
-        return state;
-    }
-
-    let mut workspace = (*common::maintenance_workspace("C:/fixture/Codex")).clone();
-    if matches!(scenario, MaintenanceSnapshotScenario::Partial) {
-        workspace.entrypoints = SectionValue::Unavailable(MaintenanceSection::Entrypoints);
-        workspace.watcher = SectionValue::Unavailable(MaintenanceSection::Watcher);
-        workspace.logs = SectionValue::Unavailable(MaintenanceSection::Logs);
-    }
     let request_id = state.begin_load();
-    assert!(state.apply_load_response(request_id, Ok(Arc::new(workspace))));
-
-    if matches!(scenario, MaintenanceSnapshotScenario::LaunchSuccess) {
-        let (launch_id, _) = state.begin_launch().expect("fixture launch must start");
-        assert!(state.apply_launch_response(
-            launch_id,
-            Ok(LaunchOutcome {
-                debug_port: 9229,
-                helper_port: 57321,
-                accepted: true,
-            }),
-        ));
-    }
+    assert!(state.apply_load_response(
+        request_id,
+        Ok(common::maintenance_workspace("C:/fixture/Codex")),
+    ));
     state
+}
+
+fn desktop_integration_snapshot_state(
+    scenario: MaintenanceSnapshotScenario,
+) -> DesktopIntegrationViewState {
+    match scenario {
+        MaintenanceSnapshotScenario::Current => common::desktop_integration_state(false, false),
+        MaintenanceSnapshotScenario::RepairConfirmation => {
+            let mut state = common::desktop_integration_state(true, false);
+            assert!(state.request_repair_confirmation());
+            state
+        }
+        MaintenanceSnapshotScenario::NeedsMigration => {
+            common::desktop_integration_state(false, true)
+        }
+        MaintenanceSnapshotScenario::MutationRunning => {
+            let mut state = common::desktop_integration_state(false, false);
+            assert!(state.begin_set_start_at_sign_in(true).is_some());
+            state
+        }
+        MaintenanceSnapshotScenario::Error => {
+            let mut state = DesktopIntegrationViewState::default();
+            let request_id = state.begin_load();
+            assert!(state.apply_load_response(
+                request_id,
+                Err(DesktopIntegrationFailureKind::InspectFailed),
+            ));
+            state
+        }
+    }
 }
 
 fn settings_snapshot_state(scenario: SettingsSnapshotScenario) -> SettingsViewState {

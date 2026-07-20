@@ -1,9 +1,16 @@
 use std::fmt;
 
+use codex_plus_core::desktop_integration::{
+    DesktopIntegrationHealth, DesktopIntegrationItemKind, DesktopIntegrationItemState,
+};
+use codex_plus_core::startup_registration::StartAtSignInHealth;
 use codex_plus_manager_service::LaunchState;
 use eframe::egui;
 
 use crate::i18n::{Locale, TextKey, text};
+use crate::state::desktop_integration::{
+    DesktopIntegrationFailureKind, DesktopIntegrationOperationPhase, DesktopIntegrationViewState,
+};
 use crate::state::maintenance::{
     MaintenanceDocumentTab, MaintenanceFailureKind, MaintenanceOperationPhase, MaintenanceViewState,
 };
@@ -27,6 +34,11 @@ pub enum MaintenanceAction {
     CopyDocument(String),
     ConfirmDiscard,
     CancelDiscard,
+    RequestRepair,
+    ConfirmRepair,
+    CancelRepair,
+    MigrateSignIn,
+    SetStartAtSignIn(bool),
 }
 
 impl fmt::Debug for MaintenanceAction {
@@ -52,6 +64,14 @@ impl fmt::Debug for MaintenanceAction {
             Self::Launch => formatter.write_str("Launch"),
             Self::ConfirmDiscard => formatter.write_str("ConfirmDiscard"),
             Self::CancelDiscard => formatter.write_str("CancelDiscard"),
+            Self::RequestRepair => formatter.write_str("RequestRepair"),
+            Self::ConfirmRepair => formatter.write_str("ConfirmRepair"),
+            Self::CancelRepair => formatter.write_str("CancelRepair"),
+            Self::MigrateSignIn => formatter.write_str("MigrateSignIn"),
+            Self::SetStartAtSignIn(enabled) => formatter
+                .debug_tuple("SetStartAtSignIn")
+                .field(enabled)
+                .finish(),
         }
     }
 }
@@ -59,20 +79,21 @@ impl fmt::Debug for MaintenanceAction {
 pub fn render(
     ui: &mut egui::Ui,
     state: &MaintenanceViewState,
+    desktop_integration: &DesktopIntegrationViewState,
     locale: Locale,
     actions: &mut Vec<MaintenanceAction>,
 ) {
-    render_feedback(ui, state, locale);
+    render_feedback(ui, state, desktop_integration, locale);
     egui::ScrollArea::vertical()
         .id_salt("maintenance_page_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            if ui.available_width() >= 860.0 {
+            if ui.available_width() >= 720.0 {
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui_with_layout(
                         egui::vec2(360.0, 610.0),
                         egui::Layout::top_down(egui::Align::Min),
-                        |ui| render_application(ui, state, locale, actions),
+                        |ui| render_application(ui, state, desktop_integration, locale, actions),
                     );
                     ui.separator();
                     let width = ui.available_width().max(320.0);
@@ -83,7 +104,7 @@ pub fn render(
                     );
                 });
             } else {
-                render_application(ui, state, locale, actions);
+                render_application(ui, state, desktop_integration, locale, actions);
                 ui.add_space(16.0);
                 ui.separator();
                 ui.add_space(12.0);
@@ -97,9 +118,17 @@ pub fn render(
     if state.discard_confirmation_visible() {
         render_discard_confirmation(ui.ctx(), locale, actions);
     }
+    if desktop_integration.repair_confirmation_visible() {
+        render_repair_confirmation(ui.ctx(), desktop_integration, locale, actions);
+    }
 }
 
-fn render_feedback(ui: &mut egui::Ui, state: &MaintenanceViewState, locale: Locale) {
+fn render_feedback(
+    ui: &mut egui::Ui,
+    state: &MaintenanceViewState,
+    desktop_integration: &DesktopIntegrationViewState,
+    locale: Locale,
+) {
     let error = state.save.error.or(state.launch.error).or(state.load_error);
     if state.conflict_visible() {
         ui.colored_label(
@@ -119,12 +148,22 @@ fn render_feedback(ui: &mut egui::Ui, state: &MaintenanceViewState, locale: Loca
         && state.launch_outcome.is_some_and(|outcome| outcome.accepted)
     {
         ui.colored_label(theme::SUCCESS_COLOR, text(locale, TextKey::LaunchAccepted));
+    } else if let Some(error) = desktop_integration
+        .operation
+        .error
+        .or(desktop_integration.load_error)
+    {
+        ui.colored_label(
+            theme::ERROR_COLOR,
+            desktop_integration_failure_text(locale, error),
+        );
     }
 }
 
 fn render_application(
     ui: &mut egui::Ui,
     state: &MaintenanceViewState,
+    desktop_integration: &DesktopIntegrationViewState,
     locale: Locale,
     actions: &mut Vec<MaintenanceAction>,
 ) {
@@ -260,27 +299,8 @@ fn render_application(
     ui.add_space(14.0);
     ui.separator();
     ui.add_space(8.0);
-    let entrypoints = workspace.and_then(|workspace| workspace.entrypoints.value());
-    status_row(
-        ui,
-        text(locale, TextKey::SilentEntrypoint),
-        installed_text(locale, entrypoints.map(|value| value.silent_installed)),
-    );
-    status_row(
-        ui,
-        text(locale, TextKey::ManagementEntrypoint),
-        installed_text(locale, entrypoints.map(|value| value.management_installed)),
-    );
-    let watcher = workspace.and_then(|workspace| workspace.watcher.value());
-    status_row(
-        ui,
-        text(locale, TextKey::Watcher),
-        match watcher.map(|value| value.enabled) {
-            Some(true) => text(locale, TextKey::Enabled),
-            Some(false) => text(locale, TextKey::Disabled),
-            None => text(locale, TextKey::Unknown),
-        },
-    );
+    render_desktop_integration(ui, desktop_integration, locale, actions);
+    ui.add_space(8.0);
     let launch = workspace
         .and_then(|workspace| workspace.latest_launch.value())
         .and_then(Option::as_ref);
@@ -291,6 +311,155 @@ fn render_application(
             .map(|launch| launch_state_text(locale, launch.status))
             .unwrap_or_else(|| text(locale, TextKey::NoLaunch)),
     );
+}
+
+fn render_desktop_integration(
+    ui: &mut egui::Ui,
+    state: &DesktopIntegrationViewState,
+    locale: Locale,
+    actions: &mut Vec<MaintenanceAction>,
+) {
+    ui.heading(text(locale, TextKey::DesktopIntegration));
+    ui.add_space(4.0);
+    if let Some(workspace) = state.workspace.as_deref() {
+        if workspace.repair_items.is_empty() {
+            status_row(
+                ui,
+                text(locale, TextKey::Status),
+                repair_health_text(locale, workspace.repair_health),
+            );
+        } else {
+            for item in &workspace.repair_items {
+                status_row(
+                    ui,
+                    desktop_item_text(locale, item.kind),
+                    desktop_item_state_text(locale, item.state),
+                );
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if icon_button(
+                ui,
+                icons::wrench(),
+                text(locale, TextKey::RepairDesktopIntegration),
+                workspace.repair_health == DesktopIntegrationHealth::NeedsRepair
+                    && state.operation.phase != DesktopIntegrationOperationPhase::Running,
+            )
+            .clicked()
+            {
+                actions.push(MaintenanceAction::RequestRepair);
+            }
+            if let Some(sign_in) = &workspace.sign_in {
+                let mut enabled = sign_in.effective_enabled;
+                let response = ui.add_enabled(
+                    state.operation.phase != DesktopIntegrationOperationPhase::Running,
+                    egui::Checkbox::new(&mut enabled, text(locale, TextKey::StartAtSignIn)),
+                );
+                if response.changed() {
+                    actions.push(MaintenanceAction::SetStartAtSignIn(enabled));
+                }
+            }
+        });
+
+        if workspace
+            .sign_in
+            .as_ref()
+            .is_some_and(|status| status.health == StartAtSignInHealth::NeedsMigration)
+        {
+            ui.colored_label(
+                theme::WARNING_COLOR,
+                text(locale, TextKey::LegacySignInActive),
+            );
+            if ui
+                .add_enabled(
+                    state.migrate_visible(),
+                    egui::Button::new(text(locale, TextKey::MigrateSignIn)),
+                )
+                .clicked()
+            {
+                actions.push(MaintenanceAction::MigrateSignIn);
+            }
+        }
+    } else {
+        status_row(
+            ui,
+            text(locale, TextKey::Status),
+            if matches!(
+                state.load_phase,
+                crate::state::desktop_integration::DesktopIntegrationLoadPhase::Loading
+                    | crate::state::desktop_integration::DesktopIntegrationLoadPhase::Refreshing
+            ) {
+                text(locale, TextKey::Loading)
+            } else {
+                text(locale, TextKey::Unknown)
+            },
+        );
+    }
+}
+
+fn render_repair_confirmation(
+    ctx: &egui::Context,
+    state: &DesktopIntegrationViewState,
+    locale: Locale,
+    actions: &mut Vec<MaintenanceAction>,
+) {
+    egui::Window::new(text(locale, TextKey::RepairDesktopIntegrationTitle))
+        .id(egui::Id::new("maintenance_desktop_repair_confirmation"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.set_min_width(340.0);
+            for kind in state.repair_confirmation_item_kinds() {
+                ui.label(desktop_item_text(locale, *kind));
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button(text(locale, TextKey::Repair)).clicked() {
+                    actions.push(MaintenanceAction::ConfirmRepair);
+                }
+                if ui.button(text(locale, TextKey::Cancel)).clicked() {
+                    actions.push(MaintenanceAction::CancelRepair);
+                }
+            });
+        });
+}
+
+fn desktop_item_text(locale: Locale, kind: DesktopIntegrationItemKind) -> &'static str {
+    text(
+        locale,
+        match kind {
+            DesktopIntegrationItemKind::DesktopManagerShortcut => TextKey::DesktopShortcut,
+            DesktopIntegrationItemKind::StartMenuLauncherShortcut => TextKey::StartMenuLauncher,
+            DesktopIntegrationItemKind::StartMenuManagerShortcut => TextKey::StartMenuManager,
+            DesktopIntegrationItemKind::UrlProtocol => TextKey::UrlProtocol,
+            DesktopIntegrationItemKind::MacosBundleRegistration => TextKey::MacosRegistration,
+        },
+    )
+}
+
+fn desktop_item_state_text(locale: Locale, state: DesktopIntegrationItemState) -> &'static str {
+    text(
+        locale,
+        match state {
+            DesktopIntegrationItemState::Current => TextKey::Current,
+            DesktopIntegrationItemState::NeedsRepair => TextKey::NeedsRepair,
+        },
+    )
+}
+
+fn repair_health_text(locale: Locale, health: DesktopIntegrationHealth) -> &'static str {
+    text(
+        locale,
+        match health {
+            DesktopIntegrationHealth::Current => TextKey::Current,
+            DesktopIntegrationHealth::NeedsRepair => TextKey::NeedsRepair,
+            DesktopIntegrationHealth::ReinstallRequired => TextKey::ReinstallRequired,
+            DesktopIntegrationHealth::Unavailable => TextKey::Unavailable,
+        },
+    )
 }
 
 fn render_diagnostics(
@@ -461,14 +630,6 @@ fn icon_button(
     response.on_hover_text(label)
 }
 
-fn installed_text(locale: Locale, installed: Option<bool>) -> &'static str {
-    match installed {
-        Some(true) => text(locale, TextKey::Installed),
-        Some(false) => text(locale, TextKey::NotInstalled),
-        None => text(locale, TextKey::Unknown),
-    }
-}
-
 fn launch_state_text(locale: Locale, state: LaunchState) -> &'static str {
     text(
         locale,
@@ -479,6 +640,48 @@ fn launch_state_text(locale: Locale, state: LaunchState) -> &'static str {
             LaunchState::Failed => TextKey::Failed,
             LaunchState::Stopped => TextKey::Stopped,
             LaunchState::Unknown => TextKey::Unknown,
+        },
+    )
+}
+
+fn desktop_integration_failure_text(
+    locale: Locale,
+    kind: DesktopIntegrationFailureKind,
+) -> &'static str {
+    text(
+        locale,
+        match kind {
+            DesktopIntegrationFailureKind::InspectFailed => TextKey::DesktopIntegrationLoadFailed,
+            DesktopIntegrationFailureKind::WorkerStopped => TextKey::WorkerStopped,
+            DesktopIntegrationFailureKind::Service(kind) => match kind {
+                codex_plus_manager_service::DesktopIntegrationErrorKind::InspectFailed => {
+                    TextKey::DesktopIntegrationLoadFailed
+                }
+                codex_plus_manager_service::DesktopIntegrationErrorKind::InvalidRevision => {
+                    TextKey::DesktopIntegrationInvalidRevision
+                }
+                codex_plus_manager_service::DesktopIntegrationErrorKind::Conflict => {
+                    TextKey::DesktopIntegrationConflict
+                }
+                codex_plus_manager_service::DesktopIntegrationErrorKind::ConfirmationRequired => {
+                    TextKey::DesktopIntegrationConfirmationRequired
+                }
+                codex_plus_manager_service::DesktopIntegrationErrorKind::RepairUnavailable => {
+                    TextKey::DesktopIntegrationRepairUnavailable
+                }
+                codex_plus_manager_service::DesktopIntegrationErrorKind::MigrationUnavailable => {
+                    TextKey::DesktopIntegrationMigrationUnavailable
+                }
+                codex_plus_manager_service::DesktopIntegrationErrorKind::SignInUnavailable => {
+                    TextKey::DesktopIntegrationSignInUnavailable
+                }
+                codex_plus_manager_service::DesktopIntegrationErrorKind::EffectFailed => {
+                    TextKey::DesktopIntegrationEffectFailed
+                }
+                codex_plus_manager_service::DesktopIntegrationErrorKind::WorkerStopped => {
+                    TextKey::WorkerStopped
+                }
+            },
         },
     )
 }
@@ -496,7 +699,6 @@ pub fn failure_text(locale: Locale, kind: MaintenanceFailureKind) -> &'static st
             MaintenanceFailureKind::EntrypointReadFailed => {
                 TextKey::MaintenanceEntrypointReadFailed
             }
-            MaintenanceFailureKind::WatcherReadFailed => TextKey::MaintenanceWatcherReadFailed,
             MaintenanceFailureKind::StatusReadFailed => TextKey::MaintenanceStatusReadFailed,
             MaintenanceFailureKind::LogReadFailed => TextKey::MaintenanceLogReadFailed,
             MaintenanceFailureKind::LaunchFailed => TextKey::MaintenanceLaunchFailed,

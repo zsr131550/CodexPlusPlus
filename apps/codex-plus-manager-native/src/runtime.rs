@@ -4,6 +4,7 @@ use std::thread;
 use codex_plus_manager_service::{OverviewError, OverviewSnapshot, OverviewSource};
 
 pub mod context;
+pub mod desktop_integration;
 pub mod enhancements;
 pub mod environment;
 pub mod import;

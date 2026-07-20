@@ -308,7 +308,6 @@ pub enum TextKey {
     Lines200,
     CopyDocument,
     RefreshDiagnostics,
-    Watcher,
     NotInstalled,
     Starting,
     Running,
@@ -324,7 +323,6 @@ pub enum TextKey {
     MaintenanceSettingsReadFailed,
     MaintenanceSettingsWriteFailed,
     MaintenanceEntrypointReadFailed,
-    MaintenanceWatcherReadFailed,
     MaintenanceStatusReadFailed,
     MaintenanceLogReadFailed,
     MaintenanceLaunchFailed,
@@ -343,6 +341,30 @@ pub enum TextKey {
     Enhancements,
     EnhancementsSubtitle,
     EnhancementsLoadFailed,
+    DesktopIntegration,
+    DesktopShortcut,
+    StartMenuLauncher,
+    StartMenuManager,
+    UrlProtocol,
+    MacosRegistration,
+    Current,
+    NeedsRepair,
+    ReinstallRequired,
+    Unavailable,
+    RepairDesktopIntegration,
+    RepairDesktopIntegrationTitle,
+    Repair,
+    StartAtSignIn,
+    LegacySignInActive,
+    MigrateSignIn,
+    DesktopIntegrationLoadFailed,
+    DesktopIntegrationInvalidRevision,
+    DesktopIntegrationConflict,
+    DesktopIntegrationConfirmationRequired,
+    DesktopIntegrationRepairUnavailable,
+    DesktopIntegrationMigrationUnavailable,
+    DesktopIntegrationSignInUnavailable,
+    DesktopIntegrationEffectFailed,
 }
 
 impl TextKey {
@@ -640,7 +662,6 @@ impl TextKey {
         Self::Lines200,
         Self::CopyDocument,
         Self::RefreshDiagnostics,
-        Self::Watcher,
         Self::NotInstalled,
         Self::Starting,
         Self::Running,
@@ -656,7 +677,6 @@ impl TextKey {
         Self::MaintenanceSettingsReadFailed,
         Self::MaintenanceSettingsWriteFailed,
         Self::MaintenanceEntrypointReadFailed,
-        Self::MaintenanceWatcherReadFailed,
         Self::MaintenanceStatusReadFailed,
         Self::MaintenanceLogReadFailed,
         Self::MaintenanceLaunchFailed,
@@ -675,6 +695,30 @@ impl TextKey {
         Self::Enhancements,
         Self::EnhancementsSubtitle,
         Self::EnhancementsLoadFailed,
+        Self::DesktopIntegration,
+        Self::DesktopShortcut,
+        Self::StartMenuLauncher,
+        Self::StartMenuManager,
+        Self::UrlProtocol,
+        Self::MacosRegistration,
+        Self::Current,
+        Self::NeedsRepair,
+        Self::ReinstallRequired,
+        Self::Unavailable,
+        Self::RepairDesktopIntegration,
+        Self::RepairDesktopIntegrationTitle,
+        Self::Repair,
+        Self::StartAtSignIn,
+        Self::LegacySignInActive,
+        Self::MigrateSignIn,
+        Self::DesktopIntegrationLoadFailed,
+        Self::DesktopIntegrationInvalidRevision,
+        Self::DesktopIntegrationConflict,
+        Self::DesktopIntegrationConfirmationRequired,
+        Self::DesktopIntegrationRepairUnavailable,
+        Self::DesktopIntegrationMigrationUnavailable,
+        Self::DesktopIntegrationSignInUnavailable,
+        Self::DesktopIntegrationEffectFailed,
     ];
 }
 
@@ -1857,10 +1901,6 @@ const CATALOG: &[CatalogEntry] = &[
         en: "Refresh diagnostics",
     },
     CatalogEntry {
-        zh: "监视器",
-        en: "Watcher",
-    },
-    CatalogEntry {
         zh: "未安装",
         en: "Not installed",
     },
@@ -1919,10 +1959,6 @@ const CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         zh: "启动入口检查失败",
         en: "Entrypoint inspection failed",
-    },
-    CatalogEntry {
-        zh: "监视器检查失败",
-        en: "Watcher inspection failed",
     },
     CatalogEntry {
         zh: "启动状态读取失败",
@@ -1995,6 +2031,102 @@ const CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         zh: "增强设置加载失败",
         en: "Enhancement settings load failed",
+    },
+    CatalogEntry {
+        zh: "桌面集成",
+        en: "Desktop integration",
+    },
+    CatalogEntry {
+        zh: "桌面快捷方式",
+        en: "Desktop shortcut",
+    },
+    CatalogEntry {
+        zh: "开始菜单启动器",
+        en: "Start menu launcher",
+    },
+    CatalogEntry {
+        zh: "开始菜单管理器",
+        en: "Start menu manager",
+    },
+    CatalogEntry {
+        zh: "URL 协议",
+        en: "URL protocol",
+    },
+    CatalogEntry {
+        zh: "macOS 应用注册",
+        en: "macOS application registration",
+    },
+    CatalogEntry {
+        zh: "当前有效",
+        en: "Current",
+    },
+    CatalogEntry {
+        zh: "需要修复",
+        en: "Needs repair",
+    },
+    CatalogEntry {
+        zh: "需要重新安装",
+        en: "Reinstall required",
+    },
+    CatalogEntry {
+        zh: "不可用",
+        en: "Unavailable",
+    },
+    CatalogEntry {
+        zh: "修复桌面集成",
+        en: "Repair desktop integration",
+    },
+    CatalogEntry {
+        zh: "修复桌面集成？",
+        en: "Repair desktop integration?",
+    },
+    CatalogEntry {
+        zh: "修复",
+        en: "Repair",
+    },
+    CatalogEntry {
+        zh: "登录时启动 Codex++",
+        en: "Start Codex++ at sign-in",
+    },
+    CatalogEntry {
+        zh: "检测到正在生效的旧版登录启动注册，请显式迁移。",
+        en: "A legacy sign-in registration is active. Migrate it explicitly.",
+    },
+    CatalogEntry {
+        zh: "迁移登录启动注册",
+        en: "Migrate sign-in registration",
+    },
+    CatalogEntry {
+        zh: "桌面集成加载失败",
+        en: "Desktop integration load failed",
+    },
+    CatalogEntry {
+        zh: "桌面集成修订无效",
+        en: "Desktop integration revision is invalid",
+    },
+    CatalogEntry {
+        zh: "桌面集成状态已变更，请刷新后重试",
+        en: "Desktop integration changed; refresh and try again",
+    },
+    CatalogEntry {
+        zh: "请先确认桌面集成修复",
+        en: "Confirm desktop integration repair first",
+    },
+    CatalogEntry {
+        zh: "当前桌面集成无法修复",
+        en: "Desktop integration repair is unavailable",
+    },
+    CatalogEntry {
+        zh: "当前登录启动注册无法迁移",
+        en: "Sign-in registration migration is unavailable",
+    },
+    CatalogEntry {
+        zh: "当前登录启动设置不可用",
+        en: "Start-at-sign-in is unavailable",
+    },
+    CatalogEntry {
+        zh: "桌面集成操作失败",
+        en: "Desktop integration operation failed",
     },
 ];
 

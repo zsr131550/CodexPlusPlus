@@ -109,7 +109,6 @@ struct FakeMaintenanceState {
     settings_read_failed: bool,
     settings_write_failed: bool,
     entrypoint_failed: bool,
-    watcher_failed: bool,
     status_failed: bool,
     log_failed: bool,
     launch_failed: bool,
@@ -137,7 +136,6 @@ impl FakeMaintenanceEnvironment {
                 settings_read_failed: false,
                 settings_write_failed: false,
                 entrypoint_failed: false,
-                watcher_failed: false,
                 status_failed: false,
                 log_failed: false,
                 launch_failed: false,
@@ -230,13 +228,6 @@ impl MaintenanceEnvironment for FakeMaintenanceEnvironment {
                 path: Some(PRIVATE_PATH.to_owned()),
             },
         })
-    }
-
-    fn watcher_disabled(&self) -> anyhow::Result<bool> {
-        if self.state.lock().unwrap().watcher_failed {
-            anyhow::bail!("private watcher failure {PRIVATE_PATH}")
-        }
-        Ok(false)
     }
 
     fn load_latest_launch(&self) -> anyhow::Result<Option<LaunchStatus>> {
@@ -478,7 +469,6 @@ fn partial_workspace_keeps_available_sections_and_launch_is_recorded_once_withou
         .unwrap();
     assert!(workspace.logs.is_unavailable());
     assert!(workspace.entrypoints.is_available());
-    assert!(workspace.watcher.is_available());
     assert!(workspace.latest_launch.is_available());
     assert!(!format!("{workspace:?}").contains(PRIVATE_PATH));
     assert!(!format!("{workspace:?}").contains(PRIVATE_URL));

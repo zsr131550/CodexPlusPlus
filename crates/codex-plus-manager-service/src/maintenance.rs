@@ -128,11 +128,6 @@ pub struct EntrypointSummary {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WatcherSummary {
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchState {
     Starting,
     Running,
@@ -162,7 +157,6 @@ pub struct MaintenanceWorkspace {
     pub app_path: Option<RevisionedAppPath>,
     pub codex_app: SectionValue<CodexAppSummary>,
     pub entrypoints: SectionValue<EntrypointSummary>,
-    pub watcher: SectionValue<WatcherSummary>,
     pub latest_launch: SectionValue<Option<LaunchSummary>>,
     pub logs: SectionValue<SafeLogDocument>,
     pub diagnostics: SafeDiagnosticDocument,
@@ -179,7 +173,6 @@ impl fmt::Debug for MaintenanceWorkspace {
             )
             .field("codex_app_available", &self.codex_app.is_available())
             .field("entrypoints_available", &self.entrypoints.is_available())
-            .field("watcher_available", &self.watcher.is_available())
             .field(
                 "latest_launch_available",
                 &self.latest_launch.is_available(),
@@ -339,7 +332,6 @@ pub trait MaintenanceEnvironment: Send + Sync + 'static {
     fn resolve_codex_app(&self, saved: &str) -> Option<PathBuf>;
     fn codex_app_version(&self, path: &Path) -> Option<String>;
     fn inspect_entrypoints(&self) -> anyhow::Result<EntryPointState>;
-    fn watcher_disabled(&self) -> anyhow::Result<bool>;
     fn load_latest_launch(&self) -> anyhow::Result<Option<LaunchStatus>>;
     fn read_diagnostic_tail(&self, max_bytes: usize) -> anyhow::Result<Vec<u8>>;
     fn diagnostic_path_presence(&self) -> DiagnosticPathPresence;
@@ -451,7 +443,6 @@ pub enum SafeErrorKind {
     InvalidPath,
     InvalidPort,
     EntrypointReadFailed,
-    WatcherReadFailed,
     StatusReadFailed,
     LogReadFailed,
     LaunchFailed,
@@ -471,7 +462,6 @@ impl SafeErrorKind {
             "invalid_path" | "InvalidPath" => Some(Self::InvalidPath),
             "invalid_port" | "InvalidPort" => Some(Self::InvalidPort),
             "entrypoint_read_failed" | "EntrypointReadFailed" => Some(Self::EntrypointReadFailed),
-            "watcher_read_failed" | "WatcherReadFailed" => Some(Self::WatcherReadFailed),
             "status_read_failed" | "StatusReadFailed" => Some(Self::StatusReadFailed),
             "log_read_failed" | "LogReadFailed" => Some(Self::LogReadFailed),
             "launch_failed" | "LaunchFailed" => Some(Self::LaunchFailed),
@@ -492,7 +482,6 @@ impl SafeErrorKind {
             Self::InvalidPath => "invalid_path",
             Self::InvalidPort => "invalid_port",
             Self::EntrypointReadFailed => "entrypoint_read_failed",
-            Self::WatcherReadFailed => "watcher_read_failed",
             Self::StatusReadFailed => "status_read_failed",
             Self::LogReadFailed => "log_read_failed",
             Self::LaunchFailed => "launch_failed",
@@ -639,7 +628,6 @@ pub enum MaintenanceSection {
     Settings,
     CodexApp,
     Entrypoints,
-    Watcher,
     LatestLaunch,
     Logs,
     Diagnostics,
@@ -654,7 +642,6 @@ pub enum MaintenanceErrorKind {
     InvalidPath,
     InvalidPort,
     EntrypointReadFailed,
-    WatcherReadFailed,
     StatusReadFailed,
     LogReadFailed,
     LaunchFailed,
@@ -703,7 +690,6 @@ impl MaintenanceError {
             MaintenanceErrorKind::InvalidPath => "maintenance path is invalid",
             MaintenanceErrorKind::InvalidPort => "maintenance port is invalid",
             MaintenanceErrorKind::EntrypointReadFailed => "maintenance entrypoint read failed",
-            MaintenanceErrorKind::WatcherReadFailed => "maintenance watcher read failed",
             MaintenanceErrorKind::StatusReadFailed => "maintenance status read failed",
             MaintenanceErrorKind::LogReadFailed => "maintenance log read failed",
             MaintenanceErrorKind::LaunchFailed => "maintenance launch failed",
@@ -793,16 +779,6 @@ impl<E: MaintenanceEnvironment> MaintenanceService<E> {
                 SectionValue::Unavailable(MaintenanceSection::Entrypoints)
             }
         };
-        let watcher = match self.environment.watcher_disabled() {
-            Ok(disabled) => SectionValue::Available(WatcherSummary { enabled: !disabled }),
-            Err(_) => {
-                issues.push(MaintenanceIssue {
-                    section: MaintenanceSection::Watcher,
-                    kind: MaintenanceErrorKind::WatcherReadFailed,
-                });
-                SectionValue::Unavailable(MaintenanceSection::Watcher)
-            }
-        };
         let latest_launch = match self.environment.load_latest_launch() {
             Ok(status) => SectionValue::Available(status.map(safe_launch_summary)),
             Err(_) => {
@@ -829,7 +805,6 @@ impl<E: MaintenanceEnvironment> MaintenanceService<E> {
             app_path,
             codex_app,
             entrypoints,
-            watcher,
             latest_launch,
             logs,
             diagnostics,
@@ -1000,17 +975,6 @@ impl<E: MaintenanceEnvironment> MaintenanceService<E> {
                 silent: DiagnosticPresence::Unknown,
                 management: DiagnosticPresence::Unknown,
             });
-        let watcher = self
-            .environment
-            .watcher_disabled()
-            .map(|disabled| {
-                if disabled {
-                    DiagnosticWatcher::Disabled
-                } else {
-                    DiagnosticWatcher::Enabled
-                }
-            })
-            .unwrap_or(DiagnosticWatcher::Unknown);
         let latest_launch = self
             .environment
             .load_latest_launch()
@@ -1042,7 +1006,6 @@ impl<E: MaintenanceEnvironment> MaintenanceService<E> {
             status: DiagnosticStatus {
                 codex_app,
                 entrypoints,
-                watcher,
                 latest_launch,
             },
             configured,
@@ -1380,7 +1343,6 @@ struct DiagnosticPlatform {
 struct DiagnosticStatus {
     codex_app: DiagnosticPresence,
     entrypoints: DiagnosticEntrypoints,
-    watcher: DiagnosticWatcher,
     latest_launch: DiagnosticLaunch,
 }
 
@@ -1402,14 +1364,6 @@ impl DiagnosticPresence {
 struct DiagnosticEntrypoints {
     silent: DiagnosticPresence,
     management: DiagnosticPresence,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-enum DiagnosticWatcher {
-    Enabled,
-    Disabled,
-    Unknown,
 }
 
 #[derive(Serialize)]

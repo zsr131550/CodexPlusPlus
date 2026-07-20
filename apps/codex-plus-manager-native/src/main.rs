@@ -2,10 +2,17 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use codex_plus_core::desktop_integration::{
+    DesktopIntegrationItemKind, DesktopRepairOperation, ShortcutSnapshot, WindowsDesktopSnapshot,
+};
+use codex_plus_core::startup_registration::{
+    CANONICAL_RUN_NAME, LEGACY_RUN_NAME, OwnedStringValueSnapshot, StartupRegistrationOperation,
+    StartupRegistrationSnapshot, canonical_startup_command,
+};
 use codex_plus_core::update::current_update_target;
 use codex_plus_manager_native::app::{NativeManagerApp, NativeManagerSources};
 use codex_plus_manager_native::desktop_host::{
@@ -16,12 +23,14 @@ use codex_plus_manager_native::i18n::Locale;
 use codex_plus_manager_native::path_picker::path_picker_from_environment;
 use codex_plus_manager_native::perf::PerfRecorder;
 use codex_plus_manager_service::{
-    ContextToolsService, DesktopStartupArgs, EnhancementSettingsService, MaintenanceService,
-    ManagerSettingsService, OverviewService, PluginMarketplaceService, ProviderImportService,
-    ProviderService, ProviderSyncService, RelayEnvironmentService, SessionService,
-    SystemProviderEnvironment, SystemUpdateEnvironment, UpdateDownload, UpdateEnvironment,
-    UpdateEnvironmentError, UpdateEnvironmentErrorKind, UpdateService, UpdateSource,
-    UserScriptService, ZedRemoteService,
+    ContextToolsService, DesktopIntegrationEnvironment, DesktopIntegrationEnvironmentError,
+    DesktopIntegrationEnvironmentSnapshot, DesktopIntegrationService, DesktopIntegrationSource,
+    DesktopStartupArgs, EnhancementSettingsService, MaintenanceService, ManagerSettingsService,
+    OverviewService, PluginMarketplaceService, ProviderImportService, ProviderService,
+    ProviderSyncService, RelayEnvironmentService, SessionService,
+    SystemDesktopIntegrationEnvironment, SystemProviderEnvironment, SystemUpdateEnvironment,
+    UpdateDownload, UpdateEnvironment, UpdateEnvironmentError, UpdateEnvironmentErrorKind,
+    UpdateService, UpdateSource, UserScriptService, ZedRemoteService,
 };
 use eframe::egui;
 
@@ -32,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let process_started = Instant::now();
     let persistence_paths = NativePersistencePaths::for_state_override(native_state_override());
     let update_fixture = update_fixture_paths_from_environment()?;
+    let desktop_integration_source = desktop_integration_source_from_environment()?;
     if let Err(error) = persistence_paths.migrate_legacy_if_needed() {
         let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
             "native_manager.preference_migration_failed",
@@ -144,6 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     user_scripts: user_script_service,
                     zed_remote: zed_remote_service,
                     maintenance: maintenance_service,
+                    desktop_integration: Arc::clone(&desktop_integration_source),
                     settings: manager_settings_service,
                     update: update_service,
                     path_picker: path_picker_from_environment(),
@@ -216,9 +227,241 @@ fn log_desktop_host_failure(event: &str, error: &dyn std::fmt::Debug) {
     );
 }
 
+const DESKTOP_INTEGRATION_FIXTURE_STATE_ENV: &str =
+    "CODEX_PLUS_NATIVE_DESKTOP_INTEGRATION_FIXTURE_STATE";
+const DESKTOP_INTEGRATION_RECORD_PATH_ENV: &str =
+    "CODEX_PLUS_NATIVE_DESKTOP_INTEGRATION_RECORD_PATH";
+const WINDOWS_NEEDS_REPAIR_LEGACY_FIXTURE: &str = "windows_needs_repair_legacy";
+
+#[derive(Clone)]
+struct DesktopIntegrationFixtureConfig {
+    record_path: PathBuf,
+}
+
+fn desktop_integration_source_from_environment()
+-> std::io::Result<Arc<dyn DesktopIntegrationSource>> {
+    let fixture = resolve_desktop_integration_fixture(
+        fixture_string(DESKTOP_INTEGRATION_FIXTURE_STATE_ENV)?,
+        fixture_path(DESKTOP_INTEGRATION_RECORD_PATH_ENV),
+    )?;
+    if let Some(config) = fixture {
+        Ok(Arc::new(DesktopIntegrationService::new(
+            FixtureDesktopIntegrationEnvironment::new(config),
+        )))
+    } else {
+        Ok(Arc::new(DesktopIntegrationService::new(
+            SystemDesktopIntegrationEnvironment::new(),
+        )))
+    }
+}
+
+fn fixture_string(name: &str) -> std::io::Result<Option<String>> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value.into_string().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{name} must contain valid Unicode"),
+                )
+            })
+        })
+        .transpose()
+}
+
+fn resolve_desktop_integration_fixture(
+    state: Option<String>,
+    record_path: Option<PathBuf>,
+) -> std::io::Result<Option<DesktopIntegrationFixtureConfig>> {
+    match (state.as_deref(), record_path) {
+        (None, None) => Ok(None),
+        (Some(WINDOWS_NEEDS_REPAIR_LEGACY_FIXTURE), Some(record_path)) => {
+            Ok(Some(DesktopIntegrationFixtureConfig { record_path }))
+        }
+        (Some(_), Some(_)) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "native desktop-integration fixture state is unsupported",
+        )),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "native desktop-integration fixture requires both state and record path",
+        )),
+    }
+}
+
+#[derive(Clone)]
+struct FixtureDesktopIntegrationEnvironment {
+    state: Arc<Mutex<FixtureDesktopIntegrationState>>,
+}
+
+struct FixtureDesktopIntegrationState {
+    snapshot: DesktopIntegrationEnvironmentSnapshot,
+    record_path: PathBuf,
+}
+
+impl FixtureDesktopIntegrationEnvironment {
+    fn new(config: DesktopIntegrationFixtureConfig) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(FixtureDesktopIntegrationState {
+                snapshot: windows_needs_repair_legacy_snapshot(),
+                record_path: config.record_path,
+            })),
+        }
+    }
+}
+
+impl DesktopIntegrationEnvironment for FixtureDesktopIntegrationEnvironment {
+    fn inspect_desktop_integration(
+        &self,
+    ) -> Result<DesktopIntegrationEnvironmentSnapshot, DesktopIntegrationEnvironmentError> {
+        self.state
+            .lock()
+            .map(|state| state.snapshot.clone())
+            .map_err(|_| DesktopIntegrationEnvironmentError::InspectFailed)
+    }
+
+    fn apply_desktop_repair_operation(
+        &self,
+        operation: &DesktopRepairOperation,
+    ) -> Result<(), DesktopIntegrationEnvironmentError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopIntegrationEnvironmentError::EffectFailed)?;
+        let record_path = state.record_path.clone();
+        let DesktopIntegrationEnvironmentSnapshot::Windows { repair, .. } = &mut state.snapshot
+        else {
+            return Err(DesktopIntegrationEnvironmentError::EffectFailed);
+        };
+        match operation {
+            DesktopRepairOperation::WriteShortcut {
+                kind,
+                target,
+                arguments,
+                ..
+            } => {
+                let slot = match kind {
+                    DesktopIntegrationItemKind::DesktopManagerShortcut => {
+                        &mut repair.desktop_manager
+                    }
+                    DesktopIntegrationItemKind::StartMenuLauncherShortcut => {
+                        &mut repair.start_menu_launcher
+                    }
+                    DesktopIntegrationItemKind::StartMenuManagerShortcut => {
+                        &mut repair.start_menu_manager
+                    }
+                    _ => return Err(DesktopIntegrationEnvironmentError::EffectFailed),
+                };
+                record_desktop_integration_operation(
+                    &record_path,
+                    &format!("repair:{}", kind.as_str()),
+                )?;
+                *slot = Some(ShortcutSnapshot {
+                    target: target.clone(),
+                    arguments: arguments.clone(),
+                });
+            }
+            DesktopRepairOperation::WriteProtocol { command, .. } => {
+                record_desktop_integration_operation(&record_path, "repair:url_protocol")?;
+                repair.protocol_command = Some(command.clone());
+            }
+            DesktopRepairOperation::RegisterMacosBundle { .. } => {
+                return Err(DesktopIntegrationEnvironmentError::EffectFailed);
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_startup_registration_operation(
+        &self,
+        operation: &StartupRegistrationOperation,
+    ) -> Result<(), DesktopIntegrationEnvironmentError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopIntegrationEnvironmentError::EffectFailed)?;
+        let record_path = state.record_path.clone();
+        let DesktopIntegrationEnvironmentSnapshot::Windows { sign_in, .. } = &mut state.snapshot
+        else {
+            return Err(DesktopIntegrationEnvironmentError::EffectFailed);
+        };
+        match operation {
+            StartupRegistrationOperation::SetRunValue { name, value }
+                if *name == CANONICAL_RUN_NAME =>
+            {
+                record_desktop_integration_operation(&record_path, "startup:set_canonical")?;
+                sign_in.canonical_run = OwnedStringValueSnapshot::String(value.clone());
+            }
+            StartupRegistrationOperation::DeleteRunValue { name }
+                if *name == CANONICAL_RUN_NAME =>
+            {
+                record_desktop_integration_operation(&record_path, "startup:delete_canonical")?;
+                sign_in.canonical_run = OwnedStringValueSnapshot::Absent;
+            }
+            StartupRegistrationOperation::DeleteRunValue { name } if *name == LEGACY_RUN_NAME => {
+                record_desktop_integration_operation(&record_path, "startup:delete_legacy_run")?;
+                sign_in.legacy_run = OwnedStringValueSnapshot::Absent;
+            }
+            StartupRegistrationOperation::DeleteLegacyStartupShortcut => {
+                record_desktop_integration_operation(
+                    &record_path,
+                    "startup:delete_legacy_shortcut",
+                )?;
+                sign_in.legacy_shortcut = None;
+            }
+            _ => return Err(DesktopIntegrationEnvironmentError::EffectFailed),
+        }
+        Ok(())
+    }
+}
+
+fn windows_needs_repair_legacy_snapshot() -> DesktopIntegrationEnvironmentSnapshot {
+    let manager_path = PathBuf::from("/fixture/codex-plus-plus-manager.exe");
+    let launcher_path = PathBuf::from("/fixture/codex-plus-plus.exe");
+    DesktopIntegrationEnvironmentSnapshot::Windows {
+        repair: Box::new(WindowsDesktopSnapshot {
+            current_exe: manager_path,
+            launcher_is_file: true,
+            desktop_dir: Some(PathBuf::from("/fixture/Desktop")),
+            programs_dir: Some(PathBuf::from("/fixture/Programs")),
+            desktop_manager: None,
+            start_menu_launcher: None,
+            start_menu_manager: None,
+            protocol_command: None,
+        }),
+        sign_in: StartupRegistrationSnapshot {
+            launcher_is_file: true,
+            canonical_run: OwnedStringValueSnapshot::Absent,
+            legacy_run: OwnedStringValueSnapshot::String(format!(
+                "{} --debug-port 9229",
+                canonical_startup_command(&launcher_path)
+            )),
+            legacy_shortcut: None,
+            launcher_path,
+        },
+    }
+}
+
+fn record_desktop_integration_operation(
+    path: &Path,
+    operation: &str,
+) -> Result<(), DesktopIntegrationEnvironmentError> {
+    let mut record = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|_| DesktopIntegrationEnvironmentError::EffectFailed)?;
+    writeln!(record, "{operation}").map_err(|_| DesktopIntegrationEnvironmentError::EffectFailed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_plus_core::desktop_integration::DesktopIntegrationHealth;
+    use codex_plus_core::startup_registration::StartAtSignInHealth;
+    use codex_plus_manager_service::{
+        MigrateStartAtSignIn, RepairDesktopIntegration, SetStartAtSignIn,
+    };
 
     #[test]
     fn wgpu_configuration_uses_a_low_memory_windows_backend() {
@@ -267,6 +510,119 @@ mod tests {
         assert!(
             resolve_update_fixture_paths(Some(PathBuf::from("metadata.json")), None, None, None,)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn desktop_integration_fixture_requires_all_configuration() {
+        assert!(
+            resolve_desktop_integration_fixture(None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resolve_desktop_integration_fixture(
+                Some(WINDOWS_NEEDS_REPAIR_LEGACY_FIXTURE.to_owned()),
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_desktop_integration_fixture(
+                None,
+                Some(PathBuf::from("desktop-integration.record")),
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_desktop_integration_fixture(
+                Some("unknown".to_owned()),
+                Some(PathBuf::from("desktop-integration.record")),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn desktop_integration_fixture_records_the_complete_bounded_workflow() {
+        let temp = tempfile::tempdir().unwrap();
+        let record_path = temp.path().join("desktop-integration.record");
+        let config = resolve_desktop_integration_fixture(
+            Some(WINDOWS_NEEDS_REPAIR_LEGACY_FIXTURE.to_owned()),
+            Some(record_path.clone()),
+        )
+        .unwrap()
+        .unwrap();
+        let source =
+            DesktopIntegrationService::new(FixtureDesktopIntegrationEnvironment::new(config));
+
+        let initial = source.inspect().unwrap();
+        assert_eq!(initial.repair_health, DesktopIntegrationHealth::NeedsRepair);
+        assert_eq!(
+            initial.sign_in.unwrap().health,
+            StartAtSignInHealth::NeedsMigration
+        );
+        assert!(!record_path.exists());
+
+        let repaired = source
+            .repair(RepairDesktopIntegration {
+                expected_revision: initial.revision,
+                confirmed: true,
+            })
+            .unwrap();
+        assert_eq!(repaired.applied_operation_count, 4);
+        assert_eq!(
+            repaired.workspace.repair_health,
+            DesktopIntegrationHealth::Current
+        );
+
+        let migrated = source
+            .migrate_sign_in(MigrateStartAtSignIn {
+                expected_revision: repaired.workspace.revision,
+            })
+            .unwrap();
+        assert_eq!(migrated.applied_operation_count, 2);
+        assert_eq!(
+            migrated.workspace.sign_in.unwrap().health,
+            StartAtSignInHealth::Enabled
+        );
+
+        let disabled = source
+            .set_start_at_sign_in(SetStartAtSignIn {
+                expected_revision: migrated.workspace.revision,
+                enabled: false,
+            })
+            .unwrap();
+        assert_eq!(disabled.applied_operation_count, 1);
+        assert_eq!(
+            disabled.workspace.sign_in.unwrap().health,
+            StartAtSignInHealth::Disabled
+        );
+
+        let enabled = source
+            .set_start_at_sign_in(SetStartAtSignIn {
+                expected_revision: disabled.workspace.revision,
+                enabled: true,
+            })
+            .unwrap();
+        assert_eq!(enabled.applied_operation_count, 1);
+        assert_eq!(
+            enabled.workspace.sign_in.unwrap().health,
+            StartAtSignInHealth::Enabled
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(record_path).unwrap(),
+            concat!(
+                "repair:desktop_manager_shortcut\n",
+                "repair:start_menu_launcher_shortcut\n",
+                "repair:start_menu_manager_shortcut\n",
+                "repair:url_protocol\n",
+                "startup:set_canonical\n",
+                "startup:delete_legacy_run\n",
+                "startup:delete_canonical\n",
+                "startup:set_canonical\n",
+            )
         );
     }
 }

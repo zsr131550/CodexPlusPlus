@@ -37,7 +37,6 @@ pub struct SystemProviderEnvironment {
     zed_launcher: Arc<dyn crate::ZedLaunchExecutor>,
     diagnostic_log_path: PathBuf,
     latest_status_path: PathBuf,
-    watcher_disabled_flag_path: PathBuf,
     entrypoint_override: Option<codex_plus_core::install::EntryPointState>,
     codex_launcher: Arc<dyn crate::CodexLaunchExecutor>,
     stepwise_tester: Arc<dyn crate::StepwiseConnectionTester>,
@@ -106,7 +105,6 @@ impl SystemProviderEnvironment {
             zed_launcher: Arc::new(SystemZedLaunchExecutor),
             diagnostic_log_path: state_dir.join("diagnostic.jsonl"),
             latest_status_path: state_dir.join("latest-status.json"),
-            watcher_disabled_flag_path: state_dir.join("watcher.disabled"),
             entrypoint_override: None,
             codex_launcher: Arc::new(SystemCodexLaunchExecutor),
             stepwise_tester: Arc::new(SystemStepwiseConnectionTester {
@@ -163,11 +161,9 @@ impl SystemProviderEnvironment {
         mut self,
         diagnostic_log_path: impl Into<PathBuf>,
         latest_status_path: impl Into<PathBuf>,
-        watcher_disabled_flag_path: impl Into<PathBuf>,
     ) -> Self {
         self.diagnostic_log_path = diagnostic_log_path.into();
         self.latest_status_path = latest_status_path.into();
-        self.watcher_disabled_flag_path = watcher_disabled_flag_path.into();
         self.maintenance_isolated = true;
         self
     }
@@ -257,14 +253,12 @@ impl SystemProviderEnvironment {
             || zed_launch_record_path.is_some();
         let diagnostic_log_path = env_path("CODEX_PLUS_NATIVE_DIAGNOSTIC_LOG_PATH");
         let latest_status_path = env_path("CODEX_PLUS_NATIVE_LATEST_STATUS_PATH");
-        let watcher_disabled_flag_path = env_path("CODEX_PLUS_NATIVE_WATCHER_DISABLED_FLAG_PATH");
         let entrypoint_silent_installed = env_bool("CODEX_PLUS_NATIVE_ENTRYPOINT_SILENT_INSTALLED");
         let entrypoint_management_installed =
             env_bool("CODEX_PLUS_NATIVE_ENTRYPOINT_MANAGEMENT_INSTALLED");
         let codex_launch_record_path = env_path("CODEX_PLUS_NATIVE_CODEX_LAUNCH_RECORD_PATH");
         let maintenance_override_present = diagnostic_log_path.is_some()
             || latest_status_path.is_some()
-            || watcher_disabled_flag_path.is_some()
             || entrypoint_silent_installed.is_some()
             || entrypoint_management_installed.is_some()
             || codex_launch_record_path.is_some();
@@ -312,7 +306,6 @@ impl SystemProviderEnvironment {
         let maintenance_isolation_root = diagnostic_log_path
             .as_deref()
             .or(latest_status_path.as_deref())
-            .or(watcher_disabled_flag_path.as_deref())
             .or(codex_launch_record_path.as_deref())
             .and_then(Path::parent)
             .map(Path::to_path_buf)
@@ -385,8 +378,6 @@ impl SystemProviderEnvironment {
                     .unwrap_or_else(|| maintenance_isolation_root.join("diagnostic.jsonl")),
                 latest_status_path
                     .unwrap_or_else(|| maintenance_isolation_root.join("latest-status.json")),
-                watcher_disabled_flag_path
-                    .unwrap_or_else(|| maintenance_isolation_root.join("watcher.disabled")),
             );
             if let (Some(silent), Some(management)) =
                 (entrypoint_silent_installed, entrypoint_management_installed)
@@ -441,7 +432,6 @@ impl Default for SystemProviderEnvironment {
             zed_launcher: Arc::new(SystemZedLaunchExecutor),
             diagnostic_log_path: codex_plus_core::paths::default_diagnostic_log_path(),
             latest_status_path: codex_plus_core::paths::default_latest_status_path(),
-            watcher_disabled_flag_path: codex_plus_core::watcher::default_watcher_disabled_flag(),
             entrypoint_override: None,
             codex_launcher: Arc::new(SystemCodexLaunchExecutor),
             stepwise_tester: Arc::new(SystemStepwiseConnectionTester {
@@ -1451,12 +1441,6 @@ impl crate::MaintenanceEnvironment for SystemProviderEnvironment {
         Ok(codex_plus_core::install::inspect_entrypoints())
     }
 
-    fn watcher_disabled(&self) -> anyhow::Result<bool> {
-        self.watcher_disabled_flag_path
-            .try_exists()
-            .map_err(Into::into)
-    }
-
     fn load_latest_launch(&self) -> anyhow::Result<Option<codex_plus_core::status::LaunchStatus>> {
         codex_plus_core::status::StatusStore::new(self.latest_status_path.clone()).load_latest()
     }
@@ -1571,14 +1555,13 @@ mod tests {
         let settings_path = directory.path().join("settings.json");
         let log_path = directory.path().join("diagnostic.jsonl");
         let status_path = directory.path().join("latest-status.json");
-        let watcher_path = directory.path().join("watcher.disabled");
         let mut log = std::fs::File::create(&log_path).unwrap();
         log.write_all(&vec![b'x'; 300 * 1024]).unwrap();
         log.write_all(b"\nlast-line\n").unwrap();
         drop(log);
 
         let environment = SystemProviderEnvironment::for_settings_path(settings_path)
-            .with_maintenance_paths(log_path, status_path, watcher_path);
+            .with_maintenance_paths(log_path, status_path);
 
         let tail = environment.read_diagnostic_tail(256 * 1024).unwrap();
         assert_eq!(tail.len(), 256 * 1024);
@@ -1593,7 +1576,6 @@ mod tests {
         let settings_path = directory.path().join("settings.json");
         let log_path = directory.path().join("diagnostic.jsonl");
         let status_path = directory.path().join("latest-status.json");
-        let watcher_path = directory.path().join("watcher.disabled");
         let app_path = directory.path().join("Codex.exe");
         std::fs::write(&app_path, b"fixture").unwrap();
         std::fs::write(
@@ -1617,7 +1599,7 @@ mod tests {
             .unwrap();
 
         let environment = SystemProviderEnvironment::for_settings_path(settings_path.clone())
-            .with_maintenance_paths(log_path.clone(), status_path, watcher_path)
+            .with_maintenance_paths(log_path.clone(), status_path)
             .with_entrypoint_override(true, false);
 
         assert_eq!(
@@ -1646,20 +1628,16 @@ mod tests {
         let settings_path = directory.path().join("settings.json");
         let log_path = directory.path().join("diagnostic.jsonl");
         let status_path = directory.path().join("latest-status.json");
-        let watcher_path = directory.path().join("watcher.disabled");
         let launch_record_path = directory.path().join("launch-record.json");
         let private_app_path = directory.path().join("private-app-path-sentinel");
         std::fs::create_dir_all(&private_app_path).unwrap();
-        std::fs::write(&watcher_path, b"disabled").unwrap();
-
         let environment = SystemProviderEnvironment::for_settings_path(settings_path)
-            .with_maintenance_paths(log_path, status_path, watcher_path)
+            .with_maintenance_paths(log_path, status_path)
             .with_entrypoint_override(true, false)
             .with_codex_launch_record_path(&launch_record_path);
         let entrypoints = environment.inspect_entrypoints().unwrap();
         assert!(entrypoints.silent_shortcut.installed);
         assert!(!entrypoints.management_shortcut.installed);
-        assert!(environment.watcher_disabled().unwrap());
         let service = MaintenanceService::new(environment);
 
         service

@@ -95,6 +95,66 @@ fn native_update_real_window_fake_launch_and_explicit_exit_smoke() {
     );
 }
 
+#[test]
+#[ignore = "opens a real native window and exercises the recording desktop-integration fixture"]
+fn native_desktop_integration_real_window_recording_fixture_smoke() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = SmokeFixture::new(temp.path());
+    let mut command = fixture.command();
+    command.env(
+        "CODEX_PLUS_NATIVE_PERF_SCENARIO",
+        "desktop-integration-smoke",
+    );
+    let mut primary = ChildGuard::new(command.spawn().unwrap());
+
+    wait_for_file(
+        &fixture.endpoint_path,
+        &mut primary,
+        Duration::from_secs(20),
+    );
+    let status = primary.wait(Duration::from_secs(20));
+
+    assert!(status.success());
+    assert!(fixture.persistence_path.is_file());
+    assert!(!fixture.endpoint_path.exists());
+    assert_eq!(
+        std::fs::read_to_string(&fixture.legacy_watcher_sentinel_path)
+            .unwrap()
+            .trim(),
+        "disabled"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fixture.desktop_integration_record_path).unwrap(),
+        concat!(
+            "repair:desktop_manager_shortcut\n",
+            "repair:start_menu_launcher_shortcut\n",
+            "repair:start_menu_manager_shortcut\n",
+            "repair:url_protocol\n",
+            "startup:set_canonical\n",
+            "startup:delete_legacy_run\n",
+            "startup:delete_canonical\n",
+            "startup:set_canonical\n",
+        )
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fixture.perf_report_path).unwrap()).unwrap();
+    assert_eq!(
+        report["script_actions"],
+        serde_json::json!([
+            "navigate_maintenance",
+            "refresh_maintenance",
+            "request_desktop_repair",
+            "cancel_desktop_repair",
+            "request_desktop_repair",
+            "confirm_desktop_repair",
+            "migrate_start_at_sign_in",
+            "disable_start_at_sign_in",
+            "enable_start_at_sign_in"
+        ])
+    );
+}
+
 struct SmokeFixture {
     root: PathBuf,
     state_dir: PathBuf,
@@ -106,6 +166,8 @@ struct SmokeFixture {
     update_asset_path: PathBuf,
     launch_record_path: PathBuf,
     check_record_path: PathBuf,
+    desktop_integration_record_path: PathBuf,
+    legacy_watcher_sentinel_path: PathBuf,
     port: u16,
 }
 
@@ -122,6 +184,8 @@ impl SmokeFixture {
             update_asset_path: root.join("update-asset.bin"),
             launch_record_path: root.join("update-launch.record"),
             check_record_path: root.join("update-check.record"),
+            desktop_integration_record_path: root.join("desktop-integration.record"),
+            legacy_watcher_sentinel_path: root.join("watcher.disabled"),
             state_dir,
             port: available_port(),
         };
@@ -135,6 +199,7 @@ impl SmokeFixture {
         )
         .unwrap();
         std::fs::write(&fixture.update_asset_path, b"fixture-update-asset").unwrap();
+        std::fs::write(&fixture.legacy_watcher_sentinel_path, b"disabled").unwrap();
         fixture
     }
 
@@ -196,8 +261,12 @@ impl SmokeFixture {
                 self.root.join("latest-status.json"),
             )
             .env(
-                "CODEX_PLUS_NATIVE_WATCHER_DISABLED_FLAG_PATH",
-                self.root.join("watcher.disabled"),
+                "CODEX_PLUS_NATIVE_DESKTOP_INTEGRATION_FIXTURE_STATE",
+                "windows_needs_repair_legacy",
+            )
+            .env(
+                "CODEX_PLUS_NATIVE_DESKTOP_INTEGRATION_RECORD_PATH",
+                &self.desktop_integration_record_path,
             )
             .env(
                 "CODEX_PLUS_NATIVE_UPDATE_METADATA_PATH",

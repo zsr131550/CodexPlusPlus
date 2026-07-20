@@ -1,5 +1,6 @@
 use codex_plus_manager_native::i18n::{Locale, ThemeMode};
 use codex_plus_manager_native::state::Route;
+use codex_plus_manager_native::state::desktop_integration::DesktopIntegrationViewState;
 use codex_plus_manager_native::state::maintenance::{
     MaintenanceDocumentTab, MaintenanceTransition, MaintenanceViewState,
 };
@@ -13,6 +14,7 @@ mod common;
 
 struct ViewState {
     maintenance: MaintenanceViewState,
+    desktop_integration: DesktopIntegrationViewState,
     locale: Locale,
     emitted: Vec<MaintenanceAction>,
 }
@@ -52,6 +54,7 @@ fn maintenance_route_has_exact_bilingual_navigation_header_and_status() {
                     &model,
                     ShellFeatureStates {
                         maintenance: Some(&maintenance),
+                        desktop_integration: Some(&common::desktop_integration_state(false, false)),
                         ..ShellFeatureStates::default()
                     },
                 );
@@ -69,6 +72,7 @@ fn maintenance_workbench_exposes_complete_read_only_and_command_semantics() {
         900.0,
         ViewState {
             maintenance: loaded_state(),
+            desktop_integration: common::desktop_integration_state(false, false),
             locale: Locale::En,
             emitted: Vec::new(),
         },
@@ -84,9 +88,12 @@ fn maintenance_workbench_exposes_complete_read_only_and_command_semantics() {
         "Debug port",
         "Helper port",
         "Launch Codex",
-        "Launcher entry point",
-        "Manager entry point",
-        "Watcher",
+        "Desktop integration",
+        "Desktop shortcut",
+        "Start menu launcher",
+        "Start menu manager",
+        "URL protocol",
+        "Start Codex++ at sign-in",
         "Logs",
         "Report",
         "50 lines",
@@ -107,12 +114,11 @@ fn maintenance_workbench_exposes_complete_read_only_and_command_semantics() {
     }
 
     for forbidden in [
-        "Install",
-        "Uninstall",
-        "Repair",
-        "Enable",
-        "Disable",
+        "Watcher",
+        "Install entry points",
+        "Uninstall entry points",
         "Restart",
+        "Reset all settings",
     ] {
         assert!(harness.query_by_label(forbidden).is_none(), "{forbidden}");
     }
@@ -124,6 +130,7 @@ fn maintenance_layout_switches_from_fixed_columns_to_vertical_stack() {
         900.0,
         ViewState {
             maintenance: loaded_state(),
+            desktop_integration: common::desktop_integration_state(false, false),
             locale: Locale::En,
             emitted: Vec::new(),
         },
@@ -134,9 +141,10 @@ fn maintenance_layout_switches_from_fixed_columns_to_vertical_stack() {
     assert!((wide_diagnostics.min.y - wide_application.min.y).abs() < 8.0);
 
     let compact = harness(
-        740.0,
+        700.0,
         ViewState {
             maintenance: loaded_state(),
+            desktop_integration: common::desktop_integration_state(false, false),
             locale: Locale::En,
             emitted: Vec::new(),
         },
@@ -152,6 +160,7 @@ fn maintenance_clear_and_discard_are_explicit_confirmations() {
         900.0,
         ViewState {
             maintenance: loaded_state(),
+            desktop_integration: common::desktop_integration_state(false, false),
             locale: Locale::En,
             emitted: Vec::new(),
         },
@@ -169,6 +178,7 @@ fn maintenance_clear_and_discard_are_explicit_confirmations() {
         900.0,
         ViewState {
             maintenance: dirty,
+            desktop_integration: common::desktop_integration_state(false, false),
             locale: Locale::En,
             emitted: Vec::new(),
         },
@@ -191,6 +201,7 @@ fn copy_is_exact_while_action_and_state_debug_are_redacted() {
         900.0,
         ViewState {
             maintenance: state,
+            desktop_integration: common::desktop_integration_state(false, false),
             locale: Locale::En,
             emitted: Vec::new(),
         },
@@ -220,6 +231,85 @@ fn copy_is_exact_while_action_and_state_debug_are_redacted() {
     }
 }
 
+#[test]
+fn desktop_repair_confirmation_lists_only_safe_item_kinds() {
+    let mut harness = harness(
+        900.0,
+        ViewState {
+            maintenance: loaded_state(),
+            desktop_integration: common::desktop_integration_state(true, false),
+            locale: Locale::En,
+            emitted: Vec::new(),
+        },
+    );
+
+    harness.get_by_label("Repair desktop integration").click();
+    harness.run();
+    for label in [
+        "Repair desktop integration?",
+        "Desktop shortcut",
+        "Start menu launcher",
+        "Start menu manager",
+        "URL protocol",
+        "Repair",
+        "Cancel",
+    ] {
+        assert!(
+            harness
+                .query_all_by(|node| {
+                    node.label().as_deref() == Some(label) || node.value().as_deref() == Some(label)
+                })
+                .any(|node| node.rect().is_positive()),
+            "{label}"
+        );
+    }
+    let debug = format!("{:?}", harness.state().desktop_integration);
+    assert!(!debug.contains("Program Files"));
+    assert!(!debug.contains("CurrentVersion"));
+}
+
+#[test]
+fn legacy_sign_in_is_on_and_requires_explicit_migration_in_both_locales() {
+    for (locale, warning, command) in [
+        (
+            Locale::ZhCn,
+            "检测到正在生效的旧版登录启动注册，请显式迁移。",
+            "迁移登录启动注册",
+        ),
+        (
+            Locale::En,
+            "A legacy sign-in registration is active. Migrate it explicitly.",
+            "Migrate sign-in registration",
+        ),
+    ] {
+        let mut harness = harness(
+            900.0,
+            ViewState {
+                maintenance: loaded_state(),
+                desktop_integration: common::desktop_integration_state(false, true),
+                locale,
+                emitted: Vec::new(),
+            },
+        );
+        assert!(
+            harness.get_by_label(warning).rect().is_positive(),
+            "{warning}"
+        );
+        assert!(
+            harness.get_by_label(command).rect().is_positive(),
+            "{command}"
+        );
+        harness.get_by_label(command).click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .emitted
+                .contains(&MaintenanceAction::MigrateSignIn)
+        );
+    }
+}
+
 fn harness(width: f32, state: ViewState) -> Harness<'static, ViewState> {
     Harness::builder()
         .with_size(egui::vec2(width, 760.0))
@@ -230,7 +320,13 @@ fn render(ui: &mut egui::Ui, state: &mut ViewState) {
     egui_extras::install_image_loaders(ui.ctx());
     theme::apply(ui.ctx(), ThemeMode::Dark);
     let mut actions = Vec::new();
-    maintenance::render(ui, &state.maintenance, state.locale, &mut actions);
+    maintenance::render(
+        ui,
+        &state.maintenance,
+        &state.desktop_integration,
+        state.locale,
+        &mut actions,
+    );
     for action in actions {
         match &action {
             MaintenanceAction::SetAppPath(path) => {
@@ -247,6 +343,12 @@ fn render(ui: &mut egui::Ui, state: &mut ViewState) {
             }
             MaintenanceAction::CancelClear => state.maintenance.cancel_clear(),
             MaintenanceAction::CancelDiscard => state.maintenance.cancel_transition(),
+            MaintenanceAction::RequestRepair => {
+                state.desktop_integration.request_repair_confirmation();
+            }
+            MaintenanceAction::CancelRepair => {
+                state.desktop_integration.cancel_repair_confirmation();
+            }
             _ => {}
         }
         state.emitted.push(action);

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-const SCRIPT_DURATION: Duration = Duration::from_secs(52);
+const SCRIPT_DURATION: Duration = Duration::from_secs(55);
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const FINAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -96,6 +96,12 @@ pub enum PerfScriptAction {
     ConfirmZedConflictRefresh,
     NavigateMaintenance,
     RefreshMaintenance,
+    RequestDesktopRepair,
+    CancelDesktopRepair,
+    ConfirmDesktopRepair,
+    MigrateStartAtSignIn,
+    DisableStartAtSignIn,
+    EnableStartAtSignIn,
     SetMaintenanceLogLimit,
     OpenMaintenanceReport,
     EditMaintenancePath,
@@ -127,6 +133,7 @@ enum PerfScriptMode {
     #[default]
     Standard,
     UpdateSmoke,
+    DesktopIntegrationSmoke,
 }
 
 enum PerfEvent {
@@ -163,6 +170,7 @@ impl PerfRecorder {
             .map(Duration::from_millis);
         let script_mode = match std::env::var("CODEX_PLUS_NATIVE_PERF_SCENARIO").as_deref() {
             Ok("update-smoke") => PerfScriptMode::UpdateSmoke,
+            Ok("desktop-integration-smoke") => PerfScriptMode::DesktopIntegrationSmoke,
             _ => PerfScriptMode::Standard,
         };
         let (event_tx, event_rx) = mpsc::channel();
@@ -191,6 +199,7 @@ impl PerfRecorder {
         let script_duration = match self.script_mode {
             PerfScriptMode::Standard => SCRIPT_DURATION,
             PerfScriptMode::UpdateSmoke => Duration::from_secs(2),
+            PerfScriptMode::DesktopIntegrationSmoke => Duration::from_secs(6),
         };
         if elapsed < script_duration {
             ctx.request_repaint_after(FRAME_INTERVAL);
@@ -213,6 +222,9 @@ impl PerfRecorder {
         let step = match self.script_mode {
             PerfScriptMode::Standard => script_step(self.next_script_step),
             PerfScriptMode::UpdateSmoke => update_smoke_script_step(self.next_script_step),
+            PerfScriptMode::DesktopIntegrationSmoke => {
+                desktop_integration_smoke_script_step(self.next_script_step)
+            }
         };
         if let Some((due, key, action)) = step
             && self.process_started.elapsed() >= due
@@ -343,7 +355,7 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> 
         egui::Key::F34,
         egui::Key::F35,
     ];
-    const ACTIONS: [PerfScriptAction; 102] = [
+    const ACTIONS: [PerfScriptAction; 109] = [
         PerfScriptAction::NavigateProviders,
         PerfScriptAction::SelectNextProvider,
         PerfScriptAction::EditProviderName,
@@ -425,6 +437,13 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> 
         PerfScriptAction::ConfirmZedConflictRefresh,
         PerfScriptAction::NavigateMaintenance,
         PerfScriptAction::RefreshMaintenance,
+        PerfScriptAction::RequestDesktopRepair,
+        PerfScriptAction::CancelDesktopRepair,
+        PerfScriptAction::RequestDesktopRepair,
+        PerfScriptAction::ConfirmDesktopRepair,
+        PerfScriptAction::MigrateStartAtSignIn,
+        PerfScriptAction::DisableStartAtSignIn,
+        PerfScriptAction::EnableStartAtSignIn,
         PerfScriptAction::SetMaintenanceLogLimit,
         PerfScriptAction::OpenMaintenanceReport,
         PerfScriptAction::EditMaintenancePath,
@@ -463,6 +482,26 @@ fn update_smoke_script_step(index: usize) -> Option<(Duration, egui::Key, PerfSc
     };
     let milliseconds = u64::try_from(index + 1).expect("script index fits u64") * 500;
     Some((Duration::from_millis(milliseconds), key, action))
+}
+
+fn desktop_integration_smoke_script_step(
+    index: usize,
+) -> Option<(Duration, egui::Key, PerfScriptAction)> {
+    const ACTIONS: [PerfScriptAction; 9] = [
+        PerfScriptAction::NavigateMaintenance,
+        PerfScriptAction::RefreshMaintenance,
+        PerfScriptAction::RequestDesktopRepair,
+        PerfScriptAction::CancelDesktopRepair,
+        PerfScriptAction::RequestDesktopRepair,
+        PerfScriptAction::ConfirmDesktopRepair,
+        PerfScriptAction::MigrateStartAtSignIn,
+        PerfScriptAction::DisableStartAtSignIn,
+        PerfScriptAction::EnableStartAtSignIn,
+    ];
+    ACTIONS.get(index).map(|action| {
+        let milliseconds = u64::try_from(index + 1).expect("script index fits u64") * 500;
+        (Duration::from_millis(milliseconds), egui::Key::F35, *action)
+    })
 }
 
 impl PerfScriptAction {
@@ -542,6 +581,12 @@ impl PerfScriptAction {
             Self::ConfirmZedConflictRefresh => "confirm_zed_conflict_refresh",
             Self::NavigateMaintenance => "navigate_maintenance",
             Self::RefreshMaintenance => "refresh_maintenance",
+            Self::RequestDesktopRepair => "request_desktop_repair",
+            Self::CancelDesktopRepair => "cancel_desktop_repair",
+            Self::ConfirmDesktopRepair => "confirm_desktop_repair",
+            Self::MigrateStartAtSignIn => "migrate_start_at_sign_in",
+            Self::DisableStartAtSignIn => "disable_start_at_sign_in",
+            Self::EnableStartAtSignIn => "enable_start_at_sign_in",
             Self::SetMaintenanceLogLimit => "set_maintenance_log_limit",
             Self::OpenMaintenanceReport => "open_maintenance_report",
             Self::EditMaintenancePath => "edit_maintenance_path",
@@ -648,8 +693,8 @@ mod tests {
     use eframe::egui;
 
     use super::{
-        PerfReport, PerfScriptAction, SCRIPT_DURATION, maximum_ms, percentile_ms, script_step,
-        update_smoke_script_step, write_report,
+        PerfReport, PerfScriptAction, SCRIPT_DURATION, desktop_integration_smoke_script_step,
+        maximum_ms, percentile_ms, script_step, update_smoke_script_step, write_report,
     };
 
     #[test]
@@ -830,6 +875,32 @@ mod tests {
     }
 
     #[test]
+    fn desktop_integration_smoke_script_covers_the_complete_bounded_workflow() {
+        let expected = [
+            PerfScriptAction::NavigateMaintenance,
+            PerfScriptAction::RefreshMaintenance,
+            PerfScriptAction::RequestDesktopRepair,
+            PerfScriptAction::CancelDesktopRepair,
+            PerfScriptAction::RequestDesktopRepair,
+            PerfScriptAction::ConfirmDesktopRepair,
+            PerfScriptAction::MigrateStartAtSignIn,
+            PerfScriptAction::DisableStartAtSignIn,
+            PerfScriptAction::EnableStartAtSignIn,
+        ];
+        for (index, action) in expected.into_iter().enumerate() {
+            assert_eq!(
+                desktop_integration_smoke_script_step(index),
+                Some((
+                    Duration::from_millis((index as u64 + 1) * 500),
+                    egui::Key::F35,
+                    action,
+                ))
+            );
+        }
+        assert_eq!(desktop_integration_smoke_script_step(expected.len()), None);
+    }
+
+    #[test]
     fn native_perf_script_appends_the_session_workflow() {
         let expected = [
             (20_000, PerfScriptAction::NavigateSessions),
@@ -923,91 +994,126 @@ mod tests {
             ),
             (
                 41_000,
+                PerfScriptAction::RequestDesktopRepair,
+                "request_desktop_repair",
+            ),
+            (
+                41_500,
+                PerfScriptAction::CancelDesktopRepair,
+                "cancel_desktop_repair",
+            ),
+            (
+                42_000,
+                PerfScriptAction::RequestDesktopRepair,
+                "request_desktop_repair",
+            ),
+            (
+                42_500,
+                PerfScriptAction::ConfirmDesktopRepair,
+                "confirm_desktop_repair",
+            ),
+            (
+                43_000,
+                PerfScriptAction::MigrateStartAtSignIn,
+                "migrate_start_at_sign_in",
+            ),
+            (
+                43_500,
+                PerfScriptAction::DisableStartAtSignIn,
+                "disable_start_at_sign_in",
+            ),
+            (
+                44_000,
+                PerfScriptAction::EnableStartAtSignIn,
+                "enable_start_at_sign_in",
+            ),
+            (
+                44_500,
                 PerfScriptAction::SetMaintenanceLogLimit,
                 "set_maintenance_log_limit",
             ),
             (
-                41_500,
+                45_000,
                 PerfScriptAction::OpenMaintenanceReport,
                 "open_maintenance_report",
             ),
             (
-                42_000,
+                45_500,
                 PerfScriptAction::EditMaintenancePath,
                 "edit_maintenance_path",
             ),
             (
-                42_500,
+                46_000,
                 PerfScriptAction::SaveMaintenancePath,
                 "save_maintenance_path",
             ),
             (
-                43_000,
+                46_500,
                 PerfScriptAction::PickMaintenanceExecutable,
                 "pick_maintenance_executable",
             ),
             (
-                43_500,
+                47_000,
                 PerfScriptAction::LaunchMaintenance,
                 "launch_maintenance",
             ),
             (
-                44_000,
+                47_500,
                 PerfScriptAction::NavigateSettings,
                 "navigate_settings",
             ),
             (
-                44_500,
+                48_000,
                 PerfScriptAction::EditStepwiseSettings,
                 "edit_stepwise_settings",
             ),
             (
-                45_000,
+                48_500,
                 PerfScriptAction::TestStepwiseSettings,
                 "test_stepwise_settings",
             ),
             (
-                45_500,
+                49_000,
                 PerfScriptAction::SaveStepwiseSettings,
                 "save_stepwise_settings",
             ),
             (
-                46_000,
+                49_500,
                 PerfScriptAction::OpenImageOverlaySettings,
                 "open_image_overlay_settings",
             ),
             (
-                46_500,
+                50_000,
                 PerfScriptAction::PickOverlayImage,
                 "pick_overlay_image",
             ),
             (
-                47_000,
+                50_500,
                 PerfScriptAction::SaveImageOverlaySettings,
                 "save_image_overlay_settings",
             ),
             (
-                47_500,
+                51_000,
                 PerfScriptAction::RequestImageOverlayReset,
                 "request_image_overlay_reset",
             ),
             (
-                48_000,
+                51_500,
                 PerfScriptAction::CancelImageOverlayReset,
                 "cancel_image_overlay_reset",
             ),
             (
-                48_500,
+                52_000,
                 PerfScriptAction::OpenExtraArgsSettings,
                 "open_extra_args_settings",
             ),
             (
-                49_000,
+                52_500,
                 PerfScriptAction::EditExtraArgsSettings,
                 "edit_extra_args_settings",
             ),
             (
-                49_500,
+                53_000,
                 PerfScriptAction::SaveExtraArgsSettings,
                 "save_extra_args_settings",
             ),
@@ -1026,17 +1132,17 @@ mod tests {
     fn native_perf_script_appends_the_enhancements_workflow() {
         let expected = [
             (
-                50_000,
+                53_500,
                 PerfScriptAction::NavigateEnhancements,
                 "navigate_enhancements",
             ),
             (
-                50_500,
+                54_000,
                 PerfScriptAction::EditEnhancements,
                 "edit_enhancements",
             ),
             (
-                51_000,
+                54_500,
                 PerfScriptAction::SaveEnhancements,
                 "save_enhancements",
             ),
@@ -1044,17 +1150,17 @@ mod tests {
 
         for (offset, (milliseconds, action, name)) in expected.into_iter().enumerate() {
             assert_eq!(
-                script_step(99 + offset),
+                script_step(106 + offset),
                 Some((Duration::from_millis(milliseconds), egui::Key::F35, action)),
             );
             assert_eq!(action.name(), name);
         }
-        assert_eq!(script_step(102), None);
+        assert_eq!(script_step(109), None);
     }
 
     #[test]
     fn native_perf_repaint_window_covers_the_complete_script() {
-        let (last_due, _, _) = script_step(101).expect("last scripted action");
+        let (last_due, _, _) = script_step(108).expect("last scripted action");
 
         assert!(SCRIPT_DURATION >= last_due + Duration::from_millis(500));
     }
@@ -1106,7 +1212,8 @@ mod tests {
         for contract in [
             "CODEX_PLUS_NATIVE_DIAGNOSTIC_LOG_PATH",
             "CODEX_PLUS_NATIVE_LATEST_STATUS_PATH",
-            "CODEX_PLUS_NATIVE_WATCHER_DISABLED_FLAG_PATH",
+            "CODEX_PLUS_NATIVE_DESKTOP_INTEGRATION_FIXTURE_STATE",
+            "CODEX_PLUS_NATIVE_DESKTOP_INTEGRATION_RECORD_PATH",
             "CODEX_PLUS_NATIVE_ENTRYPOINT_SILENT_INSTALLED",
             "CODEX_PLUS_NATIVE_ENTRYPOINT_MANAGEMENT_INSTALLED",
             "CODEX_PLUS_NATIVE_CODEX_LAUNCH_RECORD_PATH",

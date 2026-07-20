@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $ColdRunCount = 5
 $ColdExitAfterMs = 3000
 $IdleSampleSeconds = 30
-$IdleExitAfterMs = 54000
+$IdleExitAfterMs = 58000
 $FirstFrameLimitMs = 1500.0
 $CpuP95LimitMs = 16.7
 $MaximumStallLimitMs = 50.0
@@ -93,6 +93,13 @@ $ExpectedScriptActions = @(
     'confirm_zed_conflict_refresh',
     'navigate_maintenance',
     'refresh_maintenance',
+    'request_desktop_repair',
+    'cancel_desktop_repair',
+    'request_desktop_repair',
+    'confirm_desktop_repair',
+    'migrate_start_at_sign_in',
+    'disable_start_at_sign_in',
+    'enable_start_at_sign_in',
     'set_maintenance_log_limit',
     'open_maintenance_report',
     'edit_maintenance_path',
@@ -178,7 +185,8 @@ function New-MaintenanceSettingsFixture {
     $SelectedImagePath = Join-Path $FixtureRoot 'selected-private-path-sentinel.png'
     $DiagnosticLogPath = Join-Path $FixtureRoot 'diagnostic.jsonl'
     $LatestStatusPath = Join-Path $FixtureRoot 'latest-status.json'
-    $WatcherFlagPath = Join-Path $FixtureRoot 'watcher.disabled'
+    $LegacyWatcherSentinelPath = Join-Path $FixtureRoot 'watcher.disabled'
+    $DesktopIntegrationRecordPath = Join-Path $FixtureRoot 'desktop-integration.record'
     $PathPickerResponsesPath = Join-Path $FixtureRoot 'path-picker-responses.json'
     $PathPickerRecordPath = Join-Path $FixtureRoot 'path-picker-record.json'
     $StepwiseRecordPath = Join-Path $FixtureRoot 'stepwise-test-record.json'
@@ -235,7 +243,7 @@ function New-MaintenanceSettingsFixture {
         [Text.UTF8Encoding]::new($false)
     )
     [IO.File]::WriteAllText(
-        $WatcherFlagPath,
+        $LegacyWatcherSentinelPath,
         'disabled',
         [Text.UTF8Encoding]::new($false)
     )
@@ -270,7 +278,8 @@ function New-MaintenanceSettingsFixture {
         SelectedImagePath = $SelectedImagePath
         DiagnosticLogPath = $DiagnosticLogPath
         LatestStatusPath = $LatestStatusPath
-        WatcherFlagPath = $WatcherFlagPath
+        LegacyWatcherSentinelPath = $LegacyWatcherSentinelPath
+        DesktopIntegrationRecordPath = $DesktopIntegrationRecordPath
         PathPickerResponsesPath = $PathPickerResponsesPath
         PathPickerRecordPath = $PathPickerRecordPath
         StepwiseRecordPath = $StepwiseRecordPath
@@ -412,7 +421,8 @@ function Assert-MaintenanceSettingsFixtureSetup {
         $Fixture.SelectedImagePath,
         $Fixture.DiagnosticLogPath,
         $Fixture.LatestStatusPath,
-        $Fixture.WatcherFlagPath,
+        $Fixture.LegacyWatcherSentinelPath,
+        $Fixture.DesktopIntegrationRecordPath,
         $Fixture.PathPickerResponsesPath,
         $Fixture.PathPickerRecordPath,
         $Fixture.StepwiseRecordPath,
@@ -438,7 +448,7 @@ function Assert-MaintenanceSettingsFixtureSetup {
         $Fixture.SelectedImagePath,
         $Fixture.DiagnosticLogPath,
         $Fixture.LatestStatusPath,
-        $Fixture.WatcherFlagPath,
+        $Fixture.LegacyWatcherSentinelPath,
         $Fixture.PathPickerResponsesPath
         $Fixture.UpdateMetadataPath
         $Fixture.UpdateAssetPath
@@ -452,6 +462,7 @@ function Assert-MaintenanceSettingsFixtureSetup {
         $Fixture.PathPickerRecordPath,
         $Fixture.StepwiseRecordPath,
         $Fixture.CodexLaunchRecordPath,
+        $Fixture.DesktopIntegrationRecordPath,
         $Fixture.EntrypointMutationPath,
         $Fixture.WatcherMutationPath,
         $Fixture.RealLaunchArtifactPath
@@ -466,7 +477,8 @@ function Assert-MaintenanceSettingsFixtureSetup {
     $ExpectedEnvironment = [ordered]@{
         CODEX_PLUS_NATIVE_DIAGNOSTIC_LOG_PATH = $Fixture.DiagnosticLogPath
         CODEX_PLUS_NATIVE_LATEST_STATUS_PATH = $Fixture.LatestStatusPath
-        CODEX_PLUS_NATIVE_WATCHER_DISABLED_FLAG_PATH = $Fixture.WatcherFlagPath
+        CODEX_PLUS_NATIVE_DESKTOP_INTEGRATION_FIXTURE_STATE = 'windows_needs_repair_legacy'
+        CODEX_PLUS_NATIVE_DESKTOP_INTEGRATION_RECORD_PATH = $Fixture.DesktopIntegrationRecordPath
         CODEX_PLUS_NATIVE_ENTRYPOINT_SILENT_INSTALLED = '1'
         CODEX_PLUS_NATIVE_ENTRYPOINT_MANAGEMENT_INSTALLED = '0'
         CODEX_PLUS_NATIVE_CODEX_LAUNCH_RECORD_PATH = $Fixture.CodexLaunchRecordPath
@@ -989,8 +1001,10 @@ function Invoke-NativeSample {
             $MaintenanceSettingsFixture.DiagnosticLogPath
         $env:CODEX_PLUS_NATIVE_LATEST_STATUS_PATH = `
             $MaintenanceSettingsFixture.LatestStatusPath
-        $env:CODEX_PLUS_NATIVE_WATCHER_DISABLED_FLAG_PATH = `
-            $MaintenanceSettingsFixture.WatcherFlagPath
+        $env:CODEX_PLUS_NATIVE_DESKTOP_INTEGRATION_FIXTURE_STATE = `
+            'windows_needs_repair_legacy'
+        $env:CODEX_PLUS_NATIVE_DESKTOP_INTEGRATION_RECORD_PATH = `
+            $MaintenanceSettingsFixture.DesktopIntegrationRecordPath
         $env:CODEX_PLUS_NATIVE_ENTRYPOINT_SILENT_INSTALLED = '1'
         $env:CODEX_PLUS_NATIVE_ENTRYPOINT_MANAGEMENT_INSTALLED = '0'
         $env:CODEX_PLUS_NATIVE_CODEX_LAUNCH_RECORD_PATH = `
@@ -1254,6 +1268,33 @@ function Assert-MaintenanceSettingsWorkflowResult {
         throw 'the recording Codex launcher captured an unexpected request'
     }
 
+    if (-not (Test-Path -LiteralPath $Fixture.DesktopIntegrationRecordPath -PathType Leaf)) {
+        throw 'the recording desktop-integration fixture did not write a record'
+    }
+    $DesktopIntegrationText = Get-Content `
+        -LiteralPath $Fixture.DesktopIntegrationRecordPath `
+        -Raw
+    $DesktopIntegrationOperations = @(
+        $DesktopIntegrationText -split "`r?`n" | Where-Object { $_ -ne '' }
+    )
+    $ExpectedDesktopIntegrationOperations = @(
+        'repair:desktop_manager_shortcut',
+        'repair:start_menu_launcher_shortcut',
+        'repair:start_menu_manager_shortcut',
+        'repair:url_protocol',
+        'startup:set_canonical',
+        'startup:delete_legacy_run',
+        'startup:delete_canonical',
+        'startup:set_canonical'
+    )
+    if (
+        $DesktopIntegrationOperations.Count -ne 8 -or
+        ($DesktopIntegrationOperations -join "`n") -cne
+            ($ExpectedDesktopIntegrationOperations -join "`n")
+    ) {
+        throw 'the desktop-integration workflow did not record the exact bounded operation order'
+    }
+
     $SensitiveValues = @(
         $Fixture.SecretSentinel,
         'private-path-sentinel',
@@ -1276,13 +1317,19 @@ function Assert-MaintenanceSettingsWorkflowResult {
         if ($PickerText.Contains([string]$Sensitive)) {
             throw 'the path-picker record disclosed a selected path sentinel'
         }
+        if ($DesktopIntegrationText.Contains([string]$Sensitive)) {
+            throw 'the desktop-integration record disclosed private fixture data'
+        }
     }
     if ($Sample.ReportText.Contains('native_manager.perf_fixture')) {
         throw 'the raw maintenance diagnostic fixture was copied into performance evidence'
     }
 
-    if ((Get-Content -LiteralPath $Fixture.WatcherFlagPath -Raw).Trim() -ne 'disabled') {
-        throw 'the maintenance workflow mutated the Watcher flag'
+    if (
+        (Get-Content -LiteralPath $Fixture.LegacyWatcherSentinelPath -Raw).Trim() -ne
+            'disabled'
+    ) {
+        throw 'the maintenance workflow mutated the unrelated legacy Watcher sentinel'
     }
     foreach ($UnexpectedArtifact in @(
         $Fixture.EntrypointMutationPath,
@@ -1694,7 +1741,8 @@ foreach ($Name in @(
     'CODEX_PLUS_NATIVE_ZED_LAUNCH_RECORD_PATH',
     'CODEX_PLUS_NATIVE_DIAGNOSTIC_LOG_PATH',
     'CODEX_PLUS_NATIVE_LATEST_STATUS_PATH',
-    'CODEX_PLUS_NATIVE_WATCHER_DISABLED_FLAG_PATH',
+    'CODEX_PLUS_NATIVE_DESKTOP_INTEGRATION_FIXTURE_STATE',
+    'CODEX_PLUS_NATIVE_DESKTOP_INTEGRATION_RECORD_PATH',
     'CODEX_PLUS_NATIVE_ENTRYPOINT_SILENT_INSTALLED',
     'CODEX_PLUS_NATIVE_ENTRYPOINT_MANAGEMENT_INSTALLED',
     'CODEX_PLUS_NATIVE_CODEX_LAUNCH_RECORD_PATH',

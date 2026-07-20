@@ -5,6 +5,7 @@ use eframe::egui;
 
 use crate::i18n::{Locale, TextKey, ThemeMode, text};
 use crate::state::context::ContextViewState;
+use crate::state::desktop_integration::DesktopIntegrationViewState;
 use crate::state::enhancements::{EnhancementLoadPhase, EnhancementViewState};
 use crate::state::environment::EnvironmentViewState;
 use crate::state::import::ImportViewState;
@@ -75,6 +76,7 @@ pub struct ShellFeatureStates<'a> {
     pub user_scripts: Option<&'a UserScriptViewState>,
     pub zed_remote: Option<&'a ZedRemoteViewState>,
     pub maintenance: Option<&'a MaintenanceViewState>,
+    pub desktop_integration: Option<&'a DesktopIntegrationViewState>,
     pub settings: Option<&'a SettingsViewState>,
 }
 
@@ -94,6 +96,7 @@ pub fn render_shell(
         user_scripts: user_script_state,
         zed_remote: zed_remote_state,
         maintenance: maintenance_state,
+        desktop_integration: desktop_integration_state,
         settings: settings_state,
     } = states;
     let mut actions = Vec::new();
@@ -243,9 +246,17 @@ pub fn render_shell(
                 }
             }
             Route::Maintenance => {
-                if let Some(state) = maintenance_state {
+                if let (Some(state), Some(desktop_integration)) =
+                    (maintenance_state, desktop_integration_state)
+                {
                     let mut maintenance_actions = Vec::new();
-                    maintenance::render(ui, state, model.locale, &mut maintenance_actions);
+                    maintenance::render(
+                        ui,
+                        state,
+                        desktop_integration,
+                        model.locale,
+                        &mut maintenance_actions,
+                    );
                     actions.extend(
                         maintenance_actions
                             .into_iter()

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use codex_plus_manager_service::OverviewSnapshot;
 
 pub mod context;
+pub mod desktop_integration;
 pub mod enhancements;
 pub mod environment;
 pub mod import;
@@ -108,6 +109,7 @@ pub struct AppState {
     pub environment: EnvironmentViewState,
     pub sessions: SessionViewState,
     pub context: ContextViewState,
+    pub desktop_integration: desktop_integration::DesktopIntegrationViewState,
     pub enhancements: enhancements::EnhancementViewState,
     pub marketplace: marketplace::MarketplaceViewState,
     pub user_scripts: user_scripts::UserScriptViewState,

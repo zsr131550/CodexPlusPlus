@@ -1,5 +1,7 @@
 mod context_tools;
 mod desktop_host;
+mod desktop_integration;
+mod desktop_integration_system;
 mod enhancements;
 mod error;
 mod maintenance;
@@ -35,6 +37,15 @@ pub use desktop_host::{
     DesktopHostEnvironment, DesktopStartupArgs, DesktopStartupIssue, DesktopStartupIssueKind,
     DesktopStartupPlan,
 };
+pub use desktop_integration::{
+    DesktopIntegrationEnvironment, DesktopIntegrationEnvironmentError,
+    DesktopIntegrationEnvironmentSnapshot, DesktopIntegrationError, DesktopIntegrationErrorKind,
+    DesktopIntegrationMutation, DesktopIntegrationMutationKind, DesktopIntegrationPlatform,
+    DesktopIntegrationRevision, DesktopIntegrationService, DesktopIntegrationSource,
+    DesktopIntegrationWorkspace, MigrateStartAtSignIn, RepairDesktopIntegration, SetStartAtSignIn,
+    StartAtSignInStatus,
+};
+pub use desktop_integration_system::SystemDesktopIntegrationEnvironment;
 pub use enhancements::{
     EnhancementError, EnhancementErrorKind, EnhancementRevision, EnhancementSettings,
     EnhancementSettingsEnvironment, EnhancementSettingsService, EnhancementSettingsSource,
@@ -48,7 +59,7 @@ pub use maintenance::{
     MaintenanceSection, MaintenanceService, MaintenanceSource, MaintenanceWorkspace, PathKind,
     PrivatePath, RevisionedAppPath, SafeDiagnosticDocument, SafeErrorKind, SafeLogDocument,
     SafeLogEvent, SafeLogField, SafeLogRecord, SafeLogSeverity, SafeSettingsGroup,
-    SaveCodexAppPath, SectionValue, WatcherSummary,
+    SaveCodexAppPath, SectionValue,
 };
 pub use manager_settings::{
     ConfirmedSecretClear, ExtraArgsRevision, ExtraArgsSettings, ImageOverlayFitMode,

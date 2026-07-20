@@ -13,6 +13,7 @@ const STEPWISE_FINGERPRINT_DOMAIN: &[u8] = b"codex-plus-manager/stepwise/v1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RevisionScope {
     AppPath,
+    DesktopIntegration,
     Enhancements,
     Stepwise,
     ImageOverlay,

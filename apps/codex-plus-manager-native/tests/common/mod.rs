@@ -1,23 +1,113 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use codex_plus_core::desktop_integration::WindowsDesktopSnapshot;
 use codex_plus_core::install::{EntryPointState, ShortcutState};
 use codex_plus_core::relay_config::{CodexContextEntries, RelayStatus};
 use codex_plus_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, RelayMode, RelayProfile,
+};
+use codex_plus_core::startup_registration::{
+    OwnedStringValueSnapshot, StartupRegistrationSnapshot,
 };
 use codex_plus_manager_native::i18n::{Locale, ThemeMode};
 use codex_plus_manager_native::state::provider::ProviderViewState;
 use codex_plus_manager_native::state::{OverviewPhase, Route};
 use codex_plus_manager_native::views::shell::ShellViewModel;
 use codex_plus_manager_service::{
-    CodexLaunchPlan, DiagnosticPathPresence, LocatedResource, MaintenanceEnvironment,
-    MaintenanceService, MaintenanceWorkspace, ManagerSettingsEnvironment, ManagerSettingsService,
-    ManagerSettingsWorkspace, OverviewSnapshot, PathKind, ProviderActivationSummary,
-    ProviderDocument, ProviderKind, ProviderLiveFiles, ProviderLiveRevision, ProviderLiveWorkspace,
-    ProviderProfile, ProviderRevision, ProviderWorkspace, ResourcePresence, ShortcutSnapshot,
-    StepwiseTestFailure, UpdateCheckState,
+    CodexLaunchPlan, DesktopIntegrationEnvironment, DesktopIntegrationEnvironmentError,
+    DesktopIntegrationEnvironmentSnapshot, DesktopIntegrationService, DiagnosticPathPresence,
+    LocatedResource, MaintenanceEnvironment, MaintenanceService, MaintenanceWorkspace,
+    ManagerSettingsEnvironment, ManagerSettingsService, ManagerSettingsWorkspace, OverviewSnapshot,
+    PathKind, ProviderActivationSummary, ProviderDocument, ProviderKind, ProviderLiveFiles,
+    ProviderLiveRevision, ProviderLiveWorkspace, ProviderProfile, ProviderRevision,
+    ProviderWorkspace, ResourcePresence, ShortcutSnapshot, StepwiseTestFailure, UpdateCheckState,
 };
+
+#[derive(Clone)]
+struct FixtureDesktopIntegrationEnvironment(DesktopIntegrationEnvironmentSnapshot);
+
+impl DesktopIntegrationEnvironment for FixtureDesktopIntegrationEnvironment {
+    fn inspect_desktop_integration(
+        &self,
+    ) -> Result<DesktopIntegrationEnvironmentSnapshot, DesktopIntegrationEnvironmentError> {
+        Ok(self.0.clone())
+    }
+
+    fn apply_desktop_repair_operation(
+        &self,
+        _operation: &codex_plus_core::desktop_integration::DesktopRepairOperation,
+    ) -> Result<(), DesktopIntegrationEnvironmentError> {
+        Ok(())
+    }
+
+    fn apply_startup_registration_operation(
+        &self,
+        _operation: &codex_plus_core::startup_registration::StartupRegistrationOperation,
+    ) -> Result<(), DesktopIntegrationEnvironmentError> {
+        Ok(())
+    }
+}
+
+#[allow(dead_code)]
+pub fn desktop_integration_workspace(
+    needs_repair: bool,
+    legacy_enabled: bool,
+) -> Arc<codex_plus_manager_service::DesktopIntegrationWorkspace> {
+    let manager = PathBuf::from(r"C:\Program Files\CodexPlusPlus\codex-plus-plus-manager.exe");
+    let launcher = PathBuf::from(r"C:\Program Files\CodexPlusPlus\codex-plus-plus.exe");
+    let shortcut = |target| codex_plus_core::desktop_integration::ShortcutSnapshot {
+        target,
+        arguments: String::new(),
+    };
+    let snapshot = DesktopIntegrationEnvironmentSnapshot::Windows {
+        repair: Box::new(WindowsDesktopSnapshot {
+            current_exe: manager.clone(),
+            launcher_is_file: true,
+            desktop_dir: Some(PathBuf::from(r"C:\Users\fixture\Desktop")),
+            programs_dir: Some(PathBuf::from(r"C:\Users\fixture\Programs")),
+            desktop_manager: (!needs_repair).then(|| shortcut(manager.clone())),
+            start_menu_launcher: (!needs_repair).then(|| shortcut(launcher.clone())),
+            start_menu_manager: (!needs_repair).then(|| shortcut(manager.clone())),
+            protocol_command: (!needs_repair).then(|| format!("\"{}\" \"%1\"", manager.display())),
+        }),
+        sign_in: StartupRegistrationSnapshot {
+            launcher_path: launcher.clone(),
+            launcher_is_file: true,
+            canonical_run: OwnedStringValueSnapshot::Absent,
+            legacy_run: if legacy_enabled {
+                OwnedStringValueSnapshot::String(format!(
+                    "\"{}\" --debug-port 9229",
+                    launcher.display()
+                ))
+            } else {
+                OwnedStringValueSnapshot::Absent
+            },
+            legacy_shortcut: None,
+        },
+    };
+    Arc::new(
+        DesktopIntegrationService::new(FixtureDesktopIntegrationEnvironment(snapshot))
+            .inspect()
+            .unwrap(),
+    )
+}
+
+#[allow(dead_code)]
+pub fn desktop_integration_state(
+    needs_repair: bool,
+    legacy_enabled: bool,
+) -> codex_plus_manager_native::state::desktop_integration::DesktopIntegrationViewState {
+    let mut state =
+        codex_plus_manager_native::state::desktop_integration::DesktopIntegrationViewState::default(
+        );
+    let request_id = state.begin_load();
+    assert!(state.apply_load_response(
+        request_id,
+        Ok(desktop_integration_workspace(needs_repair, legacy_enabled)),
+    ));
+    state
+}
 
 pub fn snapshot(codex_version: &str) -> Arc<OverviewSnapshot> {
     Arc::new(OverviewSnapshot {
@@ -96,10 +186,6 @@ impl MaintenanceEnvironment for FixtureMaintenanceEnvironment {
                 path: None,
             },
         })
-    }
-
-    fn watcher_disabled(&self) -> anyhow::Result<bool> {
-        Ok(false)
     }
 
     fn load_latest_launch(&self) -> anyhow::Result<Option<codex_plus_core::status::LaunchStatus>> {

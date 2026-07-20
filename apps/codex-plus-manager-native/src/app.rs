@@ -5,9 +5,9 @@ use codex_plus_core::zed_remote::{
     ZedOpenStrategy, ZedRemoteProjectSource, ZedRemoteRegistryRevision,
 };
 use codex_plus_manager_service::{
-    ContextKind, ContextToolsSource, DiagnoseProviderProfile, EnhancementSettingsSource,
-    FetchProviderModels, MaintenanceSource, ManagerSettingsSource, OverviewSource,
-    PluginMarketplaceKind, PluginMarketplaceSource, ProviderActivationSource,
+    ContextKind, ContextToolsSource, DesktopIntegrationSource, DiagnoseProviderProfile,
+    EnhancementSettingsSource, FetchProviderModels, MaintenanceSource, ManagerSettingsSource,
+    OverviewSource, PluginMarketplaceKind, PluginMarketplaceSource, ProviderActivationSource,
     ProviderCommonConfigExtraction, ProviderErrorKind, ProviderImportSource,
     ProviderNetworkFailureKind, ProviderProfile, ProviderSource, ProviderSyncSource,
     RelayEnvironmentSource, SafeSettingsGroup, ScriptIntegrity, SessionSource, TestProviderProfile,
@@ -26,6 +26,9 @@ use crate::path_picker::{
 use crate::perf::{PerfRecorder, PerfScriptAction};
 use crate::persistence::{self, PersistedUiState};
 use crate::runtime::context::{ContextDispatcher, ContextResponse};
+use crate::runtime::desktop_integration::{
+    DesktopIntegrationDispatcher, DesktopIntegrationResponse,
+};
 use crate::runtime::enhancements::{EnhancementDispatcher, EnhancementResponse};
 use crate::runtime::environment::{EnvironmentDispatcher, EnvironmentResponse};
 use crate::runtime::import::{ImportDispatcher, ImportResponse};
@@ -41,6 +44,10 @@ use crate::runtime::user_scripts::{UserScriptDispatcher, UserScriptResponse};
 use crate::runtime::zed_remote::{ZedRemoteDispatcher, ZedRemoteResponse};
 use crate::runtime::{DispatchError, OverviewDispatcher};
 use crate::state::context::ContextFailureKind;
+use crate::state::desktop_integration::{
+    DesktopIntegrationFailure, DesktopIntegrationFailureKind, DesktopIntegrationLoadPhase,
+    DesktopIntegrationOperation,
+};
 use crate::state::enhancements::{EnhancementFailure, EnhancementLoadPhase};
 use crate::state::environment::EnvironmentFailureKind;
 use crate::state::import::ImportFailureKind;
@@ -91,6 +98,7 @@ pub struct NativeManagerSources {
     pub user_scripts: Arc<dyn UserScriptSource>,
     pub zed_remote: Arc<dyn ZedRemoteSource>,
     pub maintenance: Arc<dyn MaintenanceSource>,
+    pub desktop_integration: Arc<dyn DesktopIntegrationSource>,
     pub settings: Arc<dyn ManagerSettingsSource>,
     pub update: Arc<dyn UpdateSource>,
     pub path_picker: Arc<dyn PathPicker>,
@@ -111,6 +119,7 @@ pub struct NativeManagerApp {
     user_script_dispatcher: UserScriptDispatcher,
     zed_remote_dispatcher: ZedRemoteDispatcher,
     maintenance_dispatcher: MaintenanceDispatcher,
+    desktop_integration_dispatcher: DesktopIntegrationDispatcher,
     settings_dispatcher: SettingsDispatcher,
     update_dispatcher: UpdateDispatcher,
     path_picker_dispatcher: PathPickerDispatcher,
@@ -126,6 +135,7 @@ pub struct NativeManagerApp {
     user_script_worker_stopped: bool,
     zed_remote_worker_stopped: bool,
     maintenance_worker_stopped: bool,
+    desktop_integration_worker_stopped: bool,
     update_worker_stopped: bool,
     path_picker_worker_stopped: bool,
     window_focused: bool,
@@ -222,6 +232,11 @@ impl NativeManagerApp {
             sources.maintenance,
             Arc::new(move || maintenance_repaint_context.request_repaint()),
         );
+        let desktop_integration_repaint_context = creation.egui_ctx.clone();
+        let desktop_integration_dispatcher = DesktopIntegrationDispatcher::spawn(
+            sources.desktop_integration,
+            Arc::new(move || desktop_integration_repaint_context.request_repaint()),
+        );
         let settings_repaint_context = creation.egui_ctx.clone();
         let settings_dispatcher = SettingsDispatcher::spawn(
             sources.settings,
@@ -252,6 +267,7 @@ impl NativeManagerApp {
             user_script_dispatcher,
             zed_remote_dispatcher,
             maintenance_dispatcher,
+            desktop_integration_dispatcher,
             settings_dispatcher,
             update_dispatcher,
             path_picker_dispatcher,
@@ -267,6 +283,7 @@ impl NativeManagerApp {
             user_script_worker_stopped: false,
             zed_remote_worker_stopped: false,
             maintenance_worker_stopped: false,
+            desktop_integration_worker_stopped: false,
             update_worker_stopped: false,
             path_picker_worker_stopped: false,
             window_focused: true,
@@ -421,6 +438,22 @@ impl NativeManagerApp {
             self.state
                 .maintenance
                 .apply_load_response(request_id, Err(MaintenanceFailureKind::WorkerStopped));
+        }
+        self.refresh_desktop_integration();
+    }
+
+    fn refresh_desktop_integration(&mut self) {
+        let request_id = self.state.desktop_integration.begin_load();
+        if self
+            .desktop_integration_dispatcher
+            .request_inspect(request_id)
+            .is_err()
+        {
+            self.desktop_integration_worker_stopped = true;
+            let _ = self.state.desktop_integration.apply_load_response(
+                request_id,
+                Err(DesktopIntegrationFailureKind::WorkerStopped),
+            );
         }
     }
 
@@ -1245,6 +1278,72 @@ impl NativeManagerApp {
                 }
             }
             MaintenanceAction::CancelClear => self.state.maintenance.cancel_clear(),
+            MaintenanceAction::RequestRepair => {
+                self.state.desktop_integration.request_repair_confirmation();
+            }
+            MaintenanceAction::ConfirmRepair => {
+                if let Some((request_id, request)) = self.state.desktop_integration.confirm_repair()
+                    && self
+                        .desktop_integration_dispatcher
+                        .request_repair(request_id, request)
+                        .is_err()
+                {
+                    self.desktop_integration_worker_stopped = true;
+                    self.state.desktop_integration.apply_mutation_response(
+                        request_id,
+                        DesktopIntegrationOperation::Repair,
+                        Err(DesktopIntegrationFailure::new(
+                            DesktopIntegrationFailureKind::WorkerStopped,
+                        )),
+                    );
+                }
+            }
+            MaintenanceAction::CancelRepair => {
+                self.state.desktop_integration.cancel_repair_confirmation();
+            }
+            MaintenanceAction::MigrateSignIn => {
+                if let Some((request_id, request)) =
+                    self.state.desktop_integration.begin_migrate_sign_in()
+                    && self
+                        .desktop_integration_dispatcher
+                        .request_migrate(request_id, request)
+                        .is_err()
+                {
+                    self.desktop_integration_worker_stopped = true;
+                    self.state.desktop_integration.apply_mutation_response(
+                        request_id,
+                        DesktopIntegrationOperation::MigrateSignIn,
+                        Err(DesktopIntegrationFailure::new(
+                            DesktopIntegrationFailureKind::WorkerStopped,
+                        )),
+                    );
+                }
+            }
+            MaintenanceAction::SetStartAtSignIn(enabled) => {
+                if let Some((request_id, request)) = self
+                    .state
+                    .desktop_integration
+                    .begin_set_start_at_sign_in(enabled)
+                    && self
+                        .desktop_integration_dispatcher
+                        .request_set(request_id, request)
+                        .is_err()
+                {
+                    self.desktop_integration_worker_stopped = true;
+                    let operation = if enabled {
+                        DesktopIntegrationOperation::EnableSignIn
+                    } else {
+                        DesktopIntegrationOperation::DisableSignIn
+                    };
+                    self.state.desktop_integration.apply_mutation_response(
+                        request_id,
+                        operation,
+                        Err(DesktopIntegrationFailure::new(
+                            DesktopIntegrationFailureKind::WorkerStopped,
+                        )),
+                    );
+                }
+            }
             MaintenanceAction::SetDebugPort(port) => self.state.maintenance.debug_port = port,
             MaintenanceAction::SetHelperPort(port) => self.state.maintenance.helper_port = port,
             MaintenanceAction::Launch => {
@@ -2706,6 +2805,71 @@ impl NativeManagerApp {
         }
     }
 
+    fn reduce_desktop_integration_responses(&mut self) {
+        loop {
+            match self.desktop_integration_dispatcher.try_recv() {
+                Ok(Some(DesktopIntegrationResponse::Inspect { request_id, result })) => {
+                    let accepted = self.state.desktop_integration.apply_load_response(
+                        request_id,
+                        result.map_err(|error| error.kind().into()),
+                    );
+                    if accepted
+                        && self.state.desktop_integration.load_phase
+                            == DesktopIntegrationLoadPhase::Ready
+                    {
+                        self.last_updated = Some(current_utc_time());
+                    }
+                }
+                Ok(Some(DesktopIntegrationResponse::Repair { request_id, result })) => {
+                    let accepted = self.state.desktop_integration.apply_mutation_response(
+                        request_id,
+                        DesktopIntegrationOperation::Repair,
+                        result.map_err(|error| DesktopIntegrationFailure::from_service(&error)),
+                    );
+                    self.update_settings_timestamp(
+                        accepted && self.state.desktop_integration.operation.error.is_none(),
+                    );
+                }
+                Ok(Some(DesktopIntegrationResponse::Migrate { request_id, result })) => {
+                    let accepted = self.state.desktop_integration.apply_mutation_response(
+                        request_id,
+                        DesktopIntegrationOperation::MigrateSignIn,
+                        result.map_err(|error| DesktopIntegrationFailure::from_service(&error)),
+                    );
+                    self.update_settings_timestamp(
+                        accepted && self.state.desktop_integration.operation.error.is_none(),
+                    );
+                }
+                Ok(Some(DesktopIntegrationResponse::Set {
+                    request_id,
+                    enabled,
+                    result,
+                })) => {
+                    let accepted = self.state.desktop_integration.apply_mutation_response(
+                        request_id,
+                        if enabled {
+                            DesktopIntegrationOperation::EnableSignIn
+                        } else {
+                            DesktopIntegrationOperation::DisableSignIn
+                        },
+                        result.map_err(|error| DesktopIntegrationFailure::from_service(&error)),
+                    );
+                    self.update_settings_timestamp(
+                        accepted && self.state.desktop_integration.operation.error.is_none(),
+                    );
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    if !self.desktop_integration_worker_stopped {
+                        self.desktop_integration_worker_stopped = true;
+                        self.state.desktop_integration.fail_worker();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     fn reduce_enhancement_responses(&mut self) {
         loop {
             match self.enhancement_dispatcher.try_recv() {
@@ -3325,6 +3489,24 @@ impl NativeManagerApp {
             PerfScriptAction::RefreshMaintenance => {
                 Some(ShellAction::Maintenance(MaintenanceAction::Refresh))
             }
+            PerfScriptAction::RequestDesktopRepair => {
+                Some(ShellAction::Maintenance(MaintenanceAction::RequestRepair))
+            }
+            PerfScriptAction::CancelDesktopRepair => {
+                Some(ShellAction::Maintenance(MaintenanceAction::CancelRepair))
+            }
+            PerfScriptAction::ConfirmDesktopRepair => {
+                Some(ShellAction::Maintenance(MaintenanceAction::ConfirmRepair))
+            }
+            PerfScriptAction::MigrateStartAtSignIn => {
+                Some(ShellAction::Maintenance(MaintenanceAction::MigrateSignIn))
+            }
+            PerfScriptAction::DisableStartAtSignIn => Some(ShellAction::Maintenance(
+                MaintenanceAction::SetStartAtSignIn(false),
+            )),
+            PerfScriptAction::EnableStartAtSignIn => Some(ShellAction::Maintenance(
+                MaintenanceAction::SetStartAtSignIn(true),
+            )),
             PerfScriptAction::SetMaintenanceLogLimit => Some(ShellAction::Maintenance(
                 MaintenanceAction::SetLogLimit(100),
             )),
@@ -3438,6 +3620,7 @@ impl eframe::App for NativeManagerApp {
         self.reduce_enhancement_responses();
         self.reduce_zed_remote_responses();
         self.reduce_maintenance_responses();
+        self.reduce_desktop_integration_responses();
         self.reduce_settings_responses();
         self.reduce_path_picker_responses();
         self.refresh_pending_on_focus_regain(ctx);
@@ -3471,6 +3654,7 @@ impl eframe::App for NativeManagerApp {
                 user_scripts: Some(&self.state.user_scripts),
                 zed_remote: Some(&self.state.zed_remote),
                 maintenance: Some(&self.state.maintenance),
+                desktop_integration: Some(&self.state.desktop_integration),
                 settings: Some(&self.state.settings),
             },
         ) {

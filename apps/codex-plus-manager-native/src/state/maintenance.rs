@@ -40,7 +40,6 @@ pub enum MaintenanceFailureKind {
     InvalidPath,
     InvalidPort,
     EntrypointReadFailed,
-    WatcherReadFailed,
     StatusReadFailed,
     LogReadFailed,
     LaunchFailed,
@@ -57,7 +56,6 @@ impl From<MaintenanceErrorKind> for MaintenanceFailureKind {
             MaintenanceErrorKind::InvalidPath => Self::InvalidPath,
             MaintenanceErrorKind::InvalidPort => Self::InvalidPort,
             MaintenanceErrorKind::EntrypointReadFailed => Self::EntrypointReadFailed,
-            MaintenanceErrorKind::WatcherReadFailed => Self::WatcherReadFailed,
             MaintenanceErrorKind::StatusReadFailed => Self::StatusReadFailed,
             MaintenanceErrorKind::LogReadFailed => Self::LogReadFailed,
             MaintenanceErrorKind::LaunchFailed => Self::LaunchFailed,
@@ -520,7 +518,6 @@ fn merge_partial_workspace(
     let needs_merge = incoming.app_path.is_none()
         || incoming.codex_app.is_unavailable()
         || incoming.entrypoints.is_unavailable()
-        || incoming.watcher.is_unavailable()
         || incoming.latest_launch.is_unavailable()
         || incoming.logs.is_unavailable();
     if !needs_merge {
@@ -532,7 +529,6 @@ fn merge_partial_workspace(
     }
     merge_section(&mut merged.codex_app, &previous.codex_app);
     merge_section(&mut merged.entrypoints, &previous.entrypoints);
-    merge_section(&mut merged.watcher, &previous.watcher);
     merge_section(&mut merged.latest_launch, &previous.latest_launch);
     merge_section(&mut merged.logs, &previous.logs);
     Arc::new(merged)
