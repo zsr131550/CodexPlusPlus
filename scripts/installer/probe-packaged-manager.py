@@ -198,6 +198,42 @@ def provider_import_evidence(
     return False, "manager emitted no bounded provider-import evidence"
 
 
+def bounded_native_failure(root: Path, process_id: int) -> str:
+    diagnostic = root / "diagnostic.jsonl"
+    try:
+        size = diagnostic.stat().st_size
+        offset = max(0, size - MAX_STATE_EVIDENCE_BYTES)
+        with diagnostic.open("rb") as stream:
+            stream.seek(offset)
+            records = stream.read(MAX_STATE_EVIDENCE_BYTES)
+    except OSError:
+        return "no bounded Native diagnostic"
+    lines = records.decode("utf-8", errors="replace").splitlines()
+    if offset:
+        lines = lines[1:]
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("pid") != process_id:
+            continue
+        event = record.get("event")
+        if event != "native_manager.run_failed":
+            continue
+        detail = record.get("detail")
+        kind = detail.get("kind") if isinstance(detail, dict) else None
+        if isinstance(kind, str):
+            kind = " ".join(kind.split())
+            kind = kind.replace(str(root), "<fixture>")
+            profile = os.environ.get("CODEX_PLUS_PACKAGE_WINDOWS_PROFILE", "")
+            if profile:
+                kind = kind.replace(profile, "<profile>")
+            return f"{event}: {kind[:256]}"
+        return event
+    return "no matching Native diagnostic"
+
+
 def isolated_environment(root: Path, port: int) -> dict[str, str]:
     user = root / "user"
     local = user / "local"
@@ -314,7 +350,8 @@ def run_native(binary: Path, mode: str, root: Path) -> None:
                     fail("provider import pending request identity is invalid")
         primary_code = wait_for_exit(primary, 25)
         if primary_code != 0:
-            fail(f"primary manager exited with code {primary_code}")
+            detail = bounded_native_failure(root, primary.pid)
+            fail(f"primary manager exited with code {primary_code}: {detail}")
         if endpoint.exists():
             fail("manager instance endpoint remained after explicit exit")
         if not (root / f"perf-{mode}.json").is_file():

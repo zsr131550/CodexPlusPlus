@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let run_result = eframe::run_native(
         APP_TITLE,
         native_options,
         Box::new(move |creation| {
@@ -169,7 +169,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(desktop_host),
             )))
         }),
-    )?;
+    );
+    if let Err(error) = &run_result {
+        let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
+            "native_manager.run_failed",
+            serde_json::json!({ "kind": format!("{error:?}") }),
+        );
+    }
+    run_result?;
     Ok(())
 }
 
