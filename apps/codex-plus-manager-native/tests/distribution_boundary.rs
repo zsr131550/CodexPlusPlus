@@ -123,6 +123,9 @@ fn package_workflows_upload_bounded_manifests_and_cannot_publish_from_prs() {
     assert!(lifecycle.contains("previous_sha256"));
     assert!(!lifecycle.contains("latest"));
     assert!(probe.contains("CODEX_PLUS_PACKAGE_DISPOSABLE_PROFILE"));
+    assert!(probe.contains("manager.provider_import_url.pending"));
+    assert!(probe.contains("MAX_STATE_EVIDENCE_BYTES"));
+    assert!(probe.contains("process.pid"));
 }
 
 #[test]

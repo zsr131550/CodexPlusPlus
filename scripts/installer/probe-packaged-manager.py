@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ MARKER = ".codex-plus-package-fixture"
 PROFILE_MARKER = ".codex-plus-package-disposable-profile"
 MODES = ("ordinary", "show-update", "provider-import")
 NATIVE_EXIT_AFTER_MS = 6000
+MAX_STATE_EVIDENCE_BYTES = 64 * 1024
 
 
 def fail(message: str) -> NoReturn:
@@ -101,6 +103,94 @@ def provider_url() -> str:
         }
     )
     return f"codexplusplus://v1/import/provider?{query}"
+
+
+def previous_state_directories(root: Path, profile_state: Path | None) -> list[Path]:
+    candidates = [root / "user" / ".codex-session-delete"]
+    if profile_state is not None:
+        candidates.insert(0, profile_state)
+    return list(dict.fromkeys(candidates))
+
+
+def file_signature(path: Path) -> tuple[int, int, str] | None:
+    try:
+        if not path.is_file():
+            return None
+        with path.open("rb") as stream:
+            content = stream.read(MAX_STATE_EVIDENCE_BYTES + 1)
+        if len(content) > MAX_STATE_EVIDENCE_BYTES:
+            return None
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_size, stat.st_mtime_ns, hashlib.sha256(content).hexdigest()
+
+
+def file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size if path.is_file() else 0
+    except OSError:
+        return 0
+
+
+def provider_import_evidence(
+    state_directories: list[Path],
+    pending_before: dict[Path, tuple[int, int, str] | None],
+    diagnostic_offsets: dict[Path, int],
+    process_id: int,
+) -> tuple[bool, str]:
+    for state in state_directories:
+        pending = state / "pending-provider-import.json"
+        current = file_signature(pending)
+        if current is None or current == pending_before[pending]:
+            continue
+        try:
+            request = json.loads(pending.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            request.get("name") == "Package Fixture Provider"
+            and request.get("baseUrl") == "https://package-fixture.invalid/v1"
+        ):
+            return True, "pending-request"
+
+    observed_events: set[str] = set()
+    for state in state_directories:
+        diagnostic = state / "codex-plus.log"
+        offset = diagnostic_offsets[diagnostic]
+        try:
+            size = diagnostic.stat().st_size
+            if size < offset or size - offset > MAX_STATE_EVIDENCE_BYTES:
+                continue
+            with diagnostic.open("rb") as stream:
+                stream.seek(offset)
+                records = stream.read(MAX_STATE_EVIDENCE_BYTES)
+        except OSError:
+            continue
+        for line in records.decode("utf-8", errors="replace").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("pid") != process_id:
+                continue
+            event = record.get("event")
+            if isinstance(event, str):
+                observed_events.add(event)
+            if event != "manager.provider_import_url.pending":
+                continue
+            detail = record.get("detail")
+            if isinstance(detail, dict) and (
+                detail.get("name") == "Package Fixture Provider"
+                and detail.get("baseUrl") == "https://package-fixture.invalid/v1"
+            ):
+                return True, "diagnostic-event"
+
+    if "manager.provider_import_url.failed" in observed_events:
+        return False, "manager reported a rejected provider import"
+    if observed_events:
+        return False, "manager emitted no provider-import acceptance event"
+    return False, "manager emitted no bounded provider-import evidence"
 
 
 def isolated_environment(root: Path, port: int) -> dict[str, str]:
@@ -245,6 +335,17 @@ def disposable_profile_state() -> Path:
 def run_previous(binary: Path, mode: str, root: Path) -> None:
     environment = isolated_environment(root, available_port())
     profile_state = disposable_profile_state() if os.name == "nt" else None
+    state_directories = previous_state_directories(root, profile_state)
+    pending_before = {
+        state / "pending-provider-import.json": file_signature(
+            state / "pending-provider-import.json"
+        )
+        for state in state_directories
+    }
+    diagnostic_offsets = {
+        state / "codex-plus.log": file_size(state / "codex-plus.log")
+        for state in state_directories
+    }
     arguments = []
     if mode == "show-update":
         arguments.append("--show-update")
@@ -259,13 +360,14 @@ def run_previous(binary: Path, mode: str, root: Path) -> None:
                 fail(f"previous manager exited during launch with code {code}")
             time.sleep(0.05)
         if mode == "provider-import":
-            pending = (
-                profile_state / "pending-provider-import.json"
-                if profile_state is not None
-                else root / "user" / ".codex-session-delete" / "pending-provider-import.json"
+            accepted, detail = provider_import_evidence(
+                state_directories,
+                pending_before,
+                diagnostic_offsets,
+                process.pid,
             )
-            if not pending.is_file():
-                fail("previous manager did not accept the provider import launch")
+            if not accepted:
+                fail(f"previous manager did not accept the provider import launch: {detail}")
     finally:
         stop_process(process)
 
