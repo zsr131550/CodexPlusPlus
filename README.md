@@ -195,7 +195,7 @@ Telegram 频道：<https://t.me/CodexPlusPlus>
 | 会话管理 | 扫描本地会话、批量删除、Markdown 导出、Token 用量历史、Provider metadata 同步与备份 |
 | Codex 增强 | 插件市场与模型白名单、会话操作、粘贴修复、中文界面、快速启动、会话宽度与滚动恢复、服务层级控制、Goals、Stepwise、图片覆盖层 |
 | 开发工作流 | 项目移动、Upstream worktree、线程 ID、Zed Remote 项目识别与打开 |
-| 脚本与维护 | 用户脚本安装与启停、应用检测、快捷方式、Watcher、环境冲突、日志诊断、健康检查和 Release 更新 |
+| 脚本与维护 | 用户脚本安装与启停、应用检测、快捷方式、登录启动迁移、环境冲突、日志诊断、健康检查和 Release 更新 |
 
 所有界面增强都可以单独关闭。关闭“Codex 增强”总开关后，Codex++ 仍可作为供应商和启动管理工具使用。
 
@@ -296,12 +296,34 @@ cargo test
 cargo build --release
 ```
 
+发布包只包含 Native 管理器，并以既有稳定文件名 `codex-plus-plus-manager`（macOS
+为 `CodexPlusPlusManager`）安装；React/Tauri 目录在迁移完成前仅作为未发布的行为
+oracle。验证打包边界时使用：
+
+```powershell
+cargo build -p codex-plus-launcher -p codex-plus-manager-native --release
+New-Item -ItemType Directory -Force dist/windows/app | Out-Null
+Copy-Item target/release/codex-plus-plus.exe dist/windows/app/
+Copy-Item target/release/codex-plus-plus-manager-native.exe `
+  dist/windows/app/codex-plus-plus-manager.exe
+python scripts/installer/generate-package-manifest.py `
+  --root dist/windows/app `
+  --output dist/windows/native-package-manifest.json `
+  --platform windows-x64 `
+  --source-binary target/release/codex-plus-plus-manager-native.exe `
+  --staged-binary codex-plus-plus-manager.exe
+```
+
+清单只记录相对路径和 SHA-256；固定版本降级夹具必须显式提供上一版 ZIP、版本和
+SHA-256，不解析 `latest`，也不安装到开发者的真实用户目录。
+
 主要结构：
 
 ```text
 apps/
   codex-plus-launcher/          静默启动入口
-  codex-plus-manager/           Tauri 管理工具
+  codex-plus-manager-native/    发布包使用的 Native 管理工具
+  codex-plus-manager/           未发布的 React/Tauri 行为 oracle
 assets/inject/
   renderer-inject.js            注入到 Codex 渲染端的增强脚本
 crates/

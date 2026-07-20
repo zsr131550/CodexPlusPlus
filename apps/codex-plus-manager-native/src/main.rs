@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,11 @@ use eframe::egui;
 const MEBIBYTE: u64 = 1024 * 1024;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let startup_args = std::env::args_os().collect::<Vec<_>>();
+    if let Some(action) = package_maintenance_action(&startup_args)? {
+        run_package_maintenance(action)?;
+        return Ok(());
+    }
     configure_diagnostic_log_from_env();
     let process_started = Instant::now();
     let persistence_paths = NativePersistencePaths::for_state_override(native_state_override());
@@ -49,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let environment = SystemProviderEnvironment::for_native_process();
-    let startup = DesktopStartupArgs::new(std::env::args_os());
+    let startup = DesktopStartupArgs::new(startup_args);
     let startup_plan = startup.prepare(&environment);
     for issue in startup_plan.issues() {
         let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
@@ -164,6 +170,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )))
         }),
     )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageMaintenanceAction {
+    Upgrade,
+    Uninstall,
+}
+
+fn package_maintenance_action(
+    args: &[OsString],
+) -> std::io::Result<Option<PackageMaintenanceAction>> {
+    let action = match args.get(1).map(OsString::as_os_str) {
+        Some(value) if value == OsStr::new("--package-upgrade") => {
+            Some(PackageMaintenanceAction::Upgrade)
+        }
+        Some(value) if value == OsStr::new("--package-uninstall") => {
+            Some(PackageMaintenanceAction::Uninstall)
+        }
+        _ => None,
+    };
+    if action.is_some() && args.len() != 2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "package maintenance commands do not accept additional arguments",
+        ));
+    }
+    Ok(action)
+}
+
+#[cfg(windows)]
+fn run_package_maintenance(
+    action: PackageMaintenanceAction,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manager = std::env::current_exe()?;
+    let install_root = manager.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "installed manager has no parent directory",
+        )
+    })?;
+    let launcher = install_root.join(format!("{}.exe", codex_plus_core::install::SILENT_BINARY));
+    let snapshot =
+        codex_plus_core::startup_registration::inspect_system_startup_registration(launcher)?;
+    let plan = match action {
+        PackageMaintenanceAction::Upgrade => {
+            codex_plus_core::startup_registration::build_package_upgrade_plan(&snapshot)
+        }
+        PackageMaintenanceAction::Uninstall => {
+            codex_plus_core::startup_registration::build_package_uninstall_plan(&snapshot)
+        }
+    };
+    for operation in &plan.operations {
+        codex_plus_core::startup_registration::apply_system_startup_registration_operation(
+            operation,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn run_package_maintenance(
+    _action: PackageMaintenanceAction,
+) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
@@ -462,6 +532,42 @@ mod tests {
     use codex_plus_manager_service::{
         MigrateStartAtSignIn, RepairDesktopIntegration, SetStartAtSignIn,
     };
+
+    #[test]
+    fn package_maintenance_arguments_are_exact_and_isolated_from_ui_startup() {
+        assert_eq!(
+            package_maintenance_action(&[
+                OsString::from("manager"),
+                OsString::from("--package-upgrade"),
+            ])
+            .unwrap(),
+            Some(PackageMaintenanceAction::Upgrade)
+        );
+        assert_eq!(
+            package_maintenance_action(&[
+                OsString::from("manager"),
+                OsString::from("--package-uninstall"),
+            ])
+            .unwrap(),
+            Some(PackageMaintenanceAction::Uninstall)
+        );
+        assert_eq!(
+            package_maintenance_action(&[
+                OsString::from("manager"),
+                OsString::from("--show-update"),
+            ])
+            .unwrap(),
+            None
+        );
+        assert!(
+            package_maintenance_action(&[
+                OsString::from("manager"),
+                OsString::from("--package-upgrade"),
+                OsString::from("unexpected"),
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn wgpu_configuration_uses_a_low_memory_windows_backend() {

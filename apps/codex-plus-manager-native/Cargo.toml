@@ -30,3 +30,6 @@ url.workspace = true
 anyhow.workspace = true
 egui_kittest = { version = "=0.35.0", features = ["snapshot", "wgpu"] }
 tempfile.workspace = true
+
+[build-dependencies]
+winresource.workspace = true

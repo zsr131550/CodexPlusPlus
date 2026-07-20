@@ -89,7 +89,7 @@ fn launcher_binary_embeds_codex_icon_resource() {
     let build_rs = std::fs::read_to_string(&launcher_build).expect("read launcher build.rs");
 
     assert!(build_rs.contains("WindowsResource"));
-    assert!(build_rs.contains("icons/icon.ico"));
+    assert!(build_rs.contains("codex-plus-manager-native/assets/packaging/icon.ico"));
 }
 
 #[test]
@@ -97,6 +97,12 @@ fn windows_binaries_request_administrator_privileges() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let manager_build =
         std::fs::read_to_string(manifest_dir.join("build.rs")).expect("read manager build.rs");
+    let native_build = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .join("codex-plus-manager-native/build.rs");
+    let native_build = std::fs::read_to_string(&native_build).expect("read native build.rs");
     let windows_manifest = std::fs::read_to_string(manifest_dir.join("windows-app-manifest.xml"))
         .expect("read windows app manifest");
     let launcher_build = manifest_dir
@@ -115,6 +121,8 @@ fn windows_binaries_request_administrator_privileges() {
         std::fs::read_to_string(&windows_installer).expect("read windows installer");
 
     assert!(manager_build.contains("windows-app-manifest.xml"));
+    assert!(native_build.contains("assets/packaging/icon.ico"));
+    assert!(native_build.contains("assets/packaging/windows-app-manifest.xml"));
     assert!(launcher_build.contains("windows-app-manifest.xml"));
     assert!(windows_manifest.contains("requireAdministrator"));
     assert!(windows_manifest.contains("Microsoft.Windows.Common-Controls"));
@@ -175,12 +183,16 @@ fn macos_packager_hides_silent_launcher_but_not_manager() {
     assert!(script.contains("<key>LSUIElement</key>"));
     assert!(script.contains("ARCH=\"${2:-$(uname -m)}\""));
     assert!(script.contains("BINARY_DIR=\"${BINARY_DIR:-$ROOT/target/release}\""));
+    assert!(script.contains(
+        "NATIVE_BINARY=\"${NATIVE_BINARY:-$BINARY_DIR/codex-plus-plus-manager-native}\""
+    ));
+    assert!(script.contains("apps/codex-plus-manager-native/assets/packaging/icon.png"));
     assert!(script.contains("CodexPlusPlus-${VERSION}-macos-${ARCH}.dmg"));
     assert!(script.contains(
         "create_app \"Codex++\" \"CodexPlusPlus\" \"$BINARY_DIR/codex-plus-plus\" \"com.bigpizzav3.codexplusplus\" \"true\""
     ));
     assert!(script.contains(
-        "create_app \"Codex++ 管理工具\" \"CodexPlusPlusManager\" \"$BINARY_DIR/codex-plus-plus-manager\" \"com.bigpizzav3.codexplusplus.manager\" \"false\""
+        "create_app \"Codex++ 管理工具\" \"CodexPlusPlusManager\" \"$NATIVE_BINARY\" \"com.bigpizzav3.codexplusplus.manager\" \"false\""
     ));
 }
 

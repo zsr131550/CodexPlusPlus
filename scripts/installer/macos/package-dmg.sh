@@ -7,8 +7,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DIST="$ROOT/dist/macos"
 STAGE="$DIST/stage"
 BINARY_DIR="${BINARY_DIR:-$ROOT/target/release}"
+NATIVE_BINARY="${NATIVE_BINARY:-$BINARY_DIR/codex-plus-plus-manager-native}"
 DMG="$DIST/CodexPlusPlus-${VERSION}-macos-${ARCH}.dmg"
-ICON_SOURCE="$ROOT/apps/codex-plus-manager/src-tauri/icons/icon.png"
+ICON_SOURCE="$ROOT/apps/codex-plus-manager-native/assets/packaging/icon.png"
 ICON_NAME="codex-plus-plus.icns"
 ICON_ICNS="$DIST/$ICON_NAME"
 
@@ -115,11 +116,20 @@ verify_app() {
     echo "error: codesign verification failed for $app_dir" >&2
     return 1
   }
+  if find "$app_dir" \( -name 'node_modules' -o -name 'index.html' -o -name '*.js' \) -print -quit | grep -q .; then
+    echo "error: WebView or Node assets found in $app_dir" >&2
+    return 1
+  fi
 }
+
+if [ "$(basename "$NATIVE_BINARY")" != "codex-plus-plus-manager-native" ]; then
+  echo "error: manager source must be the Native Cargo binary" >&2
+  exit 1
+fi
 
 prepare_icon
 create_app "Codex++" "CodexPlusPlus" "$BINARY_DIR/codex-plus-plus" "com.bigpizzav3.codexplusplus" "true"
-create_app "Codex++ 管理工具" "CodexPlusPlusManager" "$BINARY_DIR/codex-plus-plus-manager" "com.bigpizzav3.codexplusplus.manager" "false"
+create_app "Codex++ 管理工具" "CodexPlusPlusManager" "$NATIVE_BINARY" "com.bigpizzav3.codexplusplus.manager" "false"
 
 sign_app "$STAGE/Codex++.app"
 sign_app "$STAGE/Codex++ 管理工具.app"

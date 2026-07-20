@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   windows-installer:
+    if: github.event_name == 'release' && github.event.action == 'published'
     runs-on: windows-latest
     steps:
       - name: Checkout release tag
@@ -16,34 +17,28 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install NSIS
         run: choco install nsis -y
 
-      - name: Install frontend dependencies
-        working-directory: apps/codex-plus-manager
-        run: npm install --package-lock=false
-
-      - name: Build frontend
-        working-directory: apps/codex-plus-manager
-        run: npm run vite:build
-
       - name: Build binaries
-        run: cargo build --release
+        run: cargo build -p codex-plus-launcher -p codex-plus-manager-native --release
 
       - name: Stage Windows app files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist/windows/app | Out-Null
           Copy-Item target/release/codex-plus-plus.exe dist/windows/app/
-          Copy-Item target/release/codex-plus-plus-manager.exe dist/windows/app/
+          Copy-Item target/release/codex-plus-plus-manager-native.exe dist/windows/app/codex-plus-plus-manager.exe
+          python scripts/installer/generate-package-manifest.py `
+            --root dist/windows/app `
+            --output dist/windows/native-package-manifest.json `
+            --platform windows-x64 `
+            --source-binary target/release/codex-plus-plus-manager-native.exe `
+            --staged-binary codex-plus-plus-manager.exe `
+            --forbid codex-plus-plus-manager-native
 
       - name: Build Windows zip asset
         shell: pwsh
@@ -71,8 +66,10 @@ jobs:
           files: |
             dist/windows/*.exe
             dist/windows/*.zip
+            dist/windows/native-package-manifest.json
 
   macos-dmg:
+    if: github.event_name == 'release' && github.event.action == 'published'
     name: macOS DMG (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -91,32 +88,27 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install frontend dependencies
-        working-directory: apps/codex-plus-manager
-        run: npm install --package-lock=false
-
-      - name: Build frontend
-        working-directory: apps/codex-plus-manager
-        run: npm run vite:build
-
       - name: Build binaries
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build -p codex-plus-launcher -p codex-plus-manager-native --release --target ${{ matrix.target }}
 
       - name: Build macOS DMG
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           VERSION="${VERSION#V}"
           BINARY_DIR="$PWD/target/${{ matrix.target }}/release" bash scripts/installer/macos/package-dmg.sh "$VERSION" "${{ matrix.arch }}"
+          python scripts/installer/generate-package-manifest.py \
+            --root dist/macos/stage \
+            --output "dist/macos/native-package-manifest-${{ matrix.arch }}.json" \
+            --platform "macos-${{ matrix.arch }}" \
+            --source-binary "target/${{ matrix.target }}/release/codex-plus-plus-manager-native" \
+            --staged-binary "Codex++ 管理工具.app/Contents/MacOS/CodexPlusPlusManager" \
+            --forbid codex-plus-plus-manager-native \
+            --allow-packaging-transform
 
       - name: Build macOS zip asset
         shell: bash
@@ -124,8 +116,16 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           VERSION="${VERSION#V}"
           mkdir -p dist/macos/app-${{ matrix.arch }}
-          cp "target/${{ matrix.target }}/release/codex-plus-plus" "dist/macos/app-${{ matrix.arch }}/"
-          cp "target/${{ matrix.target }}/release/codex-plus-plus-manager" "dist/macos/app-${{ matrix.arch }}/"
+          cp -R "dist/macos/stage/Codex++.app" "dist/macos/app-${{ matrix.arch }}/"
+          cp -R "dist/macos/stage/Codex++ 管理工具.app" "dist/macos/app-${{ matrix.arch }}/"
+          python scripts/installer/generate-package-manifest.py \
+            --root "dist/macos/app-${{ matrix.arch }}" \
+            --output "dist/macos/native-package-zip-manifest-${{ matrix.arch }}.json" \
+            --platform "macos-${{ matrix.arch }}" \
+            --source-binary "target/${{ matrix.target }}/release/codex-plus-plus-manager-native" \
+            --staged-binary "Codex++ 管理工具.app/Contents/MacOS/CodexPlusPlusManager" \
+            --forbid codex-plus-plus-manager-native \
+            --allow-packaging-transform
           (cd dist/macos && zip -r "CodexPlusPlus-${VERSION}-macos-${{ matrix.arch }}.zip" "app-${{ matrix.arch }}")
 
       - name: Verify macOS bundle structure
@@ -149,8 +149,11 @@ jobs:
           files: |
             dist/macos/*.dmg
             dist/macos/*.zip
+            dist/macos/native-package-manifest-${{ matrix.arch }}.json
+            dist/macos/native-package-zip-manifest-${{ matrix.arch }}.json
 
   latest-json:
+    if: github.event_name == 'release' && github.event.action == 'published'
     name: Upload static latest.json
     runs-on: ubuntu-latest
     needs:
@@ -166,25 +169,32 @@ jobs:
         run: |
           set -euo pipefail
           gh release view "$TAG" --repo "$REPO" --json assets,body,tagName,url > release.json
-          node <<'NODE'
-          const fs = require("fs");
-          const release = JSON.parse(fs.readFileSync("release.json", "utf8"));
-          const repo = process.env.REPO;
-          const tag = release.tagName || process.env.TAG;
-          const version = tag.replace(/^v/i, "");
-          const baseUrl = `https://github.com/${repo}/releases/download/${tag}`;
-          const assets = (release.assets || [])
-            .map((asset) => asset.name)
-            .filter((name) => name !== "latest.json")
-            .map((name) => ({ name, url: `${baseUrl}/${encodeURIComponent(name)}` }));
-          const payload = {
-            version: `v${version}`,
-            url: release.url || `https://github.com/${repo}/releases/tag/${tag}`,
-            body: release.body || "",
-            assets
-          };
-          fs.writeFileSync("latest.json", `${JSON.stringify(payload, null, 2)}\n`);
-          NODE
+          python <<'PY'
+          import json
+          import os
+          from urllib.parse import quote
+
+          with open("release.json", encoding="utf-8") as stream:
+              release = json.load(stream)
+          repo = os.environ["REPO"]
+          tag = release.get("tagName") or os.environ["TAG"]
+          version = tag[1:] if tag[:1].lower() == "v" else tag
+          base_url = f"https://github.com/{repo}/releases/download/{tag}"
+          assets = [
+              {"name": asset["name"], "url": f"{base_url}/{quote(asset['name'], safe='')}"}
+              for asset in release.get("assets", [])
+              if asset.get("name") != "latest.json"
+          ]
+          payload = {
+              "version": f"v{version}",
+              "url": release.get("url") or f"https://github.com/{repo}/releases/tag/{tag}",
+              "body": release.get("body") or "",
+              "assets": assets,
+          }
+          with open("latest.json", "w", encoding="utf-8", newline="\n") as stream:
+              json.dump(payload, stream, ensure_ascii=False, indent=2)
+              stream.write("\n")
+          PY
           cat latest.json
 
       - name: Upload latest.json
