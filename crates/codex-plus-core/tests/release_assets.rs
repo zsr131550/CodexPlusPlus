@@ -1,6 +1,9 @@
 use codex_plus_core::update::{
-    Release, download_asset_to, is_newer_version, parse_version_tag, release_from_github_payload,
+    MAX_RELEASE_METADATA_BYTES, MAX_RELEASE_SUMMARY_BYTES, Release, ReleaseAsset, UpdateTarget,
+    download_asset_to, is_newer_version, normalize_release_summary, parse_version_tag,
+    release_from_github_payload, release_from_latest_json_bytes_for,
     release_from_latest_json_payload, safe_asset_name, select_update_asset,
+    select_update_asset_for, validate_update_asset_for, validate_update_response_url,
 };
 use serde_json::json;
 
@@ -168,4 +171,115 @@ fn download_asset_to_writes_bytes() {
 
     assert_eq!(path, dir.path().join("pkg.zip"));
     assert_eq!(std::fs::read(path).unwrap(), b"abcdef");
+}
+
+#[test]
+fn bounded_latest_json_rejects_oversized_metadata_and_normalizes_summary() {
+    let payload = serde_json::to_vec(&json!({
+        "version": "v2.0.0",
+        "body": format!("first\r\nsecond\u{0000}{}END", "界".repeat(10_000)),
+        "assets": [{
+            "name": "CodexPlusPlus-2.0.0-windows-x64-setup.exe",
+            "url": "https://example.test/setup.exe"
+        }]
+    }))
+    .unwrap();
+    let release = release_from_latest_json_bytes_for(&payload, UpdateTarget::WindowsX64).unwrap();
+
+    assert!(release.body.starts_with("first\nsecond "));
+    assert!(release.body.len() <= MAX_RELEASE_SUMMARY_BYTES);
+    assert!(release.body.is_char_boundary(release.body.len()));
+    assert!(!release.body.contains('\r'));
+    assert!(!release.body.contains('\0'));
+
+    let oversized = vec![b' '; MAX_RELEASE_METADATA_BYTES + 1];
+    assert!(release_from_latest_json_bytes_for(&oversized, UpdateTarget::WindowsX64).is_err());
+}
+
+#[test]
+fn summary_normalization_uses_a_valid_utf8_boundary() {
+    let summary = format!("{}x", "界".repeat(MAX_RELEASE_SUMMARY_BYTES));
+    let normalized = normalize_release_summary(&summary);
+
+    assert!(normalized.len() <= MAX_RELEASE_SUMMARY_BYTES);
+    assert!(normalized.is_char_boundary(normalized.len()));
+}
+
+#[test]
+fn explicit_target_selection_preserves_platform_and_macos_arch_preference() {
+    let assets = vec![
+        (
+            "CodexPlusPlus-2.0.0-windows-x64-setup.exe".to_string(),
+            "https://example.test/setup.exe".to_string(),
+        ),
+        (
+            "CodexPlusPlus-2.0.0-macos-arm64.dmg".to_string(),
+            "https://example.test/arm64.dmg".to_string(),
+        ),
+        (
+            "CodexPlusPlus-2.0.0-macos-x64.dmg".to_string(),
+            "https://example.test/x64.dmg".to_string(),
+        ),
+    ];
+
+    assert_eq!(
+        select_update_asset_for(&assets, UpdateTarget::WindowsX64)
+            .unwrap()
+            .name,
+        "CodexPlusPlus-2.0.0-windows-x64-setup.exe"
+    );
+    assert_eq!(
+        select_update_asset_for(&assets, UpdateTarget::MacosArm64)
+            .unwrap()
+            .name,
+        "CodexPlusPlus-2.0.0-macos-arm64.dmg"
+    );
+    assert_eq!(
+        select_update_asset_for(&assets, UpdateTarget::MacosX64)
+            .unwrap()
+            .name,
+        "CodexPlusPlus-2.0.0-macos-x64.dmg"
+    );
+    assert!(select_update_asset_for(&assets, UpdateTarget::Unsupported).is_none());
+}
+
+#[test]
+fn asset_validation_requires_https_expected_extension_and_safe_name() {
+    let valid = ReleaseAsset {
+        name: "CodexPlusPlus-2.0.0-windows-x64-setup.exe".to_string(),
+        browser_download_url: "https://example.test/setup.exe".to_string(),
+    };
+    assert!(validate_update_asset_for(&valid, UpdateTarget::WindowsX64).is_ok());
+
+    let insecure = ReleaseAsset {
+        browser_download_url: "http://example.test/setup.exe".to_string(),
+        ..valid.clone()
+    };
+    assert!(validate_update_asset_for(&insecure, UpdateTarget::WindowsX64).is_err());
+
+    let wrong_extension = ReleaseAsset {
+        name: "CodexPlusPlus-2.0.0-windows-x64.zip".to_string(),
+        ..valid.clone()
+    };
+    assert!(validate_update_asset_for(&wrong_extension, UpdateTarget::WindowsX64).is_err());
+    assert!(validate_update_response_url("https://objects.example.test/setup.exe").is_ok());
+    assert!(validate_update_response_url("http://objects.example.test/setup.exe").is_err());
+}
+
+#[test]
+fn safe_asset_name_rejects_portable_unsafe_names() {
+    for value in [
+        "..\\setup.exe",
+        "dir/setup.exe",
+        "C:setup.exe",
+        "setup.exe.",
+        "setup.exe ",
+        "CON.exe",
+        "name\u{0000}.exe",
+    ] {
+        assert!(
+            safe_asset_name(value).is_err(),
+            "accepted unsafe name: {value:?}"
+        );
+    }
 }

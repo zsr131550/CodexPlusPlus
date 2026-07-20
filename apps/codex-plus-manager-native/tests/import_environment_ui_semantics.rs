@@ -70,7 +70,8 @@ fn render(ui: &mut egui::Ui, state: &mut FeatureState) {
             | ShellAction::Enhancements(_)
             | ShellAction::ZedRemote(_)
             | ShellAction::Maintenance(_)
-            | ShellAction::Settings(_) => {}
+            | ShellAction::Settings(_)
+            | ShellAction::Update(_) => {}
             ShellAction::Refresh
             | ShellAction::Retry
             | ShellAction::SetLocale(_)

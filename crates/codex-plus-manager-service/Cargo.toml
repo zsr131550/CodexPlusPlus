@@ -9,6 +9,7 @@ repository.workspace = true
 anyhow.workspace = true
 codex-plus-core = { path = "../codex-plus-core" }
 codex-plus-data = { path = "../codex-plus-data" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

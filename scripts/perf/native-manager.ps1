@@ -186,6 +186,10 @@ function New-MaintenanceSettingsFixture {
     $EntrypointMutationPath = Join-Path $FixtureRoot 'entrypoint-mutation.json'
     $WatcherMutationPath = Join-Path $FixtureRoot 'watcher-mutation.json'
     $RealLaunchArtifactPath = Join-Path $FixtureRoot 'real-launch-artifact.json'
+    $UpdateMetadataPath = Join-Path $FixtureRoot 'update-metadata.json'
+    $UpdateAssetPath = Join-Path $FixtureRoot 'update-asset.bin'
+    $UpdateLaunchRecordPath = Join-Path $FixtureRoot 'update-launch.record'
+    $UpdateCheckRecordPath = Join-Path $FixtureRoot 'update-check.record'
     $SecretSentinel = 'private-stepwise-key-sentinel-7d44'
     $InitialStepwiseUrl = 'https://private-stepwise.example.test/body-sentinel-initial'
     $SavedStepwiseUrl = 'https://perf-stepwise.example.test/v2'
@@ -244,6 +248,20 @@ function New-MaintenanceSettingsFixture {
         $PickerResponses,
         [Text.UTF8Encoding]::new($false)
     )
+    $UpdateMetadata = [ordered]@{
+        version = '0.0.0'
+        body = 'isolated current release fixture'
+    } | ConvertTo-Json -Depth 4
+    [IO.File]::WriteAllText(
+        $UpdateMetadataPath,
+        $UpdateMetadata,
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllText(
+        $UpdateAssetPath,
+        'isolated-update-asset',
+        [Text.UTF8Encoding]::new($false)
+    )
 
     [pscustomobject]@{
         FixtureRoot = $FixtureRoot
@@ -261,6 +279,10 @@ function New-MaintenanceSettingsFixture {
         EntrypointMutationPath = $EntrypointMutationPath
         WatcherMutationPath = $WatcherMutationPath
         RealLaunchArtifactPath = $RealLaunchArtifactPath
+        UpdateMetadataPath = $UpdateMetadataPath
+        UpdateAssetPath = $UpdateAssetPath
+        UpdateLaunchRecordPath = $UpdateLaunchRecordPath
+        UpdateCheckRecordPath = $UpdateCheckRecordPath
         SecretSentinel = $SecretSentinel
         InitialStepwiseUrl = $InitialStepwiseUrl
         SavedStepwiseUrl = $SavedStepwiseUrl
@@ -398,6 +420,10 @@ function Assert-MaintenanceSettingsFixtureSetup {
         $Fixture.EntrypointMutationPath,
         $Fixture.WatcherMutationPath,
         $Fixture.RealLaunchArtifactPath
+        $Fixture.UpdateMetadataPath
+        $Fixture.UpdateAssetPath
+        $Fixture.UpdateLaunchRecordPath
+        $Fixture.UpdateCheckRecordPath
     )) {
         $Resolved = [IO.Path]::GetFullPath([string]$FixturePath)
         if (-not $Resolved.StartsWith($SampleRoot, [StringComparison]::OrdinalIgnoreCase)) {
@@ -414,6 +440,8 @@ function Assert-MaintenanceSettingsFixtureSetup {
         $Fixture.LatestStatusPath,
         $Fixture.WatcherFlagPath,
         $Fixture.PathPickerResponsesPath
+        $Fixture.UpdateMetadataPath
+        $Fixture.UpdateAssetPath
     )) {
         if (-not (Test-Path -LiteralPath $RequiredFile -PathType Leaf)) {
             throw "maintenance/settings fixture file is missing: $RequiredFile"
@@ -427,6 +455,8 @@ function Assert-MaintenanceSettingsFixtureSetup {
         $Fixture.EntrypointMutationPath,
         $Fixture.WatcherMutationPath,
         $Fixture.RealLaunchArtifactPath
+        $Fixture.UpdateLaunchRecordPath
+        $Fixture.UpdateCheckRecordPath
     )) {
         if (Test-Path -LiteralPath $UnexpectedRecord) {
             throw "maintenance/settings fixture record was not clean: $UnexpectedRecord"
@@ -444,6 +474,10 @@ function Assert-MaintenanceSettingsFixtureSetup {
         CODEX_PLUS_NATIVE_PATH_PICKER_RECORD_PATH = $Fixture.PathPickerRecordPath
         CODEX_PLUS_NATIVE_STEPWISE_TEST_RECORD_PATH = $Fixture.StepwiseRecordPath
         CODEX_PLUS_NATIVE_STEPWISE_TEST_RESULT = $Fixture.StepwiseResult
+        CODEX_PLUS_NATIVE_UPDATE_METADATA_PATH = $Fixture.UpdateMetadataPath
+        CODEX_PLUS_NATIVE_UPDATE_ASSET_PATH = $Fixture.UpdateAssetPath
+        CODEX_PLUS_NATIVE_UPDATE_LAUNCH_RECORD_PATH = $Fixture.UpdateLaunchRecordPath
+        CODEX_PLUS_NATIVE_UPDATE_CHECK_RECORD_PATH = $Fixture.UpdateCheckRecordPath
     }
     foreach ($Name in $ExpectedEnvironment.Keys) {
         $Actual = [Environment]::GetEnvironmentVariable($Name, 'Process')
@@ -969,6 +1003,14 @@ function Invoke-NativeSample {
             $MaintenanceSettingsFixture.StepwiseRecordPath
         $env:CODEX_PLUS_NATIVE_STEPWISE_TEST_RESULT = `
             $MaintenanceSettingsFixture.StepwiseResult
+        $env:CODEX_PLUS_NATIVE_UPDATE_METADATA_PATH = `
+            $MaintenanceSettingsFixture.UpdateMetadataPath
+        $env:CODEX_PLUS_NATIVE_UPDATE_ASSET_PATH = `
+            $MaintenanceSettingsFixture.UpdateAssetPath
+        $env:CODEX_PLUS_NATIVE_UPDATE_LAUNCH_RECORD_PATH = `
+            $MaintenanceSettingsFixture.UpdateLaunchRecordPath
+        $env:CODEX_PLUS_NATIVE_UPDATE_CHECK_RECORD_PATH = `
+            $MaintenanceSettingsFixture.UpdateCheckRecordPath
         $env:CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY = '1'
         $env:OPENAI_CODEX_PLUS_PERF_SENTINEL = 'present'
 
@@ -999,6 +1041,14 @@ function Invoke-NativeSample {
         }
         if ($Process.ExitCode -ne 0) {
             throw "$Name exited with code $($Process.ExitCode)"
+        }
+        $UpdateChecks = @(Get-Content -LiteralPath `
+            $MaintenanceSettingsFixture.UpdateCheckRecordPath)
+        if ($UpdateChecks.Count -ne 1 -or $UpdateChecks[0] -ne 'check') {
+            throw "$Name did not perform exactly one isolated startup update check"
+        }
+        if (Test-Path -LiteralPath $MaintenanceSettingsFixture.UpdateLaunchRecordPath) {
+            throw "$Name unexpectedly launched the update fixture"
         }
 
         $Report = Wait-ForReport -Path $ReportPath
@@ -1652,6 +1702,10 @@ foreach ($Name in @(
     'CODEX_PLUS_NATIVE_PATH_PICKER_RECORD_PATH',
     'CODEX_PLUS_NATIVE_STEPWISE_TEST_RECORD_PATH',
     'CODEX_PLUS_NATIVE_STEPWISE_TEST_RESULT',
+    'CODEX_PLUS_NATIVE_UPDATE_METADATA_PATH',
+    'CODEX_PLUS_NATIVE_UPDATE_ASSET_PATH',
+    'CODEX_PLUS_NATIVE_UPDATE_LAUNCH_RECORD_PATH',
+    'CODEX_PLUS_NATIVE_UPDATE_CHECK_RECORD_PATH',
     'CODEX_PLUS_NATIVE_ENV_PROCESS_ONLY',
     'OPENAI_CODEX_PLUS_PERF_SENTINEL'
 )) {

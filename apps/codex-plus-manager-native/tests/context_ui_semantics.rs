@@ -155,6 +155,7 @@ fn model(locale: Locale) -> ShellViewModel {
         overview_error: None,
         last_updated: Some("12:34:56 UTC".to_owned()),
         renderer: "WGPU".to_owned(),
+        update: Default::default(),
     }
 }
 

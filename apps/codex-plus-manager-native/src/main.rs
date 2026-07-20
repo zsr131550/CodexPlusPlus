@@ -1,9 +1,12 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use codex_plus_core::update::current_update_target;
 use codex_plus_manager_native::app::{NativeManagerApp, NativeManagerSources};
 use codex_plus_manager_native::desktop_host::{
     APP_ID, APP_TITLE, DesktopHostBootstrap, DesktopHostRuntime, NativePersistencePaths,
@@ -16,7 +19,9 @@ use codex_plus_manager_service::{
     ContextToolsService, DesktopStartupArgs, EnhancementSettingsService, MaintenanceService,
     ManagerSettingsService, OverviewService, PluginMarketplaceService, ProviderImportService,
     ProviderService, ProviderSyncService, RelayEnvironmentService, SessionService,
-    SystemProviderEnvironment, UserScriptService, ZedRemoteService,
+    SystemProviderEnvironment, SystemUpdateEnvironment, UpdateDownload, UpdateEnvironment,
+    UpdateEnvironmentError, UpdateEnvironmentErrorKind, UpdateService, UpdateSource,
+    UserScriptService, ZedRemoteService,
 };
 use eframe::egui;
 
@@ -26,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     configure_diagnostic_log_from_env();
     let process_started = Instant::now();
     let persistence_paths = NativePersistencePaths::for_state_override(native_state_override());
+    let update_fixture = update_fixture_paths_from_environment()?;
     if let Err(error) = persistence_paths.migrate_legacy_if_needed() {
         let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
             "native_manager.preference_migration_failed",
@@ -112,6 +118,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::new(ManagerSettingsService::new(environment.clone()));
             let overview_service = Arc::new(OverviewService::new(environment.clone()));
             let environment_service = Arc::new(RelayEnvironmentService::new(environment));
+            let update_service = update_source(
+                persistence_paths.state_root().join("updates"),
+                update_fixture.clone(),
+            )?;
             let desktop_host =
                 DesktopHostRuntime::start(desktop_host, creation.egui_ctx.clone(), Locale::ZhCn)
                     .inspect_err(|error| {
@@ -135,6 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     zed_remote: zed_remote_service,
                     maintenance: maintenance_service,
                     settings: manager_settings_service,
+                    update: update_service,
                     path_picker: path_picker_from_environment(),
                 },
                 perf,
@@ -236,4 +247,199 @@ mod tests {
             eframe::wgpu::Backends::DX12
         );
     }
+
+    #[test]
+    fn update_fixture_requires_all_paths_and_never_partially_falls_back() {
+        assert!(
+            resolve_update_fixture_paths(None, None, None, None)
+                .unwrap()
+                .is_none()
+        );
+        let paths = resolve_update_fixture_paths(
+            Some(PathBuf::from("metadata.json")),
+            Some(PathBuf::from("asset.exe")),
+            Some(PathBuf::from("launch.record")),
+            Some(PathBuf::from("check.record")),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(paths.asset, PathBuf::from("asset.exe"));
+        assert!(
+            resolve_update_fixture_paths(Some(PathBuf::from("metadata.json")), None, None, None,)
+                .is_err()
+        );
+    }
+}
+
+#[derive(Clone)]
+struct UpdateFixturePaths {
+    metadata: PathBuf,
+    asset: PathBuf,
+    launch_record: PathBuf,
+    check_record: PathBuf,
+}
+
+fn update_fixture_paths_from_environment() -> std::io::Result<Option<UpdateFixturePaths>> {
+    resolve_update_fixture_paths(
+        fixture_path("CODEX_PLUS_NATIVE_UPDATE_METADATA_PATH"),
+        fixture_path("CODEX_PLUS_NATIVE_UPDATE_ASSET_PATH"),
+        fixture_path("CODEX_PLUS_NATIVE_UPDATE_LAUNCH_RECORD_PATH"),
+        fixture_path("CODEX_PLUS_NATIVE_UPDATE_CHECK_RECORD_PATH"),
+    )
+}
+
+fn fixture_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn resolve_update_fixture_paths(
+    metadata: Option<PathBuf>,
+    asset: Option<PathBuf>,
+    launch_record: Option<PathBuf>,
+    check_record: Option<PathBuf>,
+) -> std::io::Result<Option<UpdateFixturePaths>> {
+    match (metadata, asset, launch_record, check_record) {
+        (None, None, None, None) => Ok(None),
+        (Some(metadata), Some(asset), Some(launch_record), Some(check_record)) => {
+            Ok(Some(UpdateFixturePaths {
+                metadata,
+                asset,
+                launch_record,
+                check_record,
+            }))
+        }
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "native update fixture requires metadata, asset, launch, and check paths",
+        )),
+    }
+}
+
+fn update_source(
+    update_root: PathBuf,
+    fixture: Option<UpdateFixturePaths>,
+) -> Result<Arc<dyn UpdateSource>, UpdateEnvironmentError> {
+    if let Some(paths) = fixture {
+        Ok(Arc::new(UpdateService::new(FixtureUpdateEnvironment {
+            paths,
+        })))
+    } else {
+        Ok(Arc::new(UpdateService::new(SystemUpdateEnvironment::new(
+            update_root,
+        )?)))
+    }
+}
+
+struct FixtureUpdateEnvironment {
+    paths: UpdateFixturePaths,
+}
+
+impl UpdateEnvironment for FixtureUpdateEnvironment {
+    type Artifact = Vec<u8>;
+
+    fn current_version(&self) -> String {
+        env!("CARGO_PKG_VERSION").to_owned()
+    }
+
+    fn target(&self) -> codex_plus_core::update::UpdateTarget {
+        current_update_target()
+    }
+
+    fn fetch_release_metadata(
+        &self,
+        maximum_bytes: usize,
+    ) -> Result<Vec<u8>, UpdateEnvironmentError> {
+        let mut check_record = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.paths.check_record)
+            .map_err(|error| fixture_update_error(UpdateEnvironmentErrorKind::Filesystem, error))?;
+        check_record
+            .write_all(b"check\n")
+            .map_err(|error| fixture_update_error(UpdateEnvironmentErrorKind::Filesystem, error))?;
+        let file = File::open(&self.paths.metadata)
+            .map_err(|error| fixture_update_error(UpdateEnvironmentErrorKind::Transport, error))?;
+        let mut bytes = Vec::new();
+        file.take(maximum_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| fixture_update_error(UpdateEnvironmentErrorKind::Transport, error))?;
+        Ok(bytes)
+    }
+
+    fn open_asset_download(&self, url: &str) -> Result<UpdateDownload, UpdateEnvironmentError> {
+        let file = File::open(&self.paths.asset)
+            .map_err(|error| fixture_update_error(UpdateEnvironmentErrorKind::Transport, error))?;
+        let length = file
+            .metadata()
+            .map_err(|error| fixture_update_error(UpdateEnvironmentErrorKind::Transport, error))?
+            .len();
+        Ok(UpdateDownload::new(
+            url.to_owned(),
+            Some(length),
+            FixtureAssetChunks { file },
+        ))
+    }
+
+    fn create_update_artifact(
+        &self,
+        _safe_name: &str,
+    ) -> Result<Self::Artifact, UpdateEnvironmentError> {
+        Ok(Vec::new())
+    }
+
+    fn publish_update_artifact(
+        &self,
+        _artifact: &mut Self::Artifact,
+    ) -> Result<(), UpdateEnvironmentError> {
+        Ok(())
+    }
+
+    fn cleanup_update_artifact(&self, artifact: &mut Self::Artifact) {
+        artifact.clear();
+    }
+
+    fn launch_update_artifact(
+        &self,
+        artifact: &Self::Artifact,
+    ) -> Result<(), UpdateEnvironmentError> {
+        let mut record = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.paths.launch_record)
+            .map_err(|error| fixture_update_error(UpdateEnvironmentErrorKind::Launcher, error))?;
+        writeln!(record, "launched_bytes={}", artifact.len())
+            .map_err(|error| fixture_update_error(UpdateEnvironmentErrorKind::Launcher, error))
+    }
+}
+
+struct FixtureAssetChunks {
+    file: File,
+}
+
+impl Iterator for FixtureAssetChunks {
+    type Item = Result<Vec<u8>, UpdateEnvironmentError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut bytes = vec![0_u8; 8 * 1024];
+        match self.file.read(&mut bytes) {
+            Ok(0) => None,
+            Ok(length) => {
+                bytes.truncate(length);
+                Some(Ok(bytes))
+            }
+            Err(error) => Some(Err(fixture_update_error(
+                UpdateEnvironmentErrorKind::Transport,
+                error,
+            ))),
+        }
+    }
+}
+
+fn fixture_update_error(
+    kind: UpdateEnvironmentErrorKind,
+    error: impl std::fmt::Display,
+) -> UpdateEnvironmentError {
+    UpdateEnvironmentError::new(kind, error.to_string())
 }

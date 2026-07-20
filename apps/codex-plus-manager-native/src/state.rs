@@ -11,6 +11,7 @@ pub mod marketplace;
 pub mod provider;
 pub mod sessions;
 pub mod settings;
+pub mod update;
 pub mod user_scripts;
 pub mod zed_remote;
 
@@ -113,6 +114,7 @@ pub struct AppState {
     pub zed_remote: zed_remote::ZedRemoteViewState,
     pub maintenance: maintenance::MaintenanceViewState,
     pub settings: settings::SettingsViewState,
+    pub update: update::UpdateViewState,
 }
 
 impl AppState {

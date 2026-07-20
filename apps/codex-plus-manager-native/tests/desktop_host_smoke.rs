@@ -52,6 +52,49 @@ fn desktop_host_real_window_primary_secondary_protocol_and_tray_smoke() {
     assert!(!fixture.endpoint_path.exists());
 }
 
+#[test]
+#[ignore = "opens a real native window and exercises the fake update launcher"]
+fn native_update_real_window_fake_launch_and_explicit_exit_smoke() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = SmokeFixture::new(temp.path());
+    fixture.make_update_available();
+    let mut command = fixture.command();
+    command.env("CODEX_PLUS_NATIVE_PERF_SCENARIO", "update-smoke");
+    let mut primary = ChildGuard::new(command.spawn().unwrap());
+
+    wait_for_file(
+        &fixture.endpoint_path,
+        &mut primary,
+        Duration::from_secs(20),
+    );
+    let status = primary.wait(Duration::from_secs(20));
+
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read_to_string(&fixture.check_record_path)
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    let launch = std::fs::read_to_string(&fixture.launch_record_path).unwrap();
+    assert_eq!(launch.lines().count(), 1);
+    assert_eq!(launch.trim(), "launched_bytes=20");
+    assert!(fixture.persistence_path.is_file());
+    assert!(!fixture.endpoint_path.exists());
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fixture.perf_report_path).unwrap()).unwrap();
+    assert_eq!(
+        report["script_actions"],
+        serde_json::json!([
+            "navigate_about",
+            "request_update_install",
+            "confirm_update_install"
+        ])
+    );
+}
+
 struct SmokeFixture {
     root: PathBuf,
     state_dir: PathBuf,
@@ -59,21 +102,66 @@ struct SmokeFixture {
     pending_import_path: PathBuf,
     persistence_path: PathBuf,
     perf_report_path: PathBuf,
+    update_metadata_path: PathBuf,
+    update_asset_path: PathBuf,
+    launch_record_path: PathBuf,
+    check_record_path: PathBuf,
     port: u16,
 }
 
 impl SmokeFixture {
     fn new(root: &Path) -> Self {
         let state_dir = root.join("state");
-        Self {
+        let fixture = Self {
             root: root.to_path_buf(),
             endpoint_path: state_dir.join("manager-instance-endpoint.json"),
             pending_import_path: root.join("pending-provider-import.json"),
             persistence_path: state_dir.join("manager-ui/app.ron"),
             perf_report_path: root.join("perf.json"),
+            update_metadata_path: root.join("update-metadata.json"),
+            update_asset_path: root.join("update-asset.bin"),
+            launch_record_path: root.join("update-launch.record"),
+            check_record_path: root.join("update-check.record"),
             state_dir,
             port: available_port(),
-        }
+        };
+        std::fs::write(
+            &fixture.update_metadata_path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "body": "fixture current release"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&fixture.update_asset_path, b"fixture-update-asset").unwrap();
+        fixture
+    }
+
+    fn make_update_available(&self) {
+        std::fs::write(
+            &self.update_metadata_path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": "99.0.0",
+                "body": "bounded fixture release summary",
+                "assets": [
+                    {
+                        "name": "CodexPlusPlus-99.0.0-windows-x64-setup.exe",
+                        "url": "https://updates.invalid/CodexPlusPlus-99.0.0-windows-x64-setup.exe"
+                    },
+                    {
+                        "name": "CodexPlusPlus-99.0.0-macos-x64.dmg",
+                        "url": "https://updates.invalid/CodexPlusPlus-99.0.0-macos-x64.dmg"
+                    },
+                    {
+                        "name": "CodexPlusPlus-99.0.0-macos-arm64.dmg",
+                        "url": "https://updates.invalid/CodexPlusPlus-99.0.0-macos-arm64.dmg"
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     }
 
     fn command(&self) -> Command {
@@ -110,6 +198,22 @@ impl SmokeFixture {
             .env(
                 "CODEX_PLUS_NATIVE_WATCHER_DISABLED_FLAG_PATH",
                 self.root.join("watcher.disabled"),
+            )
+            .env(
+                "CODEX_PLUS_NATIVE_UPDATE_METADATA_PATH",
+                &self.update_metadata_path,
+            )
+            .env(
+                "CODEX_PLUS_NATIVE_UPDATE_ASSET_PATH",
+                &self.update_asset_path,
+            )
+            .env(
+                "CODEX_PLUS_NATIVE_UPDATE_LAUNCH_RECORD_PATH",
+                &self.launch_record_path,
+            )
+            .env(
+                "CODEX_PLUS_NATIVE_UPDATE_CHECK_RECORD_PATH",
+                &self.check_record_path,
             )
             .env("CODEX_PLUS_NATIVE_PERF_REPORT", &self.perf_report_path)
             .env("CODEX_PLUS_NATIVE_PERF_EXIT_AFTER_MS", "8000")

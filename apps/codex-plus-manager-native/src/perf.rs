@@ -117,6 +117,16 @@ pub enum PerfScriptAction {
     NavigateEnhancements,
     EditEnhancements,
     SaveEnhancements,
+    NavigateAbout,
+    RequestUpdateInstall,
+    ConfirmUpdateInstall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PerfScriptMode {
+    #[default]
+    Standard,
+    UpdateSmoke,
 }
 
 enum PerfEvent {
@@ -139,6 +149,7 @@ pub struct PerfRecorder {
     exit_after: Option<Duration>,
     close_requested: bool,
     final_sent: bool,
+    script_mode: PerfScriptMode,
 }
 
 impl PerfRecorder {
@@ -150,6 +161,10 @@ impl PerfRecorder {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .map(Duration::from_millis);
+        let script_mode = match std::env::var("CODEX_PLUS_NATIVE_PERF_SCENARIO").as_deref() {
+            Ok("update-smoke") => PerfScriptMode::UpdateSmoke,
+            _ => PerfScriptMode::Standard,
+        };
         let (event_tx, event_rx) = mpsc::channel();
         thread::Builder::new()
             .name("native-perf-reporter".to_owned())
@@ -167,12 +182,17 @@ impl PerfRecorder {
             exit_after,
             close_requested: false,
             final_sent: false,
+            script_mode,
         })
     }
 
     pub fn drive(&mut self, ctx: &egui::Context) -> bool {
         let elapsed = self.process_started.elapsed();
-        if elapsed < SCRIPT_DURATION {
+        let script_duration = match self.script_mode {
+            PerfScriptMode::Standard => SCRIPT_DURATION,
+            PerfScriptMode::UpdateSmoke => Duration::from_secs(2),
+        };
+        if elapsed < script_duration {
             ctx.request_repaint_after(FRAME_INTERVAL);
         }
 
@@ -190,7 +210,11 @@ impl PerfRecorder {
     }
 
     pub fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
-        if let Some((due, key, action)) = script_step(self.next_script_step)
+        let step = match self.script_mode {
+            PerfScriptMode::Standard => script_step(self.next_script_step),
+            PerfScriptMode::UpdateSmoke => update_smoke_script_step(self.next_script_step),
+        };
+        if let Some((due, key, action)) = step
             && self.process_started.elapsed() >= due
         {
             let now = Instant::now();
@@ -430,6 +454,17 @@ fn script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> 
     })
 }
 
+fn update_smoke_script_step(index: usize) -> Option<(Duration, egui::Key, PerfScriptAction)> {
+    let (key, action) = match index {
+        0 => (egui::Key::F1, PerfScriptAction::NavigateAbout),
+        1 => (egui::Key::F2, PerfScriptAction::RequestUpdateInstall),
+        2 => (egui::Key::F3, PerfScriptAction::ConfirmUpdateInstall),
+        _ => return None,
+    };
+    let milliseconds = u64::try_from(index + 1).expect("script index fits u64") * 500;
+    Some((Duration::from_millis(milliseconds), key, action))
+}
+
 impl PerfScriptAction {
     fn name(self) -> &'static str {
         match self {
@@ -528,6 +563,9 @@ impl PerfScriptAction {
             Self::NavigateEnhancements => "navigate_enhancements",
             Self::EditEnhancements => "edit_enhancements",
             Self::SaveEnhancements => "save_enhancements",
+            Self::NavigateAbout => "navigate_about",
+            Self::RequestUpdateInstall => "request_update_install",
+            Self::ConfirmUpdateInstall => "confirm_update_install",
         }
     }
 }
@@ -611,7 +649,7 @@ mod tests {
 
     use super::{
         PerfReport, PerfScriptAction, SCRIPT_DURATION, maximum_ms, percentile_ms, script_step,
-        write_report,
+        update_smoke_script_step, write_report,
     };
 
     #[test]
@@ -773,6 +811,22 @@ mod tests {
                 Some((Duration::from_millis(milliseconds), egui::Key::F35, action)),
             );
         }
+    }
+
+    #[test]
+    fn update_smoke_script_requires_navigation_request_and_confirmation() {
+        let expected = [
+            (500, egui::Key::F1, PerfScriptAction::NavigateAbout),
+            (1_000, egui::Key::F2, PerfScriptAction::RequestUpdateInstall),
+            (1_500, egui::Key::F3, PerfScriptAction::ConfirmUpdateInstall),
+        ];
+        for (index, (milliseconds, key, action)) in expected.into_iter().enumerate() {
+            assert_eq!(
+                update_smoke_script_step(index),
+                Some((Duration::from_millis(milliseconds), key, action))
+            );
+        }
+        assert_eq!(update_smoke_script_step(expected.len()), None);
     }
 
     #[test]

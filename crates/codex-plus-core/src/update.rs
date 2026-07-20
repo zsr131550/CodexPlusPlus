@@ -6,6 +6,40 @@ use serde_json::Value;
 pub const DEFAULT_REPOSITORY: &str = "BigPizzaV3/CodexPlusPlus";
 pub const DEFAULT_LATEST_JSON_URL: &str =
     "https://github.com/BigPizzaV3/CodexPlusPlus/releases/latest/download/latest.json";
+pub const MAX_RELEASE_METADATA_BYTES: usize = 1024 * 1024;
+pub const MAX_RELEASE_SUMMARY_BYTES: usize = 16 * 1024;
+pub const MAX_UPDATE_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateTarget {
+    WindowsX64,
+    MacosX64,
+    MacosArm64,
+    Unsupported,
+}
+
+pub fn current_update_target() -> UpdateTarget {
+    #[cfg(windows)]
+    {
+        UpdateTarget::WindowsX64
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        UpdateTarget::MacosX64
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        UpdateTarget::MacosArm64
+    }
+    #[cfg(not(any(
+        windows,
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    )))]
+    {
+        UpdateTarget::Unsupported
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseAsset {
@@ -93,17 +127,36 @@ pub fn release_from_github_payload(payload: &Value) -> anyhow::Result<Release> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        body: payload
-            .get("body")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        body: normalize_release_summary(
+            payload
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
         asset_name: selected.as_ref().map(|asset| asset.name.clone()),
         asset_url: selected.map(|asset| asset.browser_download_url),
     })
 }
 
 pub fn release_from_latest_json_payload(payload: &Value) -> anyhow::Result<Release> {
+    release_from_latest_json_payload_for(payload, current_update_target())
+}
+
+pub fn release_from_latest_json_bytes_for(
+    payload: &[u8],
+    target: UpdateTarget,
+) -> anyhow::Result<Release> {
+    if payload.len() > MAX_RELEASE_METADATA_BYTES {
+        anyhow::bail!("release metadata exceeds {MAX_RELEASE_METADATA_BYTES} bytes");
+    }
+    let payload = serde_json::from_slice::<Value>(payload)?;
+    release_from_latest_json_payload_for(&payload, target)
+}
+
+fn release_from_latest_json_payload_for(
+    payload: &Value,
+    target: UpdateTarget,
+) -> anyhow::Result<Release> {
     let version = payload
         .get("version")
         .or_else(|| payload.get("tag_name"))
@@ -125,7 +178,7 @@ pub fn release_from_latest_json_payload(payload: &Value) -> anyhow::Result<Relea
             Some((name, url))
         })
         .collect::<Vec<_>>();
-    let selected = select_update_asset(&assets);
+    let selected = select_update_asset_for(&assets, target);
     Ok(Release {
         version,
         url: payload
@@ -134,29 +187,37 @@ pub fn release_from_latest_json_payload(payload: &Value) -> anyhow::Result<Relea
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        body: payload
-            .get("body")
-            .or_else(|| payload.get("release_summary"))
-            .or_else(|| payload.get("notes"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        body: normalize_release_summary(
+            payload
+                .get("body")
+                .or_else(|| payload.get("release_summary"))
+                .or_else(|| payload.get("notes"))
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
         asset_name: selected.as_ref().map(|asset| asset.name.clone()),
         asset_url: selected.map(|asset| asset.browser_download_url),
     })
 }
 
 pub fn select_update_asset(assets: &[(String, String)]) -> Option<ReleaseAsset> {
+    select_update_asset_for(assets, current_update_target())
+}
+
+pub fn select_update_asset_for(
+    assets: &[(String, String)],
+    target: UpdateTarget,
+) -> Option<ReleaseAsset> {
     let named = assets
         .iter()
         .filter(|(name, url)| !name.trim().is_empty() && !url.trim().is_empty());
     let mut best: Option<(u8, &str, &str)> = None;
     for (name, url) in named {
-        let rank = platform_asset_rank(&name.to_ascii_lowercase());
+        let rank = platform_asset_rank(&name.to_ascii_lowercase(), target);
         if rank >= 2 {
             continue;
         }
-        if best.map_or(true, |(r, _, _)| rank < r) {
+        if best.is_none_or(|(r, _, _)| rank < r) {
             best = Some((rank, name.as_str(), url.as_str()));
         }
     }
@@ -164,6 +225,43 @@ pub fn select_update_asset(assets: &[(String, String)]) -> Option<ReleaseAsset> 
         name: name.to_string(),
         browser_download_url: url.to_string(),
     })
+}
+
+pub fn normalize_release_summary(value: &str) -> String {
+    let mut output = String::with_capacity(value.len().min(MAX_RELEASE_SUMMARY_BYTES));
+    let mut characters = value.chars().peekable();
+    while let Some(mut character) = characters.next() {
+        if character == '\r' {
+            if characters.peek() == Some(&'\n') {
+                characters.next();
+            }
+            character = '\n';
+        } else if character.is_control() && character != '\n' && character != '\t' {
+            character = ' ';
+        }
+        if output.len() + character.len_utf8() > MAX_RELEASE_SUMMARY_BYTES {
+            break;
+        }
+        output.push(character);
+    }
+    output
+}
+
+pub fn validate_update_asset_for(asset: &ReleaseAsset, target: UpdateTarget) -> anyhow::Result<()> {
+    safe_asset_name(&asset.name)?;
+    validate_update_response_url(&asset.browser_download_url)?;
+    if platform_asset_rank(&asset.name.to_ascii_lowercase(), target) >= 2 {
+        anyhow::bail!("release asset does not match the update target");
+    }
+    Ok(())
+}
+
+pub fn validate_update_response_url(value: &str) -> anyhow::Result<()> {
+    let url = reqwest::Url::parse(value).map_err(|_| anyhow::anyhow!("invalid update URL"))?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        anyhow::bail!("update URL must use HTTPS");
+    }
+    Ok(())
 }
 
 pub async fn fetch_latest_release(latest_json_url: &str) -> anyhow::Result<Release> {
@@ -235,48 +333,72 @@ pub fn download_asset_to(
 }
 
 pub fn safe_asset_name(name: &str) -> anyhow::Result<String> {
-    if name.trim().is_empty() {
-        anyhow::bail!("非法 Release asset 文件名: {name}");
+    if name.is_empty()
+        || name.len() > 255
+        || name.trim() != name
+        || name.ends_with(['.', ' '])
+        || name
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\' | ':'))
+    {
+        anyhow::bail!("invalid release asset filename");
     }
     let path = Path::new(name);
     if path.components().count() != 1 {
-        anyhow::bail!("非法 Release asset 文件名: {name}");
+        anyhow::bail!("invalid release asset filename");
     }
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("非法 Release asset 文件名: {name}"))?;
+        .ok_or_else(|| anyhow::anyhow!("invalid release asset filename"))?;
     if file_name == "." || file_name == ".." {
-        anyhow::bail!("非法 Release asset 文件名: {name}");
+        anyhow::bail!("invalid release asset filename");
+    }
+    let device = file_name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || is_numbered_windows_device(&device, "COM")
+        || is_numbered_windows_device(&device, "LPT")
+    {
+        anyhow::bail!("invalid release asset filename");
     }
     Ok(file_name.to_string())
 }
 
-fn platform_asset_rank(name: &str) -> u8 {
+fn is_numbered_windows_device(value: &str, prefix: &str) -> bool {
+    value
+        .strip_prefix(prefix)
+        .is_some_and(|suffix| matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+}
+
+fn platform_asset_rank(name: &str, target: UpdateTarget) -> u8 {
     // 0 = exact match (current OS + native arch)
     // 1 = same OS, other arch (acceptable fallback, e.g. x86_64 on arm64 or vice versa)
     // 2 = wrong platform
-    if cfg!(target_os = "macos") {
+    if matches!(target, UpdateTarget::MacosX64 | UpdateTarget::MacosArm64) {
         if !is_macos_installer_asset(name) {
             return 2;
         }
-        if is_macos_native_arch_asset(name) {
+        if is_macos_native_arch_asset(name, target) {
             return 0;
         }
         return 1;
     }
-    if cfg!(windows) && is_windows_installer_asset(name) {
+    if target == UpdateTarget::WindowsX64 && is_windows_installer_asset(name) {
         return 0;
     }
     2
 }
 
-fn is_macos_native_arch_asset(name: &str) -> bool {
+fn is_macos_native_arch_asset(name: &str, target: UpdateTarget) -> bool {
     let lower = name.to_ascii_lowercase();
-    let native_arch_token = match std::env::consts::ARCH {
-        "x86_64" => "x64",
-        "aarch64" => "arm64",
-        _ => return true, // unknown arch — accept anything
+    let native_arch_token = match target {
+        UpdateTarget::MacosX64 => "x64",
+        UpdateTarget::MacosArm64 => "arm64",
+        _ => return false,
     };
     // Modern filename shape: `...-macos-x64.dmg` or `...-macos-arm64.dmg`
     if lower.contains(&format!("-{native_arch_token}.")) {

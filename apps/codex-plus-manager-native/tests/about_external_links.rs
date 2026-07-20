@@ -48,12 +48,13 @@ fn about_link_click_emits_only_the_validated_egui_command() {
 
 fn harness(locale: Locale) -> Harness<'static, ShellViewModel> {
     Harness::builder()
-        .with_size(egui::vec2(760.0, 520.0))
+        .with_size(egui::vec2(760.0, 720.0))
         .build_ui_state(render, common::model(locale, ThemeMode::Dark))
 }
 
 fn render(ui: &mut egui::Ui, model: &mut ShellViewModel) {
     egui_extras::install_image_loaders(ui.ctx());
     theme::apply(ui.ctx(), model.theme);
-    about::render(ui, model);
+    let mut actions = Vec::new();
+    about::render(ui, model, &model.update, &mut actions);
 }

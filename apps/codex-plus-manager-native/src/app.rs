@@ -11,7 +11,7 @@ use codex_plus_manager_service::{
     ProviderCommonConfigExtraction, ProviderErrorKind, ProviderImportSource,
     ProviderNetworkFailureKind, ProviderProfile, ProviderSource, ProviderSyncSource,
     RelayEnvironmentSource, SafeSettingsGroup, ScriptIntegrity, SessionSource, TestProviderProfile,
-    UserScriptOrigin, UserScriptRevision, UserScriptSource, ZedRemoteSource,
+    UpdateSource, UserScriptOrigin, UserScriptRevision, UserScriptSource, ZedRemoteSource,
 };
 use eframe::egui;
 
@@ -36,6 +36,7 @@ use crate::runtime::provider::{
 };
 use crate::runtime::sessions::{SessionDispatcher, SessionResponse};
 use crate::runtime::settings::{SettingsDispatcher, SettingsResponse};
+use crate::runtime::update::{UpdateDispatcher, UpdateResponse};
 use crate::runtime::user_scripts::{UserScriptDispatcher, UserScriptResponse};
 use crate::runtime::zed_remote::{ZedRemoteDispatcher, ZedRemoteResponse};
 use crate::runtime::{DispatchError, OverviewDispatcher};
@@ -57,10 +58,12 @@ use crate::state::sessions::{ProviderSyncFailureKind, SessionFailureKind};
 use crate::state::settings::{
     SettingsFailure, SettingsLoadPhase, SettingsResetRequest, SettingsTab, SettingsTransition,
 };
+use crate::state::update::{UpdateFailureKind, UpdateInstallEffect};
 use crate::state::user_scripts::{ScriptsTab, UserScriptFailureKind};
 use crate::state::zed_remote::{ZedRemoteFailureKind, ZedRemoteLoadPhase};
 use crate::state::{AppState, OverviewFailureKind, OverviewPhase, Route};
 use crate::theme;
+use crate::views::about::UpdateAction;
 use crate::views::context::ContextAction;
 use crate::views::enhancements::EnhancementAction;
 use crate::views::environment::EnvironmentAction;
@@ -89,6 +92,7 @@ pub struct NativeManagerSources {
     pub zed_remote: Arc<dyn ZedRemoteSource>,
     pub maintenance: Arc<dyn MaintenanceSource>,
     pub settings: Arc<dyn ManagerSettingsSource>,
+    pub update: Arc<dyn UpdateSource>,
     pub path_picker: Arc<dyn PathPicker>,
 }
 
@@ -108,6 +112,7 @@ pub struct NativeManagerApp {
     zed_remote_dispatcher: ZedRemoteDispatcher,
     maintenance_dispatcher: MaintenanceDispatcher,
     settings_dispatcher: SettingsDispatcher,
+    update_dispatcher: UpdateDispatcher,
     path_picker_dispatcher: PathPickerDispatcher,
     last_updated: Option<String>,
     overview_worker_stopped: bool,
@@ -121,6 +126,7 @@ pub struct NativeManagerApp {
     user_script_worker_stopped: bool,
     zed_remote_worker_stopped: bool,
     maintenance_worker_stopped: bool,
+    update_worker_stopped: bool,
     path_picker_worker_stopped: bool,
     window_focused: bool,
     pending_route: Option<Route>,
@@ -221,6 +227,11 @@ impl NativeManagerApp {
             sources.settings,
             Arc::new(move || settings_repaint_context.request_repaint()),
         );
+        let update_repaint_context = creation.egui_ctx.clone();
+        let update_dispatcher = UpdateDispatcher::spawn(
+            sources.update,
+            Arc::new(move || update_repaint_context.request_repaint()),
+        );
         let picker_repaint_context = creation.egui_ctx.clone();
         let path_picker_dispatcher = PathPickerDispatcher::spawn(
             sources.path_picker,
@@ -242,6 +253,7 @@ impl NativeManagerApp {
             zed_remote_dispatcher,
             maintenance_dispatcher,
             settings_dispatcher,
+            update_dispatcher,
             path_picker_dispatcher,
             last_updated: None,
             overview_worker_stopped: false,
@@ -255,6 +267,7 @@ impl NativeManagerApp {
             user_script_worker_stopped: false,
             zed_remote_worker_stopped: false,
             maintenance_worker_stopped: false,
+            update_worker_stopped: false,
             path_picker_worker_stopped: false,
             window_focused: true,
             pending_route: None,
@@ -270,6 +283,7 @@ impl NativeManagerApp {
         app.refresh_overview();
         app.load_providers();
         app.load_pending_import();
+        app.request_update_check(true);
         app
     }
 
@@ -320,7 +334,10 @@ impl NativeManagerApp {
                 }
                 DesktopHostEffect::Focus => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
                 DesktopHostEffect::ReloadPendingProviderImport => self.load_pending_import(),
-                DesktopHostEffect::ShowUpdate => self.navigate(Route::About),
+                DesktopHostEffect::ShowUpdate => {
+                    self.navigate(Route::About);
+                    self.request_update_check(false);
+                }
                 DesktopHostEffect::RequestExit => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close)
                 }
@@ -335,6 +352,45 @@ impl NativeManagerApp {
             self.state
                 .overview
                 .apply_response(request_id, Err(OverviewFailureKind::WorkerStopped));
+        }
+    }
+
+    fn request_update_check(&mut self, silent: bool) {
+        let Some(request_id) = self.state.update.begin_check(silent) else {
+            return;
+        };
+        if self.update_dispatcher.request_check(request_id).is_err() {
+            self.update_worker_stopped = true;
+            let _ = self
+                .state
+                .update
+                .apply_check_response(request_id, Err(UpdateFailureKind::WorkerStopped));
+        }
+    }
+
+    fn apply_update_action(&mut self, action: UpdateAction) {
+        match action {
+            UpdateAction::Check => self.request_update_check(false),
+            UpdateAction::RequestInstall => {
+                let _ = self.state.update.request_install_confirmation();
+            }
+            UpdateAction::CancelInstall => self.state.update.cancel_install_confirmation(),
+            UpdateAction::ConfirmInstall => {
+                let Some((request_id, request)) = self.state.update.confirm_install() else {
+                    return;
+                };
+                if self
+                    .update_dispatcher
+                    .request_install(request_id, request)
+                    .is_err()
+                {
+                    self.update_worker_stopped = true;
+                    let _ = self
+                        .state
+                        .update
+                        .apply_install_response(request_id, Err(UpdateFailureKind::WorkerStopped));
+                }
+            }
         }
     }
 
@@ -434,7 +490,8 @@ impl NativeManagerApp {
                     self.load_context_workspace();
                     self.inspect_plugin_marketplaces();
                 }
-                Route::Overview | Route::About => self.refresh_overview(),
+                Route::About => self.request_update_check(false),
+                Route::Overview => self.refresh_overview(),
             },
             ShellAction::Retry => match self.state.route {
                 Route::Environment => self.inspect_environment(),
@@ -448,7 +505,8 @@ impl NativeManagerApp {
                     self.load_context_workspace();
                     self.inspect_plugin_marketplaces();
                 }
-                Route::Overview | Route::Providers | Route::About => self.refresh_overview(),
+                Route::About => self.request_update_check(false),
+                Route::Overview | Route::Providers => self.refresh_overview(),
             },
             ShellAction::SetLocale(locale) => {
                 self.persisted.locale = locale;
@@ -471,6 +529,7 @@ impl NativeManagerApp {
             ShellAction::ZedRemote(action) => self.apply_zed_remote_action(ctx, action),
             ShellAction::Maintenance(action) => self.apply_maintenance_action(ctx, action),
             ShellAction::Settings(action) => self.apply_settings_action(action),
+            ShellAction::Update(action) => self.apply_update_action(action),
         }
         ctx.request_repaint();
     }
@@ -1940,6 +1999,47 @@ impl NativeManagerApp {
         }
     }
 
+    fn reduce_update_responses(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        loop {
+            match self.update_dispatcher.try_recv() {
+                Ok(Some(UpdateResponse::Checked { request_id, result })) => {
+                    let result = result.map_err(|error| UpdateFailureKind::from(error.kind()));
+                    let _ = self.state.update.apply_check_response(request_id, result);
+                }
+                Ok(Some(UpdateResponse::Progress {
+                    request_id,
+                    progress,
+                })) => {
+                    let _ = self.state.update.apply_progress(request_id, progress);
+                }
+                Ok(Some(UpdateResponse::Installed { request_id, result })) => {
+                    let result = result.map_err(|error| UpdateFailureKind::from(error.kind()));
+                    if self.state.update.apply_install_response(request_id, result)
+                        == UpdateInstallEffect::RequestExit
+                    {
+                        if let Some(storage) = frame.storage_mut() {
+                            persistence::save(storage, &self.persisted);
+                            storage.flush();
+                        }
+                        if self.desktop_host.is_some() {
+                            self.apply_desktop_host_event(ctx, DesktopHostEvent::TrayQuit);
+                        } else {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(DispatchError::WorkerStopped) => {
+                    if !self.update_worker_stopped {
+                        self.update_worker_stopped = true;
+                        self.state.update.fail_worker();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     fn reduce_provider_responses(&mut self) {
         loop {
             match self.provider_dispatcher.try_recv_store() {
@@ -2856,6 +2956,7 @@ impl NativeManagerApp {
             overview_error: self.state.overview.error,
             last_updated: self.last_updated.clone(),
             renderer: "WGPU".to_owned(),
+            update: self.state.update.clone(),
         }
     }
 
@@ -3307,6 +3408,13 @@ impl NativeManagerApp {
             PerfScriptAction::SaveEnhancements => {
                 Some(ShellAction::Enhancements(EnhancementAction::Save))
             }
+            PerfScriptAction::NavigateAbout => Some(ShellAction::Navigate(Route::About)),
+            PerfScriptAction::RequestUpdateInstall => {
+                Some(ShellAction::Update(UpdateAction::RequestInstall))
+            }
+            PerfScriptAction::ConfirmUpdateInstall => {
+                Some(ShellAction::Update(UpdateAction::ConfirmInstall))
+            }
         };
         if let Some(action) = shell_action {
             self.apply_action(ctx, action);
@@ -3315,9 +3423,10 @@ impl NativeManagerApp {
 }
 
 impl eframe::App for NativeManagerApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.reduce_desktop_host(ctx);
         self.reduce_overview_responses();
+        self.reduce_update_responses(ctx, frame);
         self.reduce_provider_responses();
         self.reduce_activation_responses();
         self.reduce_import_responses();

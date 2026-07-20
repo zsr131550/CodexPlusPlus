@@ -989,6 +989,7 @@ dependencies = [
  "anyhow",
  "codex-plus-core",
  "codex-plus-data",
+ "reqwest 0.12.28",
  "rusqlite",
  "serde",
  "serde_json",

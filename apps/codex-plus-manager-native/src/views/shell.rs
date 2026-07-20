@@ -14,6 +14,7 @@ use crate::state::provider::OperationPhase;
 use crate::state::provider::{ProviderLoadPhase, ProviderViewState};
 use crate::state::sessions::SessionViewState;
 use crate::state::settings::{SettingsLoadPhase, SettingsViewState};
+use crate::state::update::UpdateViewState;
 use crate::state::user_scripts::{ScriptsTab, UserScriptViewState};
 use crate::state::zed_remote::{ZedRemoteLoadPhase, ZedRemoteViewState};
 use crate::state::{OverviewFailureKind, OverviewPhase, Route};
@@ -46,6 +47,7 @@ pub enum ShellAction {
     ZedRemote(zed_remote::ZedRemoteAction),
     Maintenance(maintenance::MaintenanceAction),
     Settings(settings::SettingsAction),
+    Update(about::UpdateAction),
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +60,7 @@ pub struct ShellViewModel {
     pub overview_error: Option<OverviewFailureKind>,
     pub last_updated: Option<String>,
     pub renderer: String,
+    pub update: UpdateViewState,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -257,7 +260,11 @@ pub fn render_shell(
                     actions.extend(settings_actions.into_iter().map(ShellAction::Settings));
                 }
             }
-            Route::About => about::render(ui, model),
+            Route::About => {
+                let mut update_actions = Vec::new();
+                about::render(ui, model, &model.update, &mut update_actions);
+                actions.extend(update_actions.into_iter().map(ShellAction::Update));
+            }
         });
 
     if let (Some(import_state), Some(provider_state)) = (import_state, provider_state) {

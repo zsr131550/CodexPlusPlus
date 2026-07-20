@@ -11,6 +11,7 @@ use codex_plus_core::relay_environment::{
     ClashVergeTunCheck, CodexEnvFileCheck, ProxyEnvironmentCheck, RelayEnvironmentReport,
 };
 use codex_plus_core::settings::{BackendSettings, RelayProtocol};
+use codex_plus_core::update::UpdateTarget;
 use codex_plus_core::zed_remote::{
     SshTarget, ZedAvailability, ZedOpenStrategy, ZedRemoteProjectSource, ZedRemoteRegistryRevision,
 };
@@ -34,6 +35,7 @@ use codex_plus_manager_native::state::sessions::{
 use codex_plus_manager_native::state::settings::{
     SettingsFailure, SettingsFailureKind, SettingsTab, SettingsViewState,
 };
+use codex_plus_manager_native::state::update::{UpdateFailureKind, UpdateViewState};
 use codex_plus_manager_native::state::user_scripts::{
     ScriptsTab, UserScriptFailureKind, UserScriptViewState,
 };
@@ -45,20 +47,21 @@ use codex_plus_manager_service::{
     ContextEntrySummary, ContextKind, ContextOwnershipOutcome, ContextSyncDiffSummary,
     ContextSyncGuard, ContextSyncKeys, ContextSyncOutcome, ContextSyncPreview,
     ContextToolsErrorKind, ContextWorkspace, EnhancementSettingsEnvironment,
-    EnhancementSettingsService, LaunchOutcome, MaintenanceSection, ManagerSettingsWorkspace,
-    PluginMarketplaceErrorKind, PluginMarketplaceKind, PluginMarketplaceRevision,
-    PluginMarketplaceStatus, PluginMarketplaceWorkspace, PrivateArgument, PrivatePath, PrivateUrl,
-    ProviderActivationSummary, ProviderCommonConfigExtraction, ProviderDocument,
-    ProviderLiveRevision, ProviderRevision, ProviderSyncErrorKind, ProviderSyncRevision,
-    ProviderSyncTargetList, ProviderSyncTargetOption, ProviderSyncTargetSource,
-    ProviderSyncWorkspace, ProviderWorkspace, RelayEnvironmentWorkspace, SafeSettingsGroup,
-    ScriptIntegrity, ScriptMarketRevision, ScriptMarketSummary, ScriptMarketWorkspace,
-    SectionValue, SessionDeleteBatchOutcome, SessionDeleteOutcome, SessionRevision, SessionSummary,
-    SessionWorkspace, StepwiseTestOutcome, UserScriptBackupEvidence, UserScriptErrorKind,
-    UserScriptMutationOutcome, UserScriptOrigin, UserScriptRevision, UserScriptStatus,
-    UserScriptSummary, UserScriptWorkspace, ZedProjectRevision, ZedRememberOutcome,
-    ZedRemoteErrorKind, ZedRemoteOpenOutcome, ZedRemoteProjectSummary, ZedRemoteWorkspace,
-    ZedSettingsRevision,
+    EnhancementSettingsService, InstallStarted, LaunchOutcome, MaintenanceSection,
+    ManagerSettingsWorkspace, PluginMarketplaceErrorKind, PluginMarketplaceKind,
+    PluginMarketplaceRevision, PluginMarketplaceStatus, PluginMarketplaceWorkspace,
+    PrivateArgument, PrivatePath, PrivateUrl, ProviderActivationSummary,
+    ProviderCommonConfigExtraction, ProviderDocument, ProviderLiveRevision, ProviderRevision,
+    ProviderSyncErrorKind, ProviderSyncRevision, ProviderSyncTargetList, ProviderSyncTargetOption,
+    ProviderSyncTargetSource, ProviderSyncWorkspace, ProviderWorkspace, RelayEnvironmentWorkspace,
+    SafeSettingsGroup, ScriptIntegrity, ScriptMarketRevision, ScriptMarketSummary,
+    ScriptMarketWorkspace, SectionValue, SessionDeleteBatchOutcome, SessionDeleteOutcome,
+    SessionRevision, SessionSummary, SessionWorkspace, StepwiseTestOutcome, UpdateAvailability,
+    UpdateCheckResult, UpdateDownload, UpdateEnvironment, UpdateEnvironmentError, UpdateProgress,
+    UpdateService, UserScriptBackupEvidence, UserScriptErrorKind, UserScriptMutationOutcome,
+    UserScriptOrigin, UserScriptRevision, UserScriptStatus, UserScriptSummary, UserScriptWorkspace,
+    ZedProjectRevision, ZedRememberOutcome, ZedRemoteErrorKind, ZedRemoteOpenOutcome,
+    ZedRemoteProjectSummary, ZedRemoteWorkspace, ZedSettingsRevision,
 };
 use eframe::egui;
 use egui_kittest::{Harness, SnapshotOptions, SnapshotResults, kittest::Queryable};
@@ -212,6 +215,18 @@ enum SettingsSnapshotScenario {
     ImageResetConfirmation,
     ArgumentsConflict,
     StepwiseTestSuccess,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UpdateSnapshotScenario {
+    Idle,
+    Checking,
+    Current,
+    Available,
+    Confirmation,
+    Downloading,
+    Launching,
+    Error,
 }
 
 const CASES: &[(f32, f32, Locale, ThemeMode, &str)] = &[
@@ -562,6 +577,17 @@ const SETTINGS_SCENARIOS: &[(SettingsSnapshotScenario, &str)] = &[
     ),
 ];
 
+const UPDATE_SCENARIOS: &[(UpdateSnapshotScenario, &str)] = &[
+    (UpdateSnapshotScenario::Idle, "idle"),
+    (UpdateSnapshotScenario::Checking, "checking"),
+    (UpdateSnapshotScenario::Current, "current"),
+    (UpdateSnapshotScenario::Available, "available"),
+    (UpdateSnapshotScenario::Confirmation, "confirmation"),
+    (UpdateSnapshotScenario::Downloading, "downloading"),
+    (UpdateSnapshotScenario::Launching, "launching"),
+    (UpdateSnapshotScenario::Error, "error"),
+];
+
 #[test]
 fn overview_wgpu_snapshot_matrix() {
     if std::env::var_os("CODEX_PLUS_UI_SNAPSHOTS").as_deref() != Some("1".as_ref()) {
@@ -690,6 +716,16 @@ fn settings_wgpu_snapshot_matrix() {
     let _guard = snapshot_test_guard();
 
     run_settings_snapshot_matrix();
+}
+
+#[test]
+fn update_wgpu_snapshot_matrix() {
+    if std::env::var_os("CODEX_PLUS_UI_SNAPSHOTS").as_deref() != Some("1".as_ref()) {
+        return;
+    }
+    let _guard = snapshot_test_guard();
+
+    run_update_snapshot_matrix();
 }
 
 fn snapshot_test_guard() -> MutexGuard<'static, ()> {
@@ -1604,6 +1640,262 @@ fn run_settings_snapshot_matrix() {
     }
 
     results.unwrap();
+}
+
+fn run_update_snapshot_matrix() {
+    let font = fonts::load_cjk_font().expect("Windows CJK font is required for UI snapshots");
+    let snapshots = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    let mut results = SnapshotResults::new();
+
+    for &(scenario, scenario_name) in UPDATE_SCENARIOS {
+        for &(width, height, locale, mode, viewport_name) in OPERATIONAL_VIEWPORTS {
+            let options = SnapshotOptions::new().output_path(&snapshots);
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(width, height))
+                .with_theme(match mode {
+                    ThemeMode::Dark => egui::Theme::Dark,
+                    ThemeMode::Light => egui::Theme::Light,
+                })
+                .with_os(egui::os::OperatingSystem::Windows)
+                .with_options(options)
+                .wgpu()
+                .build_ui_state(
+                    |ui, state: &mut SnapshotState| {
+                        if let Some(bytes) = state.cjk_font.take() {
+                            egui_extras::install_image_loaders(ui.ctx());
+                            fonts::install_cjk_font(ui.ctx(), bytes);
+                            theme::apply(ui.ctx(), state.model.theme);
+                        }
+                        let _ = render_shell(ui, &state.model, ShellFeatureStates::default());
+                    },
+                    SnapshotState {
+                        model: {
+                            let mut model = common::model(locale, mode);
+                            model.route = Route::About;
+                            model.update = update_snapshot_state(scenario);
+                            model
+                        },
+                        provider: None,
+                        provider_import: None,
+                        environment: None,
+                        context: None,
+                        marketplace: None,
+                        sessions: None,
+                        user_scripts: None,
+                        cjk_font: Some(font.clone()),
+                    },
+                );
+
+            harness.remove_cursor();
+            if matches!(
+                scenario,
+                UpdateSnapshotScenario::Checking | UpdateSnapshotScenario::Launching
+            ) {
+                harness.run_steps(2);
+            } else {
+                harness.run();
+            }
+            assert_update_snapshot_layout(&harness, scenario, locale, width, height);
+            let tree = format!("{:#?}", harness.root());
+            assert!(!tree.contains("updates.invalid"), "{tree}");
+            assert!(!tree.contains("private-update-path"), "{tree}");
+            let image = harness.render().expect("update snapshot should render");
+            assert_nonblank_render!(image, scenario_name);
+            harness.snapshot(format!("update_{scenario_name}_{viewport_name}"));
+            results.extend_harness(&mut harness);
+        }
+    }
+
+    results.unwrap();
+}
+
+fn assert_update_snapshot_layout(
+    harness: &Harness<'_, SnapshotState>,
+    scenario: UpdateSnapshotScenario,
+    locale: Locale,
+    width: f32,
+    height: f32,
+) {
+    let header = match locale {
+        Locale::ZhCn => "关于 Codex++",
+        Locale::En => "About Codex++",
+    };
+    assert_inside(harness.get_by_label(header).rect(), width, height, header);
+    let repository = match locale {
+        Locale::ZhCn => "项目仓库",
+        Locale::En => "Project repository",
+    };
+    assert_inside(
+        harness.get_by_label(repository).rect(),
+        width,
+        height,
+        repository,
+    );
+    let label = match (locale, scenario) {
+        (Locale::ZhCn, UpdateSnapshotScenario::Idle) => "尚未检查更新",
+        (Locale::En, UpdateSnapshotScenario::Idle) => "Updates have not been checked",
+        (Locale::ZhCn, UpdateSnapshotScenario::Checking) => "正在检查更新...",
+        (Locale::En, UpdateSnapshotScenario::Checking) => "Checking for updates...",
+        (Locale::ZhCn, UpdateSnapshotScenario::Current) => "Codex++ 已是最新版本",
+        (Locale::En, UpdateSnapshotScenario::Current) => "Codex++ is up to date",
+        (_, UpdateSnapshotScenario::Available | UpdateSnapshotScenario::Confirmation) => {
+            match locale {
+                Locale::ZhCn => "版本 99.0.0 可以安装",
+                Locale::En => "Version 99.0.0 is available",
+            }
+        }
+        (_, UpdateSnapshotScenario::Downloading) => "40 / 100 bytes",
+        (Locale::ZhCn, UpdateSnapshotScenario::Launching) => "安装器已打开，正在退出 Codex++...",
+        (Locale::En, UpdateSnapshotScenario::Launching) => "Installer opened. Exiting Codex++...",
+        (Locale::ZhCn, UpdateSnapshotScenario::Error) => "更新操作失败，请重试",
+        (Locale::En, UpdateSnapshotScenario::Error) => "The update operation failed. Try again.",
+    };
+    assert_inside(harness.get_by_label(label).rect(), width, height, label);
+    if matches!(scenario, UpdateSnapshotScenario::Confirmation) {
+        let title = match locale {
+            Locale::ZhCn => "确认更新",
+            Locale::En => "Confirm update",
+        };
+        assert_inside(harness.get_by_label(title).rect(), width, height, title);
+    }
+}
+
+fn update_snapshot_state(scenario: UpdateSnapshotScenario) -> UpdateViewState {
+    let mut state = UpdateViewState::default();
+    match scenario {
+        UpdateSnapshotScenario::Idle => {}
+        UpdateSnapshotScenario::Checking => {
+            let first = state.begin_check(false).unwrap();
+            let _ = state.apply_check_response(first, Ok(available_update_result()));
+            let _ = state.begin_check(true);
+        }
+        UpdateSnapshotScenario::Current => {
+            let request = state.begin_check(false).unwrap();
+            let _ = state.apply_check_response(
+                request,
+                Ok(Arc::new(UpdateCheckResult {
+                    installed_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    latest_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    summary: String::new(),
+                    availability: UpdateAvailability::Current,
+                })),
+            );
+        }
+        UpdateSnapshotScenario::Available => {
+            install_available_update(&mut state);
+        }
+        UpdateSnapshotScenario::Confirmation => {
+            install_available_update(&mut state);
+            let _ = state.request_install_confirmation();
+        }
+        UpdateSnapshotScenario::Downloading => {
+            install_available_update(&mut state);
+            let _ = state.request_install_confirmation();
+            let (request, _) = state.confirm_install().unwrap();
+            let _ = state.apply_progress(
+                request,
+                UpdateProgress {
+                    downloaded_bytes: 40,
+                    total_bytes: Some(100),
+                },
+            );
+        }
+        UpdateSnapshotScenario::Launching => {
+            install_available_update(&mut state);
+            let _ = state.request_install_confirmation();
+            let (request, _) = state.confirm_install().unwrap();
+            let _ = state.apply_install_response(
+                request,
+                Ok(InstallStarted {
+                    version: "99.0.0".to_owned(),
+                }),
+            );
+        }
+        UpdateSnapshotScenario::Error => {
+            let first = state.begin_check(false).unwrap();
+            let _ = state.apply_check_response(
+                first,
+                Ok(Arc::new(UpdateCheckResult {
+                    installed_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    latest_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    summary: String::new(),
+                    availability: UpdateAvailability::Current,
+                })),
+            );
+            let retry = state.begin_check(false).unwrap();
+            let _ = state.apply_check_response(retry, Err(UpdateFailureKind::MetadataFetchFailed));
+        }
+    }
+    state
+}
+
+fn install_available_update(state: &mut UpdateViewState) {
+    let request = state.begin_check(false).unwrap();
+    let _ = state.apply_check_response(request, Ok(available_update_result()));
+}
+
+fn available_update_result() -> Arc<UpdateCheckResult> {
+    Arc::new(
+        UpdateService::new(SnapshotUpdateEnvironment)
+            .check()
+            .unwrap(),
+    )
+}
+
+struct SnapshotUpdateEnvironment;
+
+impl UpdateEnvironment for SnapshotUpdateEnvironment {
+    type Artifact = Vec<u8>;
+
+    fn current_version(&self) -> String {
+        env!("CARGO_PKG_VERSION").to_owned()
+    }
+
+    fn target(&self) -> UpdateTarget {
+        UpdateTarget::WindowsX64
+    }
+
+    fn fetch_release_metadata(
+        &self,
+        _maximum_bytes: usize,
+    ) -> Result<Vec<u8>, UpdateEnvironmentError> {
+        Ok(serde_json::to_vec(&serde_json::json!({
+            "version": "99.0.0",
+            "body": "Safe bounded release summary for the Native update workflow.",
+            "assets": [{
+                "name": "CodexPlusPlus-99.0.0-windows-x64-setup.exe",
+                "url": "https://updates.invalid/CodexPlusPlus-99.0.0-windows-x64-setup.exe"
+            }]
+        }))
+        .unwrap())
+    }
+
+    fn open_asset_download(&self, _url: &str) -> Result<UpdateDownload, UpdateEnvironmentError> {
+        panic!("snapshot never downloads")
+    }
+
+    fn create_update_artifact(
+        &self,
+        _safe_name: &str,
+    ) -> Result<Self::Artifact, UpdateEnvironmentError> {
+        panic!("snapshot never creates artifacts")
+    }
+
+    fn publish_update_artifact(
+        &self,
+        _artifact: &mut Self::Artifact,
+    ) -> Result<(), UpdateEnvironmentError> {
+        panic!("snapshot never publishes artifacts")
+    }
+
+    fn cleanup_update_artifact(&self, _artifact: &mut Self::Artifact) {}
+
+    fn launch_update_artifact(
+        &self,
+        _artifact: &Self::Artifact,
+    ) -> Result<(), UpdateEnvironmentError> {
+        panic!("snapshot never launches artifacts")
+    }
 }
 
 fn assert_maintenance_snapshot_layout(

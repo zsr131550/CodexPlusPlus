@@ -18,6 +18,7 @@ mod relay_environment;
 mod revision_ledger;
 mod sessions;
 mod system;
+mod update;
 mod user_scripts;
 mod zed_remote;
 
@@ -123,6 +124,12 @@ pub use sessions::{
     SessionSource, SessionSummary, SessionWorkspace,
 };
 pub use system::{SystemOverviewEnvironment, SystemOverviewSource};
+pub use update::{
+    InstallStarted, InstallUpdate, SystemUpdateArtifact, SystemUpdateEnvironment,
+    UpdateAvailability, UpdateCandidate, UpdateCheckResult, UpdateDownload, UpdateEnvironment,
+    UpdateEnvironmentError, UpdateEnvironmentErrorKind, UpdateError, UpdateErrorKind, UpdateLimits,
+    UpdateProgress, UpdateProgressSink, UpdateRevision, UpdateService, UpdateSource,
+};
 pub use user_scripts::{
     DeleteUserScript, InstallMarketScript, ScriptHomepage, ScriptIntegrity,
     ScriptMarketCompatibilityWorkspace, ScriptMarketRevision, ScriptMarketSummary,

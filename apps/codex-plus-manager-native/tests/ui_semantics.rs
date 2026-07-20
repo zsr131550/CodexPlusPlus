@@ -36,6 +36,7 @@ fn render_test_shell(ui: &mut egui::Ui, state: &mut TestShellState) {
             ShellAction::SetLocale(locale) => state.model.locale = locale,
             ShellAction::SetTheme(theme) => state.model.theme = theme,
             ShellAction::Refresh | ShellAction::Retry => {}
+            ShellAction::Update(_) => {}
             ShellAction::Provider(_) => {}
             ShellAction::Import(_)
             | ShellAction::Environment(_)
