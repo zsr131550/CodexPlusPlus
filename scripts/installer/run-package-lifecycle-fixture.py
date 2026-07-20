@@ -139,8 +139,17 @@ def remove_owned(install_root: Path, owned: list[str]) -> None:
 
 
 def assert_install_root_empty(install_root: Path) -> None:
-    if any(install_root.rglob("*")):
-        fail("package uninstall left package-owned directories or links")
+    residual = sorted(
+        path.relative_to(install_root).as_posix()
+        for path in install_root.rglob("*")
+    )
+    if residual:
+        preview = ", ".join(residual[:16])
+        suffix = "..." if len(residual) > 16 else ""
+        fail(
+            "package uninstall left package-owned directories or links: "
+            f"count={len(residual)} [{preview}{suffix}]"
+        )
 
 
 def seed_canaries(data_root: Path) -> dict[str, object]:
