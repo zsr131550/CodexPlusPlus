@@ -542,16 +542,6 @@ type DiagnosticsResult = CommandResult<{
   report: string;
 }>;
 
-type WatcherResult = CommandResult<{
-  enabled: boolean;
-  disabled_flag: string;
-}>;
-
-type InstallResult = CommandResult<{
-  silent_shortcut: { installed: boolean; path: string | null };
-  management_shortcut: { installed: boolean; path: string | null };
-}>;
-
 type UpdateResult = CommandResult<{
   currentVersion: string;
   latestVersion?: string | null;
@@ -765,7 +755,6 @@ export function App() {
   const [liveContextEntries, setLiveContextEntries] = useState<CodexContextEntries | null>(null);
   const [logs, setLogs] = useState<LogsResult | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
-  const [watcher, setWatcher] = useState<WatcherResult | null>(null);
   const [update, setUpdate] = useState<UpdateResult | null>(null);
   const [updateInstallProgress, setUpdateInstallProgress] = useState<TaskProgress>({
     active: false,
@@ -799,7 +788,6 @@ export function App() {
   });
   const [providerSyncTargets, setProviderSyncTargets] = useState<ProviderSyncTargetsResult | null>(null);
   const [selectedProviderSyncTarget, setSelectedProviderSyncTarget] = useState("");
-  const [removeOwnedData, setRemoveOwnedData] = useState(false);
   const [relaySwitching, setRelaySwitching] = useState(false);
 
   const call = <T,>(command: string, args?: Record<string, unknown>) => invoke<T>(command, args);
@@ -1132,14 +1120,6 @@ export function App() {
     }
   };
 
-  const refreshWatcher = async (silent = false) => {
-    const result = await run(() => call<WatcherResult>("load_watcher_state"));
-    if (result) {
-      setWatcher(result);
-      if (!silent) showResultNotice(t("Watcher 状态"), result, { silentSuccess: true });
-    }
-  };
-
   const navigate = async (next: Route) => {
     setRoute(next);
     if (next === "overview") await refreshOverview(true);
@@ -1190,30 +1170,22 @@ export function App() {
     if (next === "maintenance") {
       await Promise.all([
         refreshOverview(true),
-        refreshWatcher(true),
+        refreshSettings(true),
       ]);
     }
   };
 
   const launch = async () => {
-    const result = await launchCommand("launch_codex_plus");
+    const result = await launchCommand();
     if (result) {
       showNotice(t("启动任务"), result.message, result.status);
       await refreshOverview(true);
     }
   };
 
-  const restart = async () => {
-    const result = await launchCommand("restart_codex_plus");
-    if (result) {
-      showNotice(t("重启 Codex++"), result.message, result.status);
-      await refreshOverview(true);
-    }
-  };
-
-  const launchCommand = async (command: "launch_codex_plus" | "restart_codex_plus") => {
+  const launchCommand = async () => {
     const result = await run(() =>
-      call<CommandResult<Record<string, unknown>>>(command, {
+      call<CommandResult<Record<string, unknown>>>("launch_codex_plus", {
         request: {
           appPath: launchForm.appPath,
           debugPort: numberOrDefault(launchForm.debugPort, 9229),
@@ -1321,42 +1293,6 @@ export function App() {
     }
   };
 
-  const installEntrypoints = async () => {
-    const result = await run(() => call<InstallResult>("install_entrypoints"));
-    if (result) {
-      showNotice(t("入口安装"), result.message, result.status);
-      await refreshOverview(true);
-    }
-  };
-
-  const uninstallEntrypoints = async () => {
-    const result = await run(() =>
-      call<InstallResult>("uninstall_entrypoints", {
-        options: { removeOwnedData },
-      }),
-    );
-    if (result) {
-      showNotice(t("入口卸载"), result.message, result.status);
-      await refreshOverview(true);
-    }
-  };
-
-  const repairShortcuts = async () => {
-    const result = await run(() => call<InstallResult>("repair_shortcuts"));
-    if (result) {
-      showNotice(t("快捷方式修复"), result.message, result.status);
-      await refreshOverview(true);
-    }
-  };
-
-  const watcherAction = async (command: string) => {
-    const result = await run(() => call<WatcherResult>(command));
-    if (result) {
-      setWatcher(result);
-      showNotice(t("Watcher 操作"), result.message, result.status);
-    }
-  };
-
   const checkUpdate = async (silent = false) => {
     const result = await run(() => call<UpdateResult>("check_update"));
     if (result) {
@@ -1437,15 +1373,6 @@ export function App() {
       setSettings(result);
       setSettingsForm(normalizeSettings(result.settings));
       if (!silent || !isSuccessStatus(result.status)) showNotice(t("设置保存"), result.message, result.status);
-    }
-  };
-
-  const resetSettings = async () => {
-    const result = await run(() => call<SettingsResult>("reset_settings"));
-    if (result) {
-      setSettings(result);
-      setSettingsForm(normalizeSettings(result.settings));
-      showNotice(t("设置重置"), result.message, result.status);
     }
   };
 
@@ -1923,19 +1850,14 @@ export function App() {
     () => ({
       refreshCurrent: () => navigate(route),
       launch,
-      restart,
       repairPluginMarketplace,
       refreshRemotePluginMarketplace,
       repairRemotePluginMarketplace,
-      installEntrypoints,
-      uninstallEntrypoints,
-      repairShortcuts,
       checkUpdate,
       performUpdate,
       saveSettings,
       saveSettingsValue,
       refreshSettings,
-      resetSettings,
       resetImageOverlaySettings,
       chooseCodexAppPath: async (mode: "folder" | "file") => {
         let selected: unknown;
@@ -2061,16 +1983,11 @@ export function App() {
       checkHealth: async () => {
         await refreshOverview(true);
         await refreshRelay(true);
-        await refreshWatcher(true);
-        showNotice(t("检查完成"), t("已刷新 Codex 应用、入口和 Watcher 状态。"), "ok");
+        showNotice(t("检查完成"), t("已刷新 Codex 应用和入口状态。"), "ok");
       },
-      installWatcher: () => watcherAction("install_watcher"),
-      uninstallWatcher: () => watcherAction("uninstall_watcher"),
-      enableWatcher: () => watcherAction("enable_watcher"),
-      disableWatcher: () => watcherAction("disable_watcher"),
       toggleTheme: () => setTheme((current) => (current === "dark" ? "light" : "dark")),
     }),
-    [route, launchForm, settingsForm, settings, removeOwnedData, update, updateInstallProgress.active, logs, diagnostics, theme, relayFiles, localSessions, zedRemoteProjects, selectedProviderSyncTarget, envConflicts, relayEnvironment, ccsProviders],
+    [route, launchForm, settingsForm, settings, update, updateInstallProgress.active, logs, diagnostics, theme, relayFiles, localSessions, zedRemoteProjects, selectedProviderSyncTarget, envConflicts, relayEnvironment, ccsProviders],
   );
   const hasUpdate = update?.updateAvailable === true;
 
@@ -2142,10 +2059,6 @@ export function App() {
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>
-            <Button onClick={() => void actions.restart()} title={t("重启 Codex++")} variant="outline">
-              <Rocket className="h-4 w-4" />
-              {t("重启 Codex++")}
-            </Button>
             <Button onClick={() => void actions.refreshCurrent()} size="icon" title={t("刷新当前页面")} variant="outline">
               <RefreshCw className="h-4 w-4" />
             </Button>
@@ -2211,12 +2124,9 @@ export function App() {
           {route === "maintenance" ? (
             <MaintenanceScreen
               overview={overview}
-              watcher={watcher}
               settings={settings}
               launchForm={launchForm}
               onLaunchFormChange={setLaunchForm}
-              removeOwnedData={removeOwnedData}
-              onRemoveOwnedDataChange={setRemoveOwnedData}
               actions={actions}
             />
           ) : null}
@@ -2269,19 +2179,14 @@ export function App() {
 type Actions = {
   refreshCurrent: () => Promise<void>;
   launch: () => Promise<void>;
-  restart: () => Promise<void>;
   repairPluginMarketplace: () => Promise<void>;
   refreshRemotePluginMarketplace: (silent?: boolean) => Promise<RemotePluginMarketplaceResult | null>;
   repairRemotePluginMarketplace: () => Promise<void>;
-  installEntrypoints: () => Promise<void>;
-  uninstallEntrypoints: () => Promise<void>;
-  repairShortcuts: () => Promise<void>;
   checkUpdate: () => Promise<void>;
   performUpdate: () => Promise<void>;
   saveSettings: () => Promise<void>;
   saveSettingsValue: (settings: BackendSettings, silent?: boolean) => Promise<void>;
   refreshSettings: (silent?: boolean) => Promise<BackendSettings | null>;
-  resetSettings: () => Promise<void>;
   resetImageOverlaySettings: () => Promise<void>;
   chooseCodexAppPath: (mode: "folder" | "file") => Promise<void>;
   clearCodexAppPath: () => Promise<void>;
@@ -2337,10 +2242,6 @@ type Actions = {
   copyLogs: () => Promise<void>;
   copyDiagnostics: () => Promise<void>;
   goLogs: () => Promise<void>;
-  installWatcher: () => Promise<void>;
-  uninstallWatcher: () => Promise<void>;
-  enableWatcher: () => Promise<void>;
-  disableWatcher: () => Promise<void>;
   toggleTheme: () => void;
   checkHealth: () => Promise<void>;
 };
@@ -2384,10 +2285,6 @@ function OverviewScreen({
             <Button onClick={() => void actions.checkHealth()}>
               <RefreshCw className="h-4 w-4" />
               {t("检查")}
-            </Button>
-            <Button variant="secondary" onClick={() => void actions.repairShortcuts()}>
-              <Wrench className="h-4 w-4" />
-              {t("修复入口")}
             </Button>
             <Button disabled={pluginMarketplaceProgress.active} variant="secondary" onClick={() => void actions.repairPluginMarketplace()}>
               {pluginMarketplaceProgress.active ? t("正在修复…") : t("修复插件市场")}
@@ -3313,63 +3210,30 @@ function SessionsScreen({
 
 function MaintenanceScreen({
   overview,
-  watcher,
   settings,
   launchForm,
   onLaunchFormChange,
-  removeOwnedData,
-  onRemoveOwnedDataChange,
   actions,
 }: {
   overview: OverviewResult | null;
-  watcher: WatcherResult | null;
   settings: SettingsResult | null;
   launchForm: { appPath: string; debugPort: string; helperPort: string };
   onLaunchFormChange: (next: { appPath: string; debugPort: string; helperPort: string }) => void;
-  removeOwnedData: boolean;
-  onRemoveOwnedDataChange: (value: boolean) => void;
   actions: Actions;
 }) {
   const savedCodexAppPath = settings?.settings.codexAppPath ?? "";
   return (
     <>
       <Panel>
-        <CardHead title={t("检查与修复")} detail={t("检查入口、Codex 应用和 Watcher 状态")} />
+        <CardHead title={t("检查")} detail={t("检查 Codex 应用和入口状态")} />
         <CardContent>
           <div className="status-table">
             <StatusRow title={t("Codex 应用")} status={overview?.codex_app.status} path={overview?.codex_app.path} />
             <StatusRow title={t("静默启动入口")} status={overview?.silent_shortcut.status} path={overview?.silent_shortcut.path} />
             <StatusRow title={t("管理控制台入口")} status={overview?.management_shortcut.status} path={overview?.management_shortcut.path} />
-            <StatusRow title={t("Watcher 自动接管")} status={watcher?.enabled ? "ok" : "disabled"} path={watcher?.disabled_flag} />
           </div>
           <Toolbar>
             <Button onClick={() => void actions.checkHealth()}>{t("检查")}</Button>
-            <Button variant="secondary" onClick={() => void actions.repairShortcuts()}>{t("修复快捷方式")}</Button>
-          </Toolbar>
-        </CardContent>
-      </Panel>
-      <Panel>
-        <CardHead title={t("入口管理")} detail={t("快捷方式写入系统实际桌面位置，不使用写死桌面路径")} />
-        <CardContent>
-          <label className="check-row">
-            <input checked={removeOwnedData} onChange={(event) => onRemoveOwnedDataChange(event.currentTarget.checked)} type="checkbox" />
-            <span>{t("卸载时移除 Codex++ 托管数据")}</span>
-          </label>
-          <Toolbar>
-            <Button onClick={() => void actions.installEntrypoints()}>{t("安装入口")}</Button>
-            <Button variant="secondary" onClick={() => void actions.uninstallEntrypoints()}>{t("卸载入口")}</Button>
-            <Button variant="secondary" onClick={() => void actions.repairShortcuts()}>{t("修复入口")}</Button>
-          </Toolbar>
-        </CardContent>
-      </Panel>
-      <Panel>
-        <CardHead title={t("自动接管")} detail={t("Watcher 用于保持 Codex++ 接管状态")} />
-        <CardContent>
-          <Toolbar>
-            <Button variant="secondary" onClick={() => void actions.installWatcher()}>{t("安装 watcher")}</Button>
-            <Button variant="secondary" onClick={() => void actions.uninstallWatcher()}>{t("移除 watcher")}</Button>
-            <Button variant="secondary" onClick={() => void actions.enableWatcher()}>{t("启用")}</Button>
-            <Button variant="secondary" onClick={() => void actions.disableWatcher()}>{t("禁用")}</Button>
           </Toolbar>
         </CardContent>
       </Panel>
@@ -5369,7 +5233,7 @@ function routeSubtitle(route: Route) {
     enhance: t("会话删除、导出、项目移动和脚本能力"),
     zedRemote: t("管理 Codex SSH 项目并加入 Zed workspace"),
     userScripts: t("内置和用户自定义脚本清单"),
-    maintenance: t("入口安装、修复、Watcher 与手动启动"),
+    maintenance: t("Codex 应用路径、手动启动与诊断"),
     about: t("版本信息、项目链接、GitHub Release 更新、日志与诊断"),
     settings: t("主题和启动参数"),
   };

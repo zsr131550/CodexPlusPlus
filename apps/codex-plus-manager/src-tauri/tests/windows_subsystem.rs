@@ -143,9 +143,21 @@ fn manager_launch_button_spawns_silent_launcher_binary() {
     let commands_rs =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands.rs"))
             .expect("read manager commands.rs");
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let provider_system = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .join("crates/codex-plus-manager-service/src/provider_system.rs");
+    let provider_system =
+        std::fs::read_to_string(provider_system).expect("read provider system source");
 
-    assert!(commands_rs.contains("SILENT_BINARY"));
-    assert!(commands_rs.contains("std::process::Command::new"));
+    assert!(commands_rs.contains("system_maintenance_source()"));
+    assert!(commands_rs.contains("LaunchCodex::compatibility"));
+    assert!(provider_system.contains("SystemCodexLaunchExecutor"));
+    assert!(provider_system.contains("SILENT_BINARY"));
+    assert!(provider_system.contains("spawn_companion"));
     assert!(!commands_rs.contains("launch_and_inject_with_hooks(options"));
 }
 

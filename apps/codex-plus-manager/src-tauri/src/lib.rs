@@ -1,6 +1,4 @@
 pub mod commands;
-pub mod install;
-
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -70,7 +68,6 @@ pub fn run() {
             commands::startup_options,
             commands::load_overview,
             commands::launch_codex_plus,
-            commands::restart_codex_plus,
             commands::load_settings,
             commands::save_settings,
             commands::load_ccs_providers,
@@ -90,23 +87,14 @@ pub fn run() {
             commands::set_user_script_enabled,
             commands::delete_user_script,
             commands::open_external_url,
-            commands::install_entrypoints,
-            commands::uninstall_entrypoints,
-            commands::repair_shortcuts,
             commands::plugin_marketplace_status,
             commands::repair_plugin_marketplace,
             commands::remote_plugin_marketplace_status,
             commands::repair_remote_plugin_marketplace,
             commands::check_update,
             commands::perform_update,
-            commands::load_watcher_state,
-            commands::install_watcher,
-            commands::uninstall_watcher,
-            commands::enable_watcher,
-            commands::disable_watcher,
             commands::read_latest_logs,
             commands::copy_diagnostics,
-            commands::reset_settings,
             commands::reset_image_overlay_settings,
             commands::relay_status,
             commands::read_relay_files,
@@ -205,7 +193,7 @@ fn install_tray<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
                 button: MouseButton::Left,
                 ..
             } => {
-                show_main_window(&tray.app_handle());
+                show_main_window(tray.app_handle());
             }
             _ => {}
         });
@@ -262,10 +250,10 @@ fn update_tray_labels<R: tauri::Runtime>(
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let show_item = MenuItem::with_id(&app, TRAY_MENU_SHOW, &show_label, true, None::<&str>);
         let quit_item = MenuItem::with_id(&app, TRAY_MENU_QUIT, &quit_label, true, None::<&str>);
-        if let (Ok(show), Ok(quit)) = (show_item, quit_item) {
-            if let Ok(menu) = Menu::with_items(&app, &[&show, &quit]) {
-                let _ = tray.set_menu(Some(menu));
-            }
+        if let (Ok(show), Ok(quit)) = (show_item, quit_item)
+            && let Ok(menu) = Menu::with_items(&app, &[&show, &quit])
+        {
+            let _ = tray.set_menu(Some(menu));
         }
     }
     if let Some(window) = app.get_webview_window("main") {

@@ -29,8 +29,6 @@ use codex_plus_manager_service::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::install::{self, InstallActionResult, InstallOptions};
-
 #[derive(Debug, Clone, Serialize)]
 pub struct CommandResult<T>
 where
@@ -369,12 +367,6 @@ pub struct DiagnosticsPayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct WatcherPayload {
-    pub enabled: bool,
-    pub disabled_flag: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct ScriptMarketPayload {
     pub market: Value,
     pub user_scripts: Value,
@@ -436,17 +428,6 @@ pub fn launch_codex_plus(request: LaunchRequest) -> CommandResult<Value> {
         system_maintenance_source(),
         request,
         "启动任务已在后台开始，可稍后查看概览状态。",
-    )
-}
-
-#[tauri::command]
-pub fn restart_codex_plus(request: LaunchRequest) -> CommandResult<Value> {
-    codex_plus_core::watcher::stop_launcher_processes_and_wait();
-    codex_plus_core::watcher::stop_codex_processes_and_wait();
-    launch_codex_plus_with(
-        system_maintenance_source(),
-        request,
-        "Codex 已请求重启，启动任务正在后台运行。",
     )
 }
 
@@ -1171,21 +1152,22 @@ fn strip_common_config_text_fallback(config_contents: &str, common_config: &str)
             continue;
         }
 
-        if in_root_section && let Some(key) = toml_key_from_line(trimmed) {
-            if common.root_keys.contains(key) {
-                let is_duplicate_common_key = removed_root_keys.contains(key)
-                    || source_root_keys.contains(key)
-                    || common.table_headers.contains("[features]")
-                    || common
-                        .table_headers
-                        .contains("[marketplaces.openai-bundled]")
-                    || common
-                        .table_headers
-                        .contains("[plugins.\"superpowers@openai-curated\"]");
-                if is_duplicate_common_key {
-                    removed_root_keys.insert(key.to_string());
-                    continue;
-                }
+        if in_root_section
+            && let Some(key) = toml_key_from_line(trimmed)
+            && common.root_keys.contains(key)
+        {
+            let is_duplicate_common_key = removed_root_keys.contains(key)
+                || source_root_keys.contains(key)
+                || common.table_headers.contains("[features]")
+                || common
+                    .table_headers
+                    .contains("[marketplaces.openai-bundled]")
+                || common
+                    .table_headers
+                    .contains("[plugins.\"superpowers@openai-curated\"]");
+            if is_duplicate_common_key {
+                removed_root_keys.insert(key.to_string());
+                continue;
             }
         }
 
@@ -1226,10 +1208,8 @@ fn common_config_anchors(common_config: &str) -> CommonConfigAnchors {
             table_headers.insert(trimmed.to_string());
             continue;
         }
-        if !in_table {
-            if let Some(key) = toml_key_from_line(trimmed) {
-                root_keys.insert(key.to_string());
-            }
+        if !in_table && let Some(key) = toml_key_from_line(trimmed) {
+            root_keys.insert(key.to_string());
         }
     }
 
@@ -1449,27 +1429,6 @@ pub fn open_external_url(url: String) -> CommandResult<Value> {
         Ok(()) => ok("已在系统浏览器打开链接。", json!({ "url": trimmed })),
         Err(error) => failed(&format!("打开链接失败：{error}"), json!({ "url": trimmed })),
     }
-}
-
-#[tauri::command]
-pub async fn install_entrypoints() -> InstallActionResult {
-    tauri::async_runtime::spawn_blocking(install::install_entrypoints)
-        .await
-        .unwrap_or_else(|error| install_background_failure("安装入口", error))
-}
-
-#[tauri::command]
-pub async fn uninstall_entrypoints(options: InstallOptions) -> InstallActionResult {
-    tauri::async_runtime::spawn_blocking(move || install::uninstall_entrypoints(options))
-        .await
-        .unwrap_or_else(|error| install_background_failure("卸载入口", error))
-}
-
-#[tauri::command]
-pub async fn repair_shortcuts() -> InstallActionResult {
-    tauri::async_runtime::spawn_blocking(install::repair_shortcuts)
-        .await
-        .unwrap_or_else(|error| install_background_failure("修复快捷方式", error))
 }
 
 #[tauri::command]
@@ -1828,45 +1787,6 @@ pub async fn perform_update(
 }
 
 #[tauri::command]
-pub fn load_watcher_state() -> CommandResult<WatcherPayload> {
-    ok("watcher 状态已加载。", watcher_payload())
-}
-
-#[tauri::command]
-pub fn install_watcher() -> CommandResult<WatcherPayload> {
-    let launcher_path =
-        codex_plus_core::install::companion_binary_path(codex_plus_core::install::SILENT_BINARY);
-    match codex_plus_core::watcher::install_watcher(&launcher_path, default_debug_port()) {
-        Ok(()) => ok("watcher 已安装。", watcher_payload()),
-        Err(error) => failed(&format!("安装 watcher 失败：{error}"), watcher_payload()),
-    }
-}
-
-#[tauri::command]
-pub fn uninstall_watcher() -> CommandResult<WatcherPayload> {
-    match codex_plus_core::watcher::uninstall_watcher() {
-        Ok(()) => ok("watcher 已移除。", watcher_payload()),
-        Err(error) => failed(&format!("移除 watcher 失败：{error}"), watcher_payload()),
-    }
-}
-
-#[tauri::command]
-pub fn enable_watcher() -> CommandResult<WatcherPayload> {
-    match codex_plus_core::watcher::enable_watcher() {
-        Ok(()) => ok("watcher 已启用。", watcher_payload()),
-        Err(error) => failed(&format!("启用 watcher 失败：{error}"), watcher_payload()),
-    }
-}
-
-#[tauri::command]
-pub fn disable_watcher() -> CommandResult<WatcherPayload> {
-    match codex_plus_core::watcher::disable_watcher() {
-        Ok(()) => ok("watcher 已禁用。", watcher_payload()),
-        Err(error) => failed(&format!("禁用 watcher 失败：{error}"), watcher_payload()),
-    }
-}
-
-#[tauri::command]
 pub fn read_latest_logs(request: LogRequest) -> CommandResult<LogsPayload> {
     read_latest_logs_with(system_maintenance_source(), request)
 }
@@ -1912,25 +1832,6 @@ fn copy_diagnostics_with(source: &dyn MaintenanceSource) -> CommandResult<Diagno
             "生成诊断报告失败。",
             DiagnosticsPayload {
                 report: String::new(),
-            },
-        ),
-    }
-}
-
-#[tauri::command]
-pub fn reset_settings() -> CommandResult<SettingsPayload> {
-    let settings = BackendSettings::default();
-    let home = codex_plus_core::relay_config::default_codex_home_dir();
-    match with_relay_live_mutation_lock(&home, || SettingsStore::default().save(&settings)) {
-        Ok(()) => settings_payload("设置已重置为默认值。", "设置重置后重新读取失败"),
-        Err(error) => failed(
-            &format!("重置设置失败：{error}"),
-            SettingsPayload {
-                settings,
-                settings_path: codex_plus_core::paths::default_settings_path()
-                    .to_string_lossy()
-                    .to_string(),
-                user_scripts: user_script_inventory(),
             },
         ),
     }
@@ -3052,6 +2953,8 @@ fn settings_payload(message: &str, failure_context: &str) -> CommandResult<Setti
     }
 }
 
+// Compatibility callers require a fully shaped fallback payload on load failure.
+#[allow(clippy::result_large_err)]
 fn settings_payload_value() -> Result<SettingsPayload, (anyhow::Error, SettingsPayload)> {
     let store = SettingsStore::default();
     let settings_path = codex_plus_core::paths::default_settings_path()
@@ -3381,24 +3284,6 @@ fn overview_failure_payload() -> OverviewPayload {
         logs_path: codex_plus_core::paths::default_diagnostic_log_path()
             .to_string_lossy()
             .to_string(),
-    }
-}
-
-fn install_background_failure(action: &str, error: impl std::fmt::Display) -> InstallActionResult {
-    let state = install::inspect_entrypoints();
-    InstallActionResult {
-        status: "failed".to_string(),
-        message: format!("{action}后台任务失败：{error}"),
-        silent_shortcut: state.silent_shortcut,
-        management_shortcut: state.management_shortcut,
-    }
-}
-
-fn watcher_payload() -> WatcherPayload {
-    let flag = codex_plus_core::watcher::default_watcher_disabled_flag();
-    WatcherPayload {
-        enabled: !flag.exists(),
-        disabled_flag: flag.to_string_lossy().to_string(),
     }
 }
 
@@ -3830,10 +3715,6 @@ mod tests {
                     path: None,
                 },
             })
-        }
-
-        fn watcher_disabled(&self) -> anyhow::Result<bool> {
-            Ok(false)
         }
 
         fn load_latest_launch(&self) -> anyhow::Result<Option<LaunchStatus>> {
@@ -4702,14 +4583,6 @@ mod tests {
 
         assert_eq!(result.status, "failed");
         assert!(result.message.contains("请先检查更新"));
-    }
-
-    #[test]
-    fn watcher_state_returns_disabled_flag_path() {
-        let result = load_watcher_state();
-
-        assert_eq!(result.status, "ok");
-        assert!(result.payload.disabled_flag.contains("watcher.disabled"));
     }
 
     #[test]
