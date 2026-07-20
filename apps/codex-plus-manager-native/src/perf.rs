@@ -170,7 +170,7 @@ impl PerfRecorder {
         })
     }
 
-    pub fn drive(&mut self, ctx: &egui::Context) {
+    pub fn drive(&mut self, ctx: &egui::Context) -> bool {
         let elapsed = self.process_started.elapsed();
         if elapsed < SCRIPT_DURATION {
             ctx.request_repaint_after(FRAME_INTERVAL);
@@ -180,12 +180,13 @@ impl PerfRecorder {
             if elapsed >= exit_after {
                 if !self.close_requested {
                     self.close_requested = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return true;
                 }
             } else {
                 ctx.request_repaint_after(exit_after - elapsed);
             }
         }
+        false
     }
 
     pub fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {

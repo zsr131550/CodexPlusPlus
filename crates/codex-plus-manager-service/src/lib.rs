@@ -1,4 +1,5 @@
 mod context_tools;
+mod desktop_host;
 mod enhancements;
 mod error;
 mod maintenance;
@@ -28,6 +29,10 @@ pub use context_tools::{
     ContextToolsError, ContextToolsErrorKind, ContextToolsService, ContextToolsSource,
     ContextWorkspace, DeleteContextEntry, LoadContextEntryDraft, PreviewContextSync,
     SaveContextEntry, SaveContextEntryMode, SetContextEntryEnabled, SyncContextToLive,
+};
+pub use desktop_host::{
+    DesktopHostEnvironment, DesktopStartupArgs, DesktopStartupIssue, DesktopStartupIssueKind,
+    DesktopStartupPlan,
 };
 pub use enhancements::{
     EnhancementError, EnhancementErrorKind, EnhancementRevision, EnhancementSettings,

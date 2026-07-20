@@ -1,4 +1,5 @@
 pub mod app;
+pub mod desktop_host;
 pub mod external_url;
 pub mod fonts;
 pub mod i18n;

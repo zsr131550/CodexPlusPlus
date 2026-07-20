@@ -15,6 +15,9 @@ use codex_plus_manager_service::{
 };
 use eframe::egui;
 
+use crate::desktop_host::{
+    DesktopHostEffect, DesktopHostEvent, DesktopHostLifecycle, DesktopHostRuntime,
+};
 use crate::fonts;
 use crate::path_picker::{
     PathPicker, PathPickerDispatchError, PathPickerDispatcher, PathPickerErrorKind,
@@ -122,6 +125,8 @@ pub struct NativeManagerApp {
     window_focused: bool,
     pending_route: Option<Route>,
     pending_provider_reload: bool,
+    desktop_host: Option<DesktopHostRuntime>,
+    desktop_lifecycle: DesktopHostLifecycle,
     perf: Option<PerfRecorder>,
     perf_stale_user_script_revision: Option<UserScriptRevision>,
 }
@@ -132,6 +137,16 @@ impl NativeManagerApp {
         cjk_font: Option<Vec<u8>>,
         sources: NativeManagerSources,
         perf: Option<PerfRecorder>,
+    ) -> Self {
+        Self::new_with_desktop_host(creation, cjk_font, sources, perf, None)
+    }
+
+    pub fn new_with_desktop_host(
+        creation: &eframe::CreationContext<'_>,
+        cjk_font: Option<Vec<u8>>,
+        sources: NativeManagerSources,
+        perf: Option<PerfRecorder>,
+        desktop_host: Option<DesktopHostRuntime>,
     ) -> Self {
         egui_extras::install_image_loaders(&creation.egui_ctx);
         if let Some(bytes) = cjk_font {
@@ -244,13 +259,73 @@ impl NativeManagerApp {
             window_focused: true,
             pending_route: None,
             pending_provider_reload: false,
+            desktop_host,
+            desktop_lifecycle: DesktopHostLifecycle::default(),
             perf,
             perf_stale_user_script_revision: None,
         };
+        if let Some(desktop_host) = &app.desktop_host {
+            desktop_host.set_locale(app.persisted.locale);
+        }
         app.refresh_overview();
         app.load_providers();
         app.load_pending_import();
         app
+    }
+
+    fn reduce_desktop_host(&mut self, ctx: &egui::Context) {
+        if self.desktop_host.is_none() {
+            return;
+        }
+
+        loop {
+            let event = self
+                .desktop_host
+                .as_ref()
+                .and_then(DesktopHostRuntime::try_recv);
+            let Some(event) = event else {
+                break;
+            };
+            self.apply_desktop_host_event(ctx, event);
+        }
+
+        let (close_requested, minimized) = ctx.input(|input| {
+            (
+                input.viewport().close_requested(),
+                input.viewport().minimized,
+            )
+        });
+        if close_requested {
+            self.apply_desktop_host_event(ctx, DesktopHostEvent::CloseRequested);
+        }
+        if let Some(minimized) = minimized {
+            self.apply_desktop_host_event(ctx, DesktopHostEvent::Minimized(minimized));
+        }
+    }
+
+    fn apply_desktop_host_event(&mut self, ctx: &egui::Context, event: DesktopHostEvent) {
+        for effect in self.desktop_lifecycle.reduce(event) {
+            match effect {
+                DesktopHostEffect::CancelClose => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose)
+                }
+                DesktopHostEffect::Hide => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false))
+                }
+                DesktopHostEffect::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true))
+                }
+                DesktopHostEffect::Restore => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false))
+                }
+                DesktopHostEffect::Focus => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
+                DesktopHostEffect::ReloadPendingProviderImport => self.load_pending_import(),
+                DesktopHostEffect::ShowUpdate => self.navigate(Route::About),
+                DesktopHostEffect::RequestExit => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close)
+                }
+            }
+        }
     }
 
     fn refresh_overview(&mut self) {
@@ -375,7 +450,12 @@ impl NativeManagerApp {
                 }
                 Route::Overview | Route::Providers | Route::About => self.refresh_overview(),
             },
-            ShellAction::SetLocale(locale) => self.persisted.locale = locale,
+            ShellAction::SetLocale(locale) => {
+                self.persisted.locale = locale;
+                if let Some(desktop_host) = &self.desktop_host {
+                    desktop_host.set_locale(locale);
+                }
+            }
             ShellAction::SetTheme(mode) => {
                 self.persisted.theme = mode;
                 theme::apply(ctx, mode);
@@ -3236,6 +3316,7 @@ impl NativeManagerApp {
 
 impl eframe::App for NativeManagerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.reduce_desktop_host(ctx);
         self.reduce_overview_responses();
         self.reduce_provider_responses();
         self.reduce_activation_responses();
@@ -3251,8 +3332,13 @@ impl eframe::App for NativeManagerApp {
         self.reduce_settings_responses();
         self.reduce_path_picker_responses();
         self.refresh_pending_on_focus_regain(ctx);
-        if let Some(perf) = &mut self.perf {
-            perf.drive(ctx);
+        let perf_exit_requested = self.perf.as_mut().is_some_and(|perf| perf.drive(ctx));
+        if perf_exit_requested {
+            if self.desktop_host.is_some() {
+                self.apply_desktop_host_event(ctx, DesktopHostEvent::TrayQuit);
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
     }
 
@@ -3297,6 +3383,10 @@ impl eframe::App for NativeManagerApp {
     }
 
     fn on_exit(&mut self) {
+        self.desktop_lifecycle.mark_exited();
+        if let Some(desktop_host) = &mut self.desktop_host {
+            desktop_host.shutdown();
+        }
         if let Some(perf) = &mut self.perf {
             perf.finish();
         }

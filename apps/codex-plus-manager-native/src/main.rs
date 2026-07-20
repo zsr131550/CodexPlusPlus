@@ -5,24 +5,66 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use codex_plus_manager_native::app::{NativeManagerApp, NativeManagerSources};
+use codex_plus_manager_native::desktop_host::{
+    APP_ID, APP_TITLE, DesktopHostBootstrap, DesktopHostRuntime, NativePersistencePaths,
+};
 use codex_plus_manager_native::fonts;
+use codex_plus_manager_native::i18n::Locale;
 use codex_plus_manager_native::path_picker::path_picker_from_environment;
 use codex_plus_manager_native::perf::PerfRecorder;
 use codex_plus_manager_service::{
-    ContextToolsService, EnhancementSettingsService, MaintenanceService, ManagerSettingsService,
-    OverviewService, PluginMarketplaceService, ProviderImportService, ProviderService,
-    ProviderSyncService, RelayEnvironmentService, SessionService, SystemProviderEnvironment,
-    UserScriptService, ZedRemoteService,
+    ContextToolsService, DesktopStartupArgs, EnhancementSettingsService, MaintenanceService,
+    ManagerSettingsService, OverviewService, PluginMarketplaceService, ProviderImportService,
+    ProviderService, ProviderSyncService, RelayEnvironmentService, SessionService,
+    SystemProviderEnvironment, UserScriptService, ZedRemoteService,
 };
 use eframe::egui;
 
-const APP_ID: &str = "com.codexplusplus.manager.native";
-const APP_TITLE: &str = "Codex++ Native Manager";
 const MEBIBYTE: u64 = 1024 * 1024;
 
-fn main() -> eframe::Result {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     configure_diagnostic_log_from_env();
     let process_started = Instant::now();
+    let persistence_paths = NativePersistencePaths::for_state_override(native_state_override());
+    if let Err(error) = persistence_paths.migrate_legacy_if_needed() {
+        let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
+            "native_manager.preference_migration_failed",
+            serde_json::json!({ "kind": format!("{error:?}") }),
+        );
+    }
+    let environment = SystemProviderEnvironment::for_native_process();
+    let startup = DesktopStartupArgs::new(std::env::args_os());
+    let startup_plan = startup.prepare(&environment);
+    for issue in startup_plan.issues() {
+        let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
+            "native_manager.startup_argument_ignored",
+            serde_json::json!({
+                "kind": format!("{:?}", issue.kind()),
+                "argument_index": issue.argument_index(),
+            }),
+        );
+    }
+    let instance = codex_plus_core::manager_instance::acquire_manager_instance(
+        codex_plus_core::manager_instance::ManagerInstanceConfig::for_state_dir(
+            persistence_paths.state_root(),
+        ),
+    )
+    .inspect_err(|error| {
+        log_desktop_host_failure("native_manager.instance_acquire_failed", error);
+    })?;
+    let desktop_host = match instance {
+        codex_plus_core::manager_instance::ManagerInstance::Secondary(client) => {
+            for action in startup_plan.actions().iter().copied() {
+                client.send(action).inspect_err(|error| {
+                    log_desktop_host_failure("native_manager.activation_send_failed", error);
+                })?;
+            }
+            return Ok(());
+        }
+        codex_plus_core::manager_instance::ManagerInstance::Primary(owner) => {
+            DesktopHostBootstrap::new(owner, startup_plan.into_actions())
+        }
+    };
     let perf = PerfRecorder::from_env(process_started);
     let cjk_font = match fonts::load_cjk_font() {
         Ok(bytes) => Some(bytes),
@@ -46,7 +88,7 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: memory_efficient_wgpu_configuration(),
         persist_window: true,
-        persistence_path: persistence_path_from_env(),
+        persistence_path: Some(persistence_paths.canonical().to_path_buf()),
         centered: true,
         ..Default::default()
     };
@@ -55,7 +97,6 @@ fn main() -> eframe::Result {
         APP_TITLE,
         native_options,
         Box::new(move |creation| {
-            let environment = SystemProviderEnvironment::for_native_process();
             let provider_service = Arc::new(ProviderService::new(environment.clone()));
             let import_service = Arc::new(ProviderImportService::new(environment.clone()));
             let context_service = Arc::new(ContextToolsService::new(environment.clone()));
@@ -71,7 +112,12 @@ fn main() -> eframe::Result {
                 Arc::new(ManagerSettingsService::new(environment.clone()));
             let overview_service = Arc::new(OverviewService::new(environment.clone()));
             let environment_service = Arc::new(RelayEnvironmentService::new(environment));
-            Ok(Box::new(NativeManagerApp::new(
+            let desktop_host =
+                DesktopHostRuntime::start(desktop_host, creation.egui_ctx.clone(), Locale::ZhCn)
+                    .inspect_err(|error| {
+                        log_desktop_host_failure("native_manager.desktop_host_start_failed", error);
+                    })?;
+            Ok(Box::new(NativeManagerApp::new_with_desktop_host(
                 creation,
                 cjk_font,
                 NativeManagerSources {
@@ -92,9 +138,11 @@ fn main() -> eframe::Result {
                     path_picker: path_picker_from_environment(),
                 },
                 perf,
+                Some(desktop_host),
             )))
         }),
-    )
+    )?;
+    Ok(())
 }
 
 fn configure_diagnostic_log_from_env() {
@@ -144,11 +192,17 @@ fn platform_default_wgpu_backends() -> eframe::wgpu::Backends {
     eframe::wgpu::Backends::PRIMARY | eframe::wgpu::Backends::GL
 }
 
-fn persistence_path_from_env() -> Option<PathBuf> {
+fn native_state_override() -> Option<PathBuf> {
     std::env::var_os("CODEX_PLUS_NATIVE_STATE_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .map(|directory| directory.join("app.ron"))
+}
+
+fn log_desktop_host_failure(event: &str, error: &dyn std::fmt::Debug) {
+    let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
+        event,
+        serde_json::json!({ "kind": format!("{error:?}") }),
+    );
 }
 
 #[cfg(test)]
