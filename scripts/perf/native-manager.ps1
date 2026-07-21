@@ -7,7 +7,7 @@ $ColdRunCount = 5
 $ColdExitAfterMs = 3000
 $IdleSampleSeconds = 30
 $IdleExitAfterMs = 58000
-$FirstFrameLimitMs = 1500.0
+$FirstFrameLimitMs = 200.0
 $CpuP95LimitMs = 16.7
 $MaximumStallLimitMs = 50.0
 $PrivateMemoryLimitBytes = 157286400L
@@ -124,19 +124,29 @@ $ExpectedScriptActions = @(
 )
 
 $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$BinaryPath = Join-Path $RepositoryRoot 'target\release\codex-plus-plus-manager-native.exe'
+$BinaryPath = Join-Path $RepositoryRoot 'target\native-perf\codex-plus-plus-manager.exe'
 $PerfRoot = Join-Path $RepositoryRoot 'target\perf\native-manager'
 $RunDirectory = Join-Path $PerfRoot ((Get-Date -Format 'yyyyMMdd-HHmmss-fff') + "-$PID")
 
 function Invoke-CargoBuild {
+    $PreviousPerfAsInvoker = [Environment]::GetEnvironmentVariable(
+        'CODEX_PLUS_MANAGER_PERF_AS_INVOKER',
+        'Process'
+    )
     Push-Location $RepositoryRoot
     try {
-        & cargo build -p codex-plus-manager-native --release --jobs 1
+        $env:CODEX_PLUS_MANAGER_PERF_AS_INVOKER = '1'
+        & cargo build -p codex-plus-manager --profile native-perf --jobs 1 --locked
         if ($LASTEXITCODE -ne 0) {
             throw "cargo build failed with exit code $LASTEXITCODE"
         }
     }
     finally {
+        [Environment]::SetEnvironmentVariable(
+            'CODEX_PLUS_MANAGER_PERF_AS_INVOKER',
+            $PreviousPerfAsInvoker,
+            'Process'
+        )
         Pop-Location
     }
 }

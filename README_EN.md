@@ -13,7 +13,7 @@
   <img alt="Stars" src="https://img.shields.io/github/stars/BigPizzaV3/CodexPlusPlus">
   <img alt="License" src="https://img.shields.io/github/license/BigPizzaV3/CodexPlusPlus">
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.85%2B-orange">
-  <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8DB">
+  <img alt="egui" src="https://img.shields.io/badge/egui-0.35-3B82F6">
 </p>
 
 Codex++ is an external launcher and manager for the OpenAI Codex / ChatGPT desktop app. It uses the Chromium DevTools Protocol and a local helper for provider switching, protocol conversion, session management, and UI enhancements without modifying the official app's `app.asar` or installation files.
@@ -247,24 +247,27 @@ Yes. Releases provide both `macos-x64.dmg` and `macos-arm64.dmg`. Intel Macs sho
 
 ## Development
 
-```bash
-cd apps/codex-plus-manager
-npm ci
-npm run check
-npm run vite:build
+The manager is a single Rust/egui application. Node, npm, Vite, and a WebView runtime
+are not required.
 
-cd ../..
+```bash
 cargo fmt --all -- --check
-cargo test
-cargo build --release
+cargo clippy --workspace --all-targets --no-deps -- -D warnings
+cargo test --workspace --jobs 1
+cargo build -p codex-plus-launcher -p codex-plus-manager --release
 ```
+
+Release packages contain only the Native manager and install it with the stable
+`codex-plus-plus-manager` filename (`CodexPlusPlusManager` on macOS). Pinned downgrade
+fixtures must provide the previous ZIP, version, and SHA-256 explicitly; the workflow
+does not resolve `latest` or silently fall back.
 
 Project structure:
 
 ```text
 apps/
   codex-plus-launcher/          Silent launcher
-  codex-plus-manager/           Tauri manager
+  codex-plus-manager/           Rust/egui Native manager (the only manager)
 assets/inject/
   renderer-inject.js            Enhancement script injected into Codex
 crates/

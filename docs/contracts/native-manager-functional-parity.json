@@ -1,34 +1,31 @@
 {
-  "schema": 1,
+  "schema": 2,
   "frozen": true,
-  "scope": "react-tauri-to-egui-native-before-packaging",
-  "oracle": {
-    "command": "cargo test -p codex-plus-manager --lib --jobs 1",
+  "scope": "egui-native-single-stack-after-react-tauri-removal",
+  "baseline": {
+    "commit": "ae13ba110a18ddb1f93ce799dfcbc052292626e2",
+    "ci_run": 29768331734,
     "compares": ["safe_typed_outputs", "side_effect_plans"],
-    "excludes": ["screenshots", "raw_secrets"],
-    "evidence": [
-      {
-        "path": "apps/codex-plus-manager/src-tauri/src/commands.rs",
-        "marker": "retained_launch_payloads_are_compatible_and_never_serialize_private_input_or_raw_errors"
-      },
-      {
-        "path": "apps/codex-plus-manager/src-tauri/src/commands.rs",
-        "marker": "context_entry_commands_preserve_payload_shape_fallback_and_redaction"
-      }
-    ]
+    "excludes": ["raw_secrets"]
+  },
+  "single_stack": {
+    "app_root": "apps/codex-plus-manager",
+    "package": "codex-plus-manager",
+    "library": "codex_plus_manager",
+    "binary": "codex-plus-plus-manager"
   },
   "owners": [
-    { "id": "native.view.overview", "path": "apps/codex-plus-manager-native/src/views/overview.rs", "marker": "pub fn render(" },
-    { "id": "native.view.providers", "path": "apps/codex-plus-manager-native/src/views/provider.rs", "marker": "pub fn render(" },
-    { "id": "native.view.environment", "path": "apps/codex-plus-manager-native/src/views/environment.rs", "marker": "pub fn render(" },
-    { "id": "native.view.sessions", "path": "apps/codex-plus-manager-native/src/views/sessions.rs", "marker": "pub fn render(" },
-    { "id": "native.view.context", "path": "apps/codex-plus-manager-native/src/views/context.rs", "marker": "pub fn render(" },
-    { "id": "native.view.enhancements", "path": "apps/codex-plus-manager-native/src/views/enhancements.rs", "marker": "pub fn render(" },
-    { "id": "native.view.zed_remote", "path": "apps/codex-plus-manager-native/src/views/zed_remote.rs", "marker": "pub fn render(" },
-    { "id": "native.view.user_scripts", "path": "apps/codex-plus-manager-native/src/views/user_scripts.rs", "marker": "pub fn render(" },
-    { "id": "native.view.maintenance", "path": "apps/codex-plus-manager-native/src/views/maintenance.rs", "marker": "pub fn render(" },
-    { "id": "native.view.about", "path": "apps/codex-plus-manager-native/src/views/about.rs", "marker": "pub fn render(" },
-    { "id": "native.view.settings", "path": "apps/codex-plus-manager-native/src/views/settings.rs", "marker": "pub fn render(" },
+    { "id": "native.view.overview", "path": "apps/codex-plus-manager/src/views/overview.rs", "marker": "pub fn render(" },
+    { "id": "native.view.providers", "path": "apps/codex-plus-manager/src/views/provider.rs", "marker": "pub fn render(" },
+    { "id": "native.view.environment", "path": "apps/codex-plus-manager/src/views/environment.rs", "marker": "pub fn render(" },
+    { "id": "native.view.sessions", "path": "apps/codex-plus-manager/src/views/sessions.rs", "marker": "pub fn render(" },
+    { "id": "native.view.context", "path": "apps/codex-plus-manager/src/views/context.rs", "marker": "pub fn render(" },
+    { "id": "native.view.enhancements", "path": "apps/codex-plus-manager/src/views/enhancements.rs", "marker": "pub fn render(" },
+    { "id": "native.view.zed_remote", "path": "apps/codex-plus-manager/src/views/zed_remote.rs", "marker": "pub fn render(" },
+    { "id": "native.view.user_scripts", "path": "apps/codex-plus-manager/src/views/user_scripts.rs", "marker": "pub fn render(" },
+    { "id": "native.view.maintenance", "path": "apps/codex-plus-manager/src/views/maintenance.rs", "marker": "pub fn render(" },
+    { "id": "native.view.about", "path": "apps/codex-plus-manager/src/views/about.rs", "marker": "pub fn render(" },
+    { "id": "native.view.settings", "path": "apps/codex-plus-manager/src/views/settings.rs", "marker": "pub fn render(" },
     { "id": "service.desktop_host", "path": "crates/codex-plus-manager-service/src/desktop_host.rs", "marker": "pub struct DesktopStartupArgs" },
     { "id": "service.overview", "path": "crates/codex-plus-manager-service/src/overview.rs", "marker": "pub trait OverviewSource" },
     { "id": "service.maintenance", "path": "crates/codex-plus-manager-service/src/maintenance.rs", "marker": "pub trait MaintenanceSource" },
@@ -37,7 +34,7 @@
     { "id": "service.zed_remote", "path": "crates/codex-plus-manager-service/src/zed_remote.rs", "marker": "pub trait ZedRemoteSource" },
     { "id": "service.provider_sync", "path": "crates/codex-plus-manager-service/src/provider_sync.rs", "marker": "pub trait ProviderSyncSource" },
     { "id": "service.user_scripts", "path": "crates/codex-plus-manager-service/src/user_scripts.rs", "marker": "pub trait UserScriptSource" },
-    { "id": "native.external_url", "path": "apps/codex-plus-manager-native/src/external_url.rs", "marker": "pub struct ExternalUrl" },
+    { "id": "native.external_url", "path": "apps/codex-plus-manager/src/external_url.rs", "marker": "pub struct ExternalUrl" },
     { "id": "service.plugin_marketplace", "path": "crates/codex-plus-manager-service/src/plugin_marketplace.rs", "marker": "pub trait PluginMarketplaceSource" },
     { "id": "service.update", "path": "crates/codex-plus-manager-service/src/update.rs", "marker": "pub trait UpdateSource" },
     { "id": "service.manager_settings", "path": "crates/codex-plus-manager-service/src/manager_settings.rs", "marker": "pub trait ManagerSettingsSource" },
@@ -47,7 +44,7 @@
     { "id": "service.context_tools", "path": "crates/codex-plus-manager-service/src/context_tools.rs", "marker": "pub trait ContextToolsSource" },
     { "id": "service.provider", "path": "crates/codex-plus-manager-service/src/provider.rs", "marker": "pub trait ProviderSource" },
     { "id": "service.provider_network", "path": "crates/codex-plus-manager-service/src/provider_network.rs", "marker": "pub struct TestProviderProfile" },
-    { "id": "native.desktop_host", "path": "apps/codex-plus-manager-native/src/desktop_host.rs", "marker": "pub enum DesktopHostEvent" },
+    { "id": "native.desktop_host", "path": "apps/codex-plus-manager/src/desktop_host.rs", "marker": "pub enum DesktopHostEvent" },
     { "id": "core.manager_instance", "path": "crates/codex-plus-core/src/manager_instance.rs", "marker": "pub enum ManagerActivation" }
   ],
   "routes": [
@@ -124,7 +121,7 @@
   ],
   "events": [
     { "legacy": "manager://pending-provider-import-changed", "native": "ManagerActivation::ReloadPendingProviderImport", "owner": "core.manager_instance", "disposition": "native", "rationale": "The Native broker consumes a typed pending-import activation." },
-    { "legacy": "provider-import\\n", "native": "ManagerActivation::ReloadPendingProviderImport", "owner": "core.manager_instance", "disposition": "native", "rationale": "The legacy signal is retained only as an authenticated broker input." }
+    { "legacy": "provider-import\\n", "native": null, "owner": null, "disposition": "approved_removal", "rationale": "The unauthenticated legacy text signal is removed; Native uses the typed broker envelope." }
   ],
   "startup_inputs": [
     { "legacy": "ordinary-or-no-recognized-input", "native": "ManagerActivation::Show", "owner": "service.desktop_host", "disposition": "native", "rationale": "No recognized input falls back to showing the manager." },

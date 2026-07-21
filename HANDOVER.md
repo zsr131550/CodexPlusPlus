@@ -1,6 +1,10 @@
 # HANDOVER — CodexPlusPlus
 
-## Active Work
+## Historical Work (Archived)
+
+This handover records the earlier guard-port work. It is not an active ownership
+map; the repository now has one Rust/egui Native manager at
+`apps/codex-plus-manager`, with no React/Tauri manager or Node/Vite build chain.
 
 ### PR #1247: guard port auto-offset for multi-user RDP
 
@@ -37,8 +41,8 @@ Resolution order:
 |------|--------|
 | `crates/codex-plus-core/src/ports.rs` | +2 functions, +6 tests, base constants, Option chain fix |
 | `apps/codex-plus-launcher/src/main.rs` | 4 references updated + test assertion |
-| `apps/codex-plus-manager/src-tauri/src/lib.rs` | 5 references updated |
-| `apps/codex-plus-manager/src-tauri/tests/windows_subsystem.rs` | 1 assertion updated |
+| `apps/codex-plus-manager/src-tauri/src/lib.rs` (historical path, removed) | 5 references updated |
+| `apps/codex-plus-manager/src-tauri/tests/windows_subsystem.rs` (historical path, removed) | 1 assertion updated |
 
 ### Commits
 

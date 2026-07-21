@@ -24,19 +24,20 @@ jobs:
         run: choco install nsis -y
 
       - name: Build binaries
-        run: cargo build -p codex-plus-launcher -p codex-plus-manager-native --release
+        run: cargo build -p codex-plus-launcher -p codex-plus-manager --release
 
       - name: Stage Windows app files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist/windows/app | Out-Null
           Copy-Item target/release/codex-plus-plus.exe dist/windows/app/
-          Copy-Item target/release/codex-plus-plus-manager-native.exe dist/windows/app/codex-plus-plus-manager.exe
+          Copy-Item target/release/codex-plus-plus-manager.exe dist/windows/app/
+          # The pre-cutover filename is allowed only as a negative package assertion.
           python scripts/installer/generate-package-manifest.py `
             --root dist/windows/app `
             --output dist/windows/native-package-manifest.json `
             --platform windows-x64 `
-            --source-binary target/release/codex-plus-plus-manager-native.exe `
+            --source-binary target/release/codex-plus-plus-manager.exe `
             --staged-binary codex-plus-plus-manager.exe `
             --forbid codex-plus-plus-manager-native
 
@@ -94,18 +95,19 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build binaries
-        run: cargo build -p codex-plus-launcher -p codex-plus-manager-native --release --target ${{ matrix.target }}
+        run: cargo build -p codex-plus-launcher -p codex-plus-manager --release --target ${{ matrix.target }}
 
       - name: Build macOS DMG
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           VERSION="${VERSION#V}"
           BINARY_DIR="$PWD/target/${{ matrix.target }}/release" bash scripts/installer/macos/package-dmg.sh "$VERSION" "${{ matrix.arch }}"
+          # The pre-cutover filename is allowed only as a negative package assertion.
           python scripts/installer/generate-package-manifest.py \
             --root dist/macos/stage \
             --output "dist/macos/native-package-manifest-${{ matrix.arch }}.json" \
             --platform "macos-${{ matrix.arch }}" \
-            --source-binary "target/${{ matrix.target }}/release/codex-plus-plus-manager-native" \
+            --source-binary "target/${{ matrix.target }}/release/codex-plus-plus-manager" \
             --staged-binary "Codex++ 管理工具.app/Contents/MacOS/CodexPlusPlusManager" \
             --forbid codex-plus-plus-manager-native \
             --allow-packaging-transform
@@ -118,11 +120,12 @@ jobs:
           mkdir -p dist/macos/app-${{ matrix.arch }}
           cp -R "dist/macos/stage/Codex++.app" "dist/macos/app-${{ matrix.arch }}/"
           cp -R "dist/macos/stage/Codex++ 管理工具.app" "dist/macos/app-${{ matrix.arch }}/"
+          # The pre-cutover filename is allowed only as a negative package assertion.
           python scripts/installer/generate-package-manifest.py \
             --root "dist/macos/app-${{ matrix.arch }}" \
             --output "dist/macos/native-package-zip-manifest-${{ matrix.arch }}.json" \
             --platform "macos-${{ matrix.arch }}" \
-            --source-binary "target/${{ matrix.target }}/release/codex-plus-plus-manager-native" \
+            --source-binary "target/${{ matrix.target }}/release/codex-plus-plus-manager" \
             --staged-binary "Codex++ 管理工具.app/Contents/MacOS/CodexPlusPlusManager" \
             --forbid codex-plus-plus-manager-native \
             --allow-packaging-transform

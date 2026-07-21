@@ -2,9 +2,9 @@ fn main() {
     #[cfg(windows)]
     {
         let mut resource = winresource::WindowsResource::new();
-        resource.set_icon("../codex-plus-manager-native/assets/packaging/icon.ico");
+        resource.set_icon("../codex-plus-manager/assets/packaging/icon.ico");
         let release_manifest =
-            include_str!("../codex-plus-manager-native/assets/packaging/windows-app-manifest.xml");
+            include_str!("../codex-plus-manager/assets/packaging/windows-app-manifest.xml");
         let development_manifest;
         let manifest = if std::env::var("PROFILE").as_deref() == Ok("release") {
             release_manifest

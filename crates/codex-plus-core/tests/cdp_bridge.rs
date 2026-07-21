@@ -1190,32 +1190,42 @@ fn injection_script_rebuilds_upstream_options_for_each_project_branch_menu() {
 }
 
 #[test]
-fn manager_ui_exposes_pure_api_relay_mode_button() {
+fn native_manager_exposes_pure_api_relay_mode() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
         .expect("core crate should live under crates/codex-plus-core");
-    let source = std::fs::read_to_string(repo.join("apps/codex-plus-manager/src/App.tsx")).unwrap();
-    let commands =
-        std::fs::read_to_string(repo.join("apps/codex-plus-manager/src-tauri/src/lib.rs")).unwrap();
+    let provider_view =
+        std::fs::read_to_string(repo.join("apps/codex-plus-manager/src/views/provider.rs"))
+            .unwrap();
+    let relay_config =
+        std::fs::read_to_string(repo.join("crates/codex-plus-core/src/relay_config.rs")).unwrap();
 
-    assert!(source.contains("官方混入 API Key"));
-    assert!(source.contains("纯 API"));
-    assert!(source.contains("apply_pure_api_injection"));
-    assert!(commands.contains("commands::apply_pure_api_injection"));
+    assert!(provider_view.contains("RelayMode::PureApi"));
+    assert!(provider_view.contains("PText::PureApi"));
+    assert!(
+        provider_view
+            .contains("for mode in [RelayMode::Official, RelayMode::MixedApi, RelayMode::PureApi]")
+    );
+    assert!(relay_config.contains("pub fn apply_pure_api_config_to_home"));
 }
 
 #[test]
-fn manager_ui_disables_plugin_auto_expand_in_compatible_mode() {
+fn native_manager_limits_plugin_auto_expand_to_patch_mode() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
         .expect("core crate should live under crates/codex-plus-core");
-    let source = std::fs::read_to_string(repo.join("apps/codex-plus-manager/src/App.tsx")).unwrap();
+    let enhancement_view =
+        std::fs::read_to_string(repo.join("apps/codex-plus-manager/src/views/enhancements.rs"))
+            .unwrap();
+    let enhancement_service =
+        std::fs::read_to_string(repo.join("crates/codex-plus-manager-service/src/enhancements.rs"))
+            .unwrap();
 
-    assert!(source.contains(
-        "checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled || !patchMode}"
-    ));
+    assert!(enhancement_view.contains("draft.plugin_auto_expand"));
+    assert!(enhancement_view.contains("draft.launch_mode == LaunchMode::Patch"));
+    assert!(enhancement_service.contains("codex_app_plugin_auto_expand"));
 }
 
 #[test]

@@ -13,8 +13,8 @@ InstallDirRegKey HKCU "Software\CodexPlusPlus" "InstallDir"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 
-!define MUI_ICON "${ROOT}\apps\codex-plus-manager-native\assets\packaging\icon.ico"
-!define MUI_UNICON "${ROOT}\apps\codex-plus-manager-native\assets\packaging\icon.ico"
+!define MUI_ICON "${ROOT}\apps\codex-plus-manager\assets\packaging\icon.ico"
+!define MUI_UNICON "${ROOT}\apps\codex-plus-manager\assets\packaging\icon.ico"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -93,6 +93,7 @@ package_uninstall_complete:
 
   Delete "$INSTDIR\codex-plus-plus.exe"
   Delete "$INSTDIR\codex-plus-plus-manager.exe"
+  ; Compatibility cleanup only: current packages never emit this pre-cutover filename.
   Delete "$INSTDIR\codex-plus-plus-manager-native.exe"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"

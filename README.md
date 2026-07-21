@@ -13,7 +13,7 @@
   <img alt="Stars" src="https://img.shields.io/github/stars/BigPizzaV3/CodexPlusPlus">
   <img alt="License" src="https://img.shields.io/github/license/BigPizzaV3/CodexPlusPlus">
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.85%2B-orange">
-  <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8DB">
+  <img alt="egui" src="https://img.shields.io/badge/egui-0.35-3B82F6">
 </p>
 
 Codex++ 是面向 OpenAI Codex / ChatGPT 桌面应用的外部启动器与管理工具。它通过 Chromium DevTools Protocol 和本地辅助服务提供供应商切换、协议转换、会话管理与界面增强，不修改官方应用的 `app.asar`，也不向安装目录写入补丁文件。
@@ -282,48 +282,44 @@ sudo xattr -rd com.apple.quarantine /Applications/Codex++.app
 
 ## 开发
 
-```bash
-# 前端检查
-cd apps/codex-plus-manager
-npm ci
-npm run check
-npm run vite:build
+管理器是 Rust/egui 单栈应用，不需要 Node、npm、Vite 或 WebView 运行时。常用检查：
 
-# Rust 检查
-cd ../..
+```bash
 cargo fmt --all -- --check
-cargo test
-cargo build --release
+cargo clippy --workspace --all-targets --no-deps -- -D warnings
+cargo test --workspace --jobs 1
+cargo build -p codex-plus-launcher -p codex-plus-manager --release
 ```
 
-发布包只包含 Native 管理器，并以既有稳定文件名 `codex-plus-plus-manager`（macOS
-为 `CodexPlusPlusManager`）安装；React/Tauri 目录在迁移完成前仅作为未发布的行为
-oracle。验证打包边界时使用：
+发布包只包含 Native 管理器，并以稳定文件名 `codex-plus-plus-manager`（macOS
+为 `CodexPlusPlusManager`）安装。固定版本降级夹具必须显式提供上一版 ZIP、版本和
+SHA-256；不会解析 `latest`，也不会静默自动回退。
+
+验证 Windows 打包边界时使用：
 
 ```powershell
-cargo build -p codex-plus-launcher -p codex-plus-manager-native --release
+cargo build -p codex-plus-launcher -p codex-plus-manager --release
 New-Item -ItemType Directory -Force dist/windows/app | Out-Null
 Copy-Item target/release/codex-plus-plus.exe dist/windows/app/
-Copy-Item target/release/codex-plus-plus-manager-native.exe `
-  dist/windows/app/codex-plus-plus-manager.exe
+Copy-Item target/release/codex-plus-plus-manager.exe dist/windows/app/
 python scripts/installer/generate-package-manifest.py `
   --root dist/windows/app `
   --output dist/windows/native-package-manifest.json `
   --platform windows-x64 `
-  --source-binary target/release/codex-plus-plus-manager-native.exe `
-  --staged-binary codex-plus-plus-manager.exe
+  --source-binary target/release/codex-plus-plus-manager.exe `
+  --staged-binary codex-plus-plus-manager.exe `
+  --forbid codex-plus-plus-manager-native
 ```
 
-清单只记录相对路径和 SHA-256；固定版本降级夹具必须显式提供上一版 ZIP、版本和
-SHA-256，不解析 `latest`，也不安装到开发者的真实用户目录。
+清单只记录相对路径和 SHA-256，不安装到开发者的真实用户目录。其中
+`--forbid codex-plus-plus-manager-native` 仅用于拒绝迁移前的实现专用文件名。
 
 主要结构：
 
 ```text
 apps/
   codex-plus-launcher/          静默启动入口
-  codex-plus-manager-native/    发布包使用的 Native 管理工具
-  codex-plus-manager/           未发布的 React/Tauri 行为 oracle
+  codex-plus-manager/           Rust/egui Native 管理工具（唯一 manager）
 assets/inject/
   renderer-inject.js            注入到 Codex 渲染端的增强脚本
 crates/

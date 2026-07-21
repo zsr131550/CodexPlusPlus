@@ -11,7 +11,7 @@
 ## 仓库结构
 
 - `crates/codex-plus-core/` — 核心 Rust 库（配置生成、catalog 解析、数据模型）
-- `apps/codex-plus-manager/` — Tauri 桌面应用，前端 React+TS
+- `apps/codex-plus-manager/` — Rust/egui Native 桌面管理器（唯一 manager）
 - `crates/codex-plus-data/` — 数据持久化
 - `docs/` — 本 fork 的设计文档、调研、计划
 
@@ -21,7 +21,8 @@
 - 配置生成：`crates/codex-plus-core/src/relay_config.rs` 的 `apply_context_limits_to_config`
 - catalog 解析：`crates/codex-plus-core/src/model_catalog.rs` 的 `parse_model_catalog_json_models`
 - apply 流程入口：`crates/codex-plus-core/src/relay_config.rs` 的 `apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard`
-- 前端模型列表：`apps/codex-plus-manager/src/App.tsx` 的 `modelList` textarea
+- 模型列表状态与界面：`apps/codex-plus-manager/src/state/provider.rs` 与
+  `apps/codex-plus-manager/src/views/provider.rs`
 
 ## 安全规则
 
@@ -30,7 +31,7 @@
 - 禁止 sudo、提权、curl | bash
 - 禁止泄露密钥、.env、auth.json、config.toml 凭据
 - 覆盖文件前确认
-- 不擅自改 Cargo.toml、package.json、.gitignore（除非任务必需）
+- 不擅自改 Cargo.toml、.gitignore（除非任务必需）
 
 ## 命令执行
 
@@ -41,7 +42,7 @@
 ## 编码规范
 
 - 对话用中文，代码可用英文，注释尽量中文
-- 保持上游代码风格统一（Rust 标准、React+TS）
+- 保持上游代码风格统一（Rust 标准、egui/eframe）
 - 改动隔离 + opt-in，不破坏现有 per-profile 单值行为
 - 不做需求外的操作
 

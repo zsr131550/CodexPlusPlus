@@ -5,8 +5,7 @@ members = [
   "crates/codex-plus-data",
   "crates/codex-plus-manager-service",
   "apps/codex-plus-launcher",
-  "apps/codex-plus-manager-native",
-  "apps/codex-plus-manager/src-tauri",
+  "apps/codex-plus-manager",
 ]
 
 [workspace.package]
@@ -44,3 +43,6 @@ zeroize = "1"
 
 [patch.crates-io]
 gpu-allocator = { path = "third_party/gpu-allocator-0.28.0" }
+
+[profile.native-perf]
+inherits = "release"

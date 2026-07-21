@@ -43,26 +43,27 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --all -- --check
 
-      - name: Rust clippy for native manager crates
-        run: cargo clippy -p codex-plus-manager-service -p codex-plus-manager-native --all-targets --no-deps -- -D warnings
+      - name: Rust clippy for manager crates
+        run: cargo clippy -p codex-plus-manager-service -p codex-plus-manager --all-targets --no-deps -- -D warnings
 
       - name: Rust tests
-        run: cargo test --workspace --exclude codex-plus-manager
+        run: cargo test --workspace
 
       - name: Build release binaries
-        run: cargo build -p codex-plus-launcher -p codex-plus-manager-native --release
+        run: cargo build -p codex-plus-launcher -p codex-plus-manager --release
 
       - name: Stage Windows app files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist/windows/app | Out-Null
           Copy-Item target/release/codex-plus-plus.exe dist/windows/app/
-          Copy-Item target/release/codex-plus-plus-manager-native.exe dist/windows/app/codex-plus-plus-manager.exe
+          Copy-Item target/release/codex-plus-plus-manager.exe dist/windows/app/
+          # The pre-cutover filename is allowed only as a negative package assertion.
           python scripts/installer/generate-package-manifest.py `
             --root dist/windows/app `
             --output dist/windows/native-package-manifest.json `
             --platform windows-x64 `
-            --source-binary target/release/codex-plus-plus-manager-native.exe `
+            --source-binary target/release/codex-plus-plus-manager.exe `
             --staged-binary codex-plus-plus-manager.exe `
             --forbid codex-plus-plus-manager-native
 
@@ -121,38 +122,6 @@ jobs:
           path: dist/windows/*.exe
           if-no-files-found: error
 
-  oracle-validation:
-    name: Unshipped React/Tauri oracle
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: apps/codex-plus-manager/package-lock.json
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install oracle dependencies
-        working-directory: apps/codex-plus-manager
-        run: npm.cmd ci
-
-      - name: TypeScript oracle check
-        working-directory: apps/codex-plus-manager
-        run: npm.cmd run check
-
-      - name: Build unshipped oracle frontend
-        working-directory: apps/codex-plus-manager
-        run: npm.cmd run vite:build
-
-      - name: Run retained oracle tests
-        run: cargo test -p codex-plus-manager --jobs 1
-
   macos-dmg:
     name: macOS DMG (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -176,7 +145,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binaries
-        run: cargo build -p codex-plus-launcher -p codex-plus-manager-native --release --target ${{ matrix.target }}
+        run: cargo build -p codex-plus-launcher -p codex-plus-manager --release --target ${{ matrix.target }}
 
       - name: Build macOS DMG
         run: |
@@ -187,11 +156,12 @@ jobs:
             VERSION="0.0.0-${GITHUB_RUN_NUMBER}"
           fi
           BINARY_DIR="$PWD/target/${{ matrix.target }}/release" bash scripts/installer/macos/package-dmg.sh "$VERSION" "${{ matrix.arch }}"
+          # The pre-cutover filename is allowed only as a negative package assertion.
           python scripts/installer/generate-package-manifest.py \
             --root dist/macos/stage \
             --output "dist/macos/native-package-manifest-${{ matrix.arch }}.json" \
             --platform "macos-${{ matrix.arch }}" \
-            --source-binary "target/${{ matrix.target }}/release/codex-plus-plus-manager-native" \
+            --source-binary "target/${{ matrix.target }}/release/codex-plus-plus-manager" \
             --staged-binary "Codex++ 管理工具.app/Contents/MacOS/CodexPlusPlusManager" \
             --forbid codex-plus-plus-manager-native \
             --allow-packaging-transform
