@@ -297,7 +297,7 @@ mod tests {
         let config = temp.path().join(CLASH_VERGE_CONFIG_FILE);
         std::fs::write(&config, "enable_tun_mode: true\n").unwrap();
 
-        let check = inspect_clash_verge_tun(&[config.clone()]);
+        let check = inspect_clash_verge_tun(std::slice::from_ref(&config));
         assert!(check.enabled);
         assert_eq!(
             check.config_path,

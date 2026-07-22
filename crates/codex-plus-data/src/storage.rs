@@ -134,7 +134,7 @@ impl SQLiteStorageAdapter {
     }
 
     fn list_codex_threads(&self, db: &Connection) -> anyhow::Result<Vec<LocalSession>> {
-        let columns = table_columns(&db, "threads")?
+        let columns = table_columns(db, "threads")?
             .into_iter()
             .collect::<HashSet<_>>();
         let title = optional_column_expression(&columns, "title", "''");
@@ -646,12 +646,13 @@ impl SQLiteStorageAdapter {
         }
         let mut file_errors = Vec::new();
         for file in file_backups {
-            if let Some(path) = file.get("path").and_then(Value::as_str) {
-                if let Err(err) = fs::remove_file(path) {
-                    if err.kind() != std::io::ErrorKind::NotFound {
-                        file_errors.push(format!("{path}: {err}"));
-                    }
-                }
+            if let Some((path, err)) = file
+                .get("path")
+                .and_then(Value::as_str)
+                .and_then(|path| fs::remove_file(path).err().map(|err| (path, err)))
+                .filter(|(_, err)| err.kind() != std::io::ErrorKind::NotFound)
+            {
+                file_errors.push(format!("{path}: {err}"));
             }
         }
         if !file_errors.is_empty() {
@@ -1189,10 +1190,11 @@ fn update_rollout_session_meta_cwd(
                 .strip_suffix('\n')
                 .map_or((line, ""), |body| (body, "\n"));
             let mut raw = line.to_string();
-            if let Ok(mut item) = serde_json::from_str::<Value>(body) {
-                if item.get("type") == Some(&json!("session_meta"))
-                    && item["payload"]["id"] == thread_id
-                    && item["payload"]["cwd"] != target_cwd
+            match serde_json::from_str::<Value>(body) {
+                Ok(mut item)
+                    if item.get("type") == Some(&json!("session_meta"))
+                        && item["payload"]["id"] == thread_id
+                        && item["payload"]["cwd"] != target_cwd =>
                 {
                     if let Some(payload) = item.get_mut("payload").and_then(Value::as_object_mut) {
                         payload.insert("cwd".to_string(), json!(target_cwd));
@@ -1200,6 +1202,7 @@ fn update_rollout_session_meta_cwd(
                         changed = true;
                     }
                 }
+                _ => {}
             }
             output.push_str(&raw);
         }

@@ -490,7 +490,7 @@ impl<E: ProviderActivationEnvironment> ProviderActivationSource for ProviderServ
         backfill_relay_profile_from_home_with_common(
             self.environment().codex_home(),
             profile,
-            &mut settings.relay_context_config_contents,
+            &settings.relay_context_config_contents,
         )
         .map_err(|_| ProviderActivationError::new(ProviderActivationErrorKind::MutationFailed))?;
         let expected_revision = request.guard.expected_provider_revision;

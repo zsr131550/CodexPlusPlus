@@ -128,9 +128,9 @@ pub fn remove_owned_data() -> std::io::Result<()> {
 pub fn default_install_root() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        return crate::windows_integration::desktop_dir().or_else(|| {
+        crate::windows_integration::desktop_dir().or_else(|| {
             directories::UserDirs::new().and_then(|dirs| dirs.desktop_dir().map(PathBuf::from))
-        });
+        })
     }
 
     #[cfg(target_os = "macos")]
@@ -337,13 +337,11 @@ fn macos_companion_binary_from_exe(exe: &Path, binary: &str) -> Option<PathBuf> 
             .join(format!("{SILENT_NAME}.app"))
             .join("Contents")
             .join("MacOS");
-        return Some(
-            macos
-                .join(SILENT_BINARY)
-                .exists()
-                .then(|| macos.join(SILENT_BINARY))
-                .unwrap_or_else(|| macos.join("CodexPlusPlus")),
-        );
+        return Some(if macos.join(SILENT_BINARY).exists() {
+            macos.join(SILENT_BINARY)
+        } else {
+            macos.join("CodexPlusPlus")
+        });
     }
     if binary == MANAGER_BINARY {
         if app_name == format!("{MANAGER_NAME}.app") {
@@ -357,13 +355,11 @@ fn macos_companion_binary_from_exe(exe: &Path, binary: &str) -> Option<PathBuf> 
             .join(format!("{MANAGER_NAME}.app"))
             .join("Contents")
             .join("MacOS");
-        return Some(
-            macos
-                .join(MANAGER_BINARY)
-                .exists()
-                .then(|| macos.join(MANAGER_BINARY))
-                .unwrap_or_else(|| macos.join("CodexPlusPlusManager")),
-        );
+        return Some(if macos.join(MANAGER_BINARY).exists() {
+            macos.join(MANAGER_BINARY)
+        } else {
+            macos.join("CodexPlusPlusManager")
+        });
     }
     None
 }

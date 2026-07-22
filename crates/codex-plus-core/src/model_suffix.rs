@@ -18,18 +18,21 @@ pub struct ModelCatalogEntry {
 /// 括号内非合法窗口 token 时，整串作为 slug 且 window=None（不剥离括号）。
 pub fn parse_model_suffix(raw: &str) -> (String, Option<u64>) {
     let raw = raw.trim();
-    if let Some(close) = raw.rfind(']') {
-        // 仅当 ] 是最后一个字符时才视为后缀
-        if close == raw.len() - 1 {
-            if let Some(open) = raw[..close].rfind('[') {
-                let inner = raw[open + 1..close].trim();
-                let slug = raw[..open].trim();
-                if !slug.is_empty() {
-                    if let Some(window) = parse_model_window_token(inner) {
-                        return (slug.to_string(), Some(window));
-                    }
-                }
-            }
+    let Some(close) = raw.rfind(']') else {
+        return (raw.to_string(), None);
+    };
+    // 仅当 ] 是最后一个字符时才视为后缀
+    if close == raw.len() - 1 {
+        let Some(open) = raw[..close].rfind('[') else {
+            return (raw.to_string(), None);
+        };
+        let inner = raw[open + 1..close].trim();
+        let slug = raw[..open].trim();
+        if slug.is_empty() {
+            return (raw.to_string(), None);
+        }
+        if let Some(window) = parse_model_window_token(inner) {
+            return (slug.to_string(), Some(window));
         }
     }
     (raw.to_string(), None)
@@ -162,7 +165,7 @@ pub fn build_model_catalog_json_with_template(
 ) -> String {
     let template = template
         .cloned()
-        .or_else(|| load_bundled_template_entry())
+        .or_else(load_bundled_template_entry)
         .unwrap_or_else(|| json!({}));
 
     let models: Vec<Value> = entries

@@ -237,17 +237,19 @@ where
                 }
             }
             "--debug-port" => {
-                if let Some(value) = iter.next() {
-                    if let Ok(port) = value.as_ref().parse::<u16>() {
-                        options.debug_port = port;
-                    }
+                if let Some(port) = iter
+                    .next()
+                    .and_then(|value| value.as_ref().parse::<u16>().ok())
+                {
+                    options.debug_port = port;
                 }
             }
             "--helper-port" => {
-                if let Some(value) = iter.next() {
-                    if let Ok(port) = value.as_ref().parse::<u16>() {
-                        options.helper_port = port;
-                    }
+                if let Some(port) = iter
+                    .next()
+                    .and_then(|value| value.as_ref().parse::<u16>().ok())
+                {
+                    options.helper_port = port;
                 }
             }
             _ => {}
@@ -764,6 +766,14 @@ fn default_user_scripts_config_dir() -> PathBuf {
         .join("Codex++")
 }
 
+fn builtin_user_scripts_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .map(|path| path.join("user_scripts"))
+        .unwrap_or_else(|| PathBuf::from("user_scripts"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,12 +825,4 @@ mod tests {
         assert!(source.contains("self.core"));
         assert!(source.contains(".start_computer_use_guard_watchdog(settings)"));
     }
-}
-
-fn builtin_user_scripts_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .map(|path| path.join("user_scripts"))
-        .unwrap_or_else(|| PathBuf::from("user_scripts"))
 }

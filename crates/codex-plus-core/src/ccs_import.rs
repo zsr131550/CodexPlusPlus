@@ -231,19 +231,18 @@ fn extract_api_key(config: &Value) -> Option<String> {
 }
 
 fn extract_protocol(config: &Value) -> RelayProtocol {
-    if let Some(api_format) = string_at(config, &["api_format", "apiFormat"]) {
-        if is_chat_protocol(&api_format) {
-            return RelayProtocol::ChatCompletions;
-        }
+    if string_at(config, &["api_format", "apiFormat"])
+        .is_some_and(|api_format| is_chat_protocol(&api_format))
+    {
+        return RelayProtocol::ChatCompletions;
     }
-    if let Some(wire_api) = config
+    if config
         .get("config")
         .and_then(Value::as_str)
         .and_then(extract_toml_wire_api)
+        .is_some_and(|wire_api| is_chat_protocol(&wire_api))
     {
-        if is_chat_protocol(&wire_api) {
-            return RelayProtocol::ChatCompletions;
-        }
+        return RelayProtocol::ChatCompletions;
     }
     if extract_base_url(config)
         .map(|value| value.to_ascii_lowercase().ends_with("/chat/completions"))

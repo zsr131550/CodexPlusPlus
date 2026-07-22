@@ -783,10 +783,10 @@ pub fn backfill_relay_profile_from_home(
     profile.auth_contents = read_optional_text(&home.join("auth.json"))?;
     let live_config = profile.config_contents.clone();
     sync_context_limits_from_config(profile, &live_config);
-    if profile.model.trim().is_empty() {
-        if let Some(model) = root_key_string(&profile.config_contents, "model") {
-            profile.model = model;
-        }
+    if let Some(model) = root_key_string(&profile.config_contents, "model")
+        .filter(|_| profile.model.trim().is_empty())
+    {
+        profile.model = model;
     }
     Ok(())
 }
@@ -794,7 +794,7 @@ pub fn backfill_relay_profile_from_home(
 pub fn backfill_relay_profile_from_home_with_common(
     home: &Path,
     profile: &mut RelayProfile,
-    common_config_contents: &mut String,
+    common_config_contents: &str,
 ) -> anyhow::Result<()> {
     let live_config = read_optional_text(&home.join("config.toml"))?;
     let template_config = profile.config_contents.clone();
@@ -810,10 +810,10 @@ pub fn backfill_relay_profile_from_home_with_common(
     restore_profile_auth_from_live_config(profile, &template_auth)?;
     sync_profile_mode_from_backfilled_live(profile);
     sync_context_limits_from_config(profile, &live_config);
-    if profile.model.trim().is_empty() {
-        if let Some(model) = root_key_string(&live_config, "model") {
-            profile.model = model;
-        }
+    if let Some(model) =
+        root_key_string(&live_config, "model").filter(|_| profile.model.trim().is_empty())
+    {
+        profile.model = model;
     }
     Ok(())
 }
@@ -1384,14 +1384,14 @@ fn write_codex_live_atomic(
         auth_written = true;
     }
 
-    if let Some(config_text) = config_text {
-        if let Err(error) = crate::settings::atomic_write(&config_path, config_text.as_bytes()) {
-            if auth_written {
-                let _ = restore_optional_file(&auth_path, old_auth.as_deref());
-            }
-            let _ = restore_optional_file(&config_path, old_config.as_deref());
-            return Err(error.context("写入 config.toml 失败"));
+    if let Some(error) = config_text.and_then(|config_text| {
+        crate::settings::atomic_write(&config_path, config_text.as_bytes()).err()
+    }) {
+        if auth_written {
+            let _ = restore_optional_file(&auth_path, old_auth.as_deref());
         }
+        let _ = restore_optional_file(&config_path, old_config.as_deref());
+        return Err(error.context("写入 config.toml 失败"));
     }
 
     Ok(backup_path)
@@ -1511,19 +1511,17 @@ fn sanitize_common_config_text_fallback(common_config: &str) -> String {
             continue;
         }
 
-        if in_root {
-            if let Some((key, _)) = trimmed.split_once('=') {
-                let key = key.trim();
-                if matches!(
-                    key,
-                    "model"
-                        | "model_provider"
-                        | "base_url"
-                        | "model_catalog_json"
-                        | CHAT_UPSTREAM_BASE_URL_KEY
-                ) {
-                    continue;
-                }
+        if let Some((key, _)) = trimmed.split_once('=').filter(|_| in_root) {
+            let key = key.trim();
+            if matches!(
+                key,
+                "model"
+                    | "model_provider"
+                    | "base_url"
+                    | "model_catalog_json"
+                    | CHAT_UPSTREAM_BASE_URL_KEY
+            ) {
+                continue;
             }
         }
 
@@ -1569,13 +1567,13 @@ fn normalize_duplicate_toml_text(contents: &str) -> String {
             continue;
         }
 
-        if in_root && !trimmed.is_empty() && !trimmed.starts_with('#') {
-            if let Some((key, _)) = trimmed.split_once('=') {
-                let key = key.trim();
-                if !key.is_empty() && !key.contains('.') && !seen_root_keys.insert(key.to_string())
-                {
-                    continue;
-                }
+        if let Some((key, _)) = trimmed
+            .split_once('=')
+            .filter(|_| in_root && !trimmed.is_empty() && !trimmed.starts_with('#'))
+        {
+            let key = key.trim();
+            if !key.is_empty() && !key.contains('.') && !seen_root_keys.insert(key.to_string()) {
+                continue;
             }
         }
 
@@ -1610,12 +1608,12 @@ fn strip_common_config_text_fallback(config_text: &str, common_config: &str) -> 
             continue;
         }
 
-        if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            if let Some((key, _)) = trimmed.split_once('=') {
-                if anchors.root_keys.contains(key.trim()) {
-                    continue;
-                }
-            }
+        if trimmed.split_once('=').is_some_and(|(key, _)| {
+            !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && anchors.root_keys.contains(key.trim())
+        }) {
+            continue;
         }
 
         kept.push(line);
@@ -1642,12 +1640,13 @@ fn common_config_anchors(common_config: &str) -> CommonConfigAnchors {
             continue;
         }
 
-        if in_root && !trimmed.is_empty() && !trimmed.starts_with('#') {
-            if let Some((key, _)) = trimmed.split_once('=') {
-                let key = key.trim();
-                if !key.is_empty() {
-                    root_keys.insert(key.to_string());
-                }
+        if let Some((key, _)) = trimmed
+            .split_once('=')
+            .filter(|_| in_root && !trimmed.is_empty() && !trimmed.starts_with('#'))
+        {
+            let key = key.trim();
+            if !key.is_empty() {
+                root_keys.insert(key.to_string());
             }
         }
     }
@@ -1722,10 +1721,10 @@ fn apply_model_catalog_to_config(
     );
     // 用户已手写 model_catalog_json 指针时保留，不覆盖（保 preserves_user_model_catalog_json 测试）
     // 仅当现有指针指向本 profile 自己生成的 catalog 时才重新生成。
-    if let Some(existing) = root_key_string(config_text, "model_catalog_json") {
-        if existing != catalog_relative {
-            return Ok(config_text.to_string());
-        }
+    if root_key_string(config_text, "model_catalog_json")
+        .is_some_and(|existing| existing != catalog_relative)
+    {
+        return Ok(config_text.to_string());
     }
     let (model_list, model_windows): (String, std::collections::HashMap<String, String>) =
         if profile.model_windows.trim().is_empty() && profile.model_list.contains('[') {
@@ -1776,15 +1775,14 @@ fn sync_context_limits_from_config(profile: &mut RelayProfile, config_text: &str
 }
 
 fn root_positive_int_string(config_text: &str, key: &str) -> Option<String> {
-    if let Ok(doc) = parse_toml_document(config_text) {
-        if let Some(value) = doc
-            .get(key)
+    if let Some(value) = parse_toml_document(config_text).ok().and_then(|doc| {
+        doc.get(key)
             .and_then(Item::as_value)
             .and_then(toml_edit::Value::as_integer)
             .filter(|value| *value > 0)
-        {
-            return Some(value.to_string());
-        }
+            .map(|value| value.to_string())
+    }) {
+        return Some(value);
     }
 
     root_key_value(config_text, key)
@@ -1864,11 +1862,11 @@ fn toml_remove_array_items(target: &mut toml_edit::Array, source: &toml_edit::Ar
 }
 
 fn merge_toml_item(target: &mut Item, source: &Item) {
-    if let Some(source_table) = source.as_table_like() {
-        if let Some(target_table) = target.as_table_like_mut() {
-            merge_toml_table_like(target_table, source_table);
-            return;
-        }
+    if let (Some(source_table), Some(target_table)) =
+        (source.as_table_like(), target.as_table_like_mut())
+    {
+        merge_toml_table_like(target_table, source_table);
+        return;
     }
 
     *target = source.clone();
@@ -1886,14 +1884,14 @@ fn merge_toml_table_like(target: &mut dyn TableLike, source: &dyn TableLike) {
 }
 
 fn remove_toml_item(target: &mut Item, source: &Item) {
-    if let Some(source_table) = source.as_table_like() {
-        if let Some(target_table) = target.as_table_like_mut() {
-            remove_toml_table_like(target_table, source_table);
-            if target_table.is_empty() {
-                *target = Item::None;
-            }
-            return;
+    if let (Some(source_table), Some(target_table)) =
+        (source.as_table_like(), target.as_table_like_mut())
+    {
+        remove_toml_table_like(target_table, source_table);
+        if target_table.is_empty() {
+            *target = Item::None;
         }
+        return;
     }
 
     if let Some(source_value) = source.as_value() {
@@ -2224,15 +2222,14 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
     let mut model = relay_profile_model(profile);
     // 若用户未填写默认模型，但 model_list 有内容，则取第一条作为默认 model，
     // 避免 codex 启动时回退到历史会话中带后缀的模型名。
-    if model.trim().is_empty() && !profile.model_list.trim().is_empty() {
-        if let Some(first) = profile
-            .model_list
-            .split(['\r', '\n', ','])
-            .map(str::trim)
-            .find(|value| !value.is_empty())
-        {
-            model = crate::model_suffix::parse_model_suffix(first).0;
-        }
+    if let Some(first) = profile
+        .model_list
+        .split(['\r', '\n', ','])
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .filter(|_| model.trim().is_empty() && !profile.model_list.trim().is_empty())
+    {
+        model = crate::model_suffix::parse_model_suffix(first).0;
     }
     // 若用户把后缀语法（如 deepseek-v4-flash[1M]）写在 model 字段，
     // 写入 config.toml 前需剥离后缀；codex 本身不理解后缀，只会按原串匹配 catalog slug。
@@ -2411,9 +2408,8 @@ fn auth_contents_looks_like_chatgpt_auth(contents: &str) -> bool {
 fn provider_string_from_config(config_contents: &str, key: &str) -> Option<String> {
     let doc = parse_toml_document(config_contents).ok()?;
     let active = active_provider_id(&doc);
-    if let Some(provider_id) = active.as_deref() {
-        if let Some(value) = doc
-            .get("model_providers")
+    if let Some(value) = active.as_deref().and_then(|provider_id| {
+        doc.get("model_providers")
             .and_then(Item::as_table)
             .and_then(|providers| providers.get(provider_id))
             .and_then(Item::as_table)
@@ -2421,9 +2417,8 @@ fn provider_string_from_config(config_contents: &str, key: &str) -> Option<Strin
             .and_then(Item::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-        {
-            return Some(value.to_string());
-        }
+    }) {
+        return Some(value.to_string());
     }
 
     for provider in provider_tables(&doc) {
@@ -2441,9 +2436,8 @@ fn provider_string_from_config(config_contents: &str, key: &str) -> Option<Strin
 
 fn experimental_bearer_token_from_config(config_contents: &str) -> anyhow::Result<Option<String>> {
     let doc = parse_toml_document(config_contents)?;
-    if let Some(provider_id) = active_provider_id(&doc) {
-        if let Some(token) = doc
-            .get("model_providers")
+    if let Some(token) = active_provider_id(&doc).and_then(|provider_id| {
+        doc.get("model_providers")
             .and_then(Item::as_table)
             .and_then(|providers| providers.get(&provider_id))
             .and_then(Item::as_table)
@@ -2451,9 +2445,8 @@ fn experimental_bearer_token_from_config(config_contents: &str) -> anyhow::Resul
             .and_then(Item::as_str)
             .map(str::trim)
             .filter(|token| !token.is_empty())
-        {
-            return Ok(Some(token.to_string()));
-        }
+    }) {
+        return Ok(Some(token.to_string()));
     }
     Ok(None)
 }
@@ -2731,67 +2724,6 @@ fn account_label_from_jwt(token: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn backfill_relay_profile_from_home_with_common_restores_template_provider_id() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            temp.path().join("config.toml"),
-            "model_provider = \"custom\"\nmodel = \"gpt-image-2\"\n\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = \"https://ahg.codes\"\n",
-        )
-        .unwrap();
-        std::fs::write(temp.path().join("auth.json"), "{}\n").unwrap();
-
-        let mut profile = RelayProfile {
-            relay_mode: crate::settings::RelayMode::PureApi,
-            protocol: crate::settings::RelayProtocol::Responses,
-            config_contents: "model_provider = \"ai\"\nmodel = \"gpt-image-2\"\n\n[model_providers.ai]\nname = \"ai\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = \"https://ahg.codes\"\n"
-                .to_string(),
-            auth_contents: "{}\n".to_string(),
-            ..RelayProfile::default()
-        };
-        let mut common = String::new();
-
-        backfill_relay_profile_from_home_with_common(temp.path(), &mut profile, &mut common)
-            .unwrap();
-
-        assert!(profile.config_contents.contains("model_provider = \"ai\""));
-        assert!(profile.config_contents.contains("[model_providers.ai]"));
-        assert!(!profile.config_contents.contains("[model_providers.custom]"));
-    }
-
-    #[test]
-    fn relay_profile_model_prefers_config_then_field_then_empty() {
-        // 1. 供應商測試的回退第一級：config.toml 的 model = 優先
-        let from_config = RelayProfile {
-            config_contents: "model = \"deepseek-v4-flash\"\nmodel_provider = \"custom\"\n"
-                .to_string(),
-            model: "should-not-be-used".to_string(),
-            ..RelayProfile::default()
-        };
-        assert_eq!(relay_profile_model(&from_config), "deepseek-v4-flash");
-
-        // 2. config 沒寫 model 時退回 profile.model 欄位
-        let from_field = RelayProfile {
-            config_contents: "model_provider = \"custom\"\n".to_string(),
-            model: "deepseek-v4-pro".to_string(),
-            ..RelayProfile::default()
-        };
-        assert_eq!(relay_profile_model(&from_field), "deepseek-v4-pro");
-
-        // 3. 兩者皆空 → 空字串；呼叫端據此才回退到全域 relayTestModel
-        let empty = RelayProfile {
-            config_contents: String::new(),
-            model: String::new(),
-            ..RelayProfile::default()
-        };
-        assert!(relay_profile_model(&empty).trim().is_empty());
-    }
-}
-
 pub fn root_key_string(contents: &str, key: &str) -> Option<String> {
     root_key_value(contents, key).map(unquote_toml_string)
 }
@@ -2916,4 +2848,64 @@ fn root_line_key(line: &str) -> Option<&str> {
         return None;
     }
     trimmed.split_once('=').map(|(key, _)| key.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backfill_relay_profile_from_home_with_common_restores_template_provider_id() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "model_provider = \"custom\"\nmodel = \"gpt-image-2\"\n\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = \"https://ahg.codes\"\n",
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("auth.json"), "{}\n").unwrap();
+
+        let mut profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            protocol: crate::settings::RelayProtocol::Responses,
+            config_contents: "model_provider = \"ai\"\nmodel = \"gpt-image-2\"\n\n[model_providers.ai]\nname = \"ai\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = \"https://ahg.codes\"\n"
+                .to_string(),
+            auth_contents: "{}\n".to_string(),
+            ..RelayProfile::default()
+        };
+        let common = String::new();
+
+        backfill_relay_profile_from_home_with_common(temp.path(), &mut profile, &common).unwrap();
+
+        assert!(profile.config_contents.contains("model_provider = \"ai\""));
+        assert!(profile.config_contents.contains("[model_providers.ai]"));
+        assert!(!profile.config_contents.contains("[model_providers.custom]"));
+    }
+
+    #[test]
+    fn relay_profile_model_prefers_config_then_field_then_empty() {
+        // 1. 供應商測試的回退第一級：config.toml 的 model = 優先
+        let from_config = RelayProfile {
+            config_contents: "model = \"deepseek-v4-flash\"\nmodel_provider = \"custom\"\n"
+                .to_string(),
+            model: "should-not-be-used".to_string(),
+            ..RelayProfile::default()
+        };
+        assert_eq!(relay_profile_model(&from_config), "deepseek-v4-flash");
+
+        // 2. config 沒寫 model 時退回 profile.model 欄位
+        let from_field = RelayProfile {
+            config_contents: "model_provider = \"custom\"\n".to_string(),
+            model: "deepseek-v4-pro".to_string(),
+            ..RelayProfile::default()
+        };
+        assert_eq!(relay_profile_model(&from_field), "deepseek-v4-pro");
+
+        // 3. 兩者皆空 → 空字串；呼叫端據此才回退到全域 relayTestModel
+        let empty = RelayProfile {
+            config_contents: String::new(),
+            model: String::new(),
+            ..RelayProfile::default()
+        };
+        assert!(relay_profile_model(&empty).trim().is_empty());
+    }
 }

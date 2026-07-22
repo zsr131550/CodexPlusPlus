@@ -170,9 +170,11 @@ impl LoopbackPortGuard {
     }
 
     pub fn fallback_path(&self) -> Option<&Path> {
-        self.using_fallback_lock
-            .then_some(())
-            .and_then(|_| self.lock_path.as_deref())
+        if self.using_fallback_lock {
+            self.lock_path.as_deref()
+        } else {
+            None
+        }
     }
 
     pub fn try_clone_listener(&self) -> std::io::Result<Option<TcpListener>> {
@@ -243,6 +245,18 @@ fn normalize_lock_error(error: std::io::Error) -> std::io::Error {
             "loopback port guard lock is already held",
         ),
         _ => error,
+    }
+}
+
+/// Clear all guard-port env vars to prevent cross-test contamination
+/// when cargo runs tests in parallel threads.
+#[cfg(test)]
+fn _clear_guard_port_env_vars() {
+    unsafe {
+        std::env::remove_var("CODEX_PLUS_GUARD_PORT");
+        std::env::remove_var("CODEX_PLUS_LAUNCHER_GUARD_PORT");
+        std::env::remove_var("CODEX_PLUS_MANAGER_GUARD_PORT");
+        std::env::remove_var("CODEX_PLUS_GUARD_PORT_OFFSET");
     }
 }
 
@@ -413,16 +427,5 @@ mod tests {
         GUARD_PORT_ENV_LOCK
             .lock()
             .expect("guard port env lock should not be poisoned")
-    }
-}
-
-/// Clear all guard-port env vars to prevent cross-test contamination
-/// when cargo runs tests in parallel threads.
-fn _clear_guard_port_env_vars() {
-    unsafe {
-        let _ = std::env::remove_var("CODEX_PLUS_GUARD_PORT");
-        let _ = std::env::remove_var("CODEX_PLUS_LAUNCHER_GUARD_PORT");
-        let _ = std::env::remove_var("CODEX_PLUS_MANAGER_GUARD_PORT");
-        let _ = std::env::remove_var("CODEX_PLUS_GUARD_PORT_OFFSET");
     }
 }

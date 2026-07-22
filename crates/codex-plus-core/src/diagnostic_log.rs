@@ -54,12 +54,11 @@ pub fn append_diagnostic_log(event: &str, detail: impl Serialize) -> std::io::Re
 }
 
 pub fn diagnostic_log_path() -> PathBuf {
-    if let Some(lock) = TEST_LOG_PATH.get() {
-        if let Ok(guard) = lock.lock() {
-            if let Some(path) = &*guard {
-                return path.clone();
-            }
-        }
+    if let Some(path) = TEST_LOG_PATH
+        .get()
+        .and_then(|lock| lock.lock().ok().and_then(|guard| guard.as_ref().cloned()))
+    {
+        return path;
     }
     crate::paths::default_diagnostic_log_path()
 }

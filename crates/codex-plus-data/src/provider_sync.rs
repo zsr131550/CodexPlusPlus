@@ -537,43 +537,40 @@ fn rewrite_rollout_session_meta_providers(
     for segment in text.split_inclusive('\n') {
         let (line, line_ending) = split_line_ending(segment);
         let mut next_line = line.to_string();
-        if !line.trim().is_empty() {
-            if let Ok(mut record) = serde_json::from_str::<Value>(line) {
-                if record.get("type").and_then(Value::as_str) == Some("session_meta") {
-                    let Some(payload) = record.get_mut("payload").and_then(Value::as_object_mut)
-                    else {
-                        rewrite.next_text.push_str(&next_line);
-                        rewrite.next_text.push_str(line_ending);
-                        continue;
-                    };
-                    rewrite.session_meta_count += 1;
-                    rewrite.original_session_meta_lines.push(line.to_string());
-                    if rewrite.thread_id.is_none() {
-                        rewrite.thread_id = payload
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .map(ToString::to_string);
-                    }
-                    if rewrite.cwd.is_none() {
-                        rewrite.cwd = payload
-                            .get("cwd")
-                            .and_then(Value::as_str)
-                            .and_then(to_desktop_workspace_path);
-                    }
-                    let provider = payload
-                        .get("model_provider")
-                        .and_then(Value::as_str)
-                        .unwrap_or("(missing)")
-                        .to_string();
-                    rewrite.providers.push(provider);
-                    if payload.get("model_provider").and_then(Value::as_str)
-                        != Some(target_provider)
-                    {
-                        payload.insert("model_provider".to_string(), json!(target_provider));
-                        next_line = serde_json::to_string(&record)?;
-                        rewrite.rewrite_needed = true;
-                    }
-                }
+        if let Some(mut record) = (!line.trim().is_empty())
+            .then(|| serde_json::from_str::<Value>(line).ok())
+            .flatten()
+            .filter(|record| record.get("type").and_then(Value::as_str) == Some("session_meta"))
+        {
+            let Some(payload) = record.get_mut("payload").and_then(Value::as_object_mut) else {
+                rewrite.next_text.push_str(&next_line);
+                rewrite.next_text.push_str(line_ending);
+                continue;
+            };
+            rewrite.session_meta_count += 1;
+            rewrite.original_session_meta_lines.push(line.to_string());
+            if rewrite.thread_id.is_none() {
+                rewrite.thread_id = payload
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string);
+            }
+            if rewrite.cwd.is_none() {
+                rewrite.cwd = payload
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .and_then(to_desktop_workspace_path);
+            }
+            let provider = payload
+                .get("model_provider")
+                .and_then(Value::as_str)
+                .unwrap_or("(missing)")
+                .to_string();
+            rewrite.providers.push(provider);
+            if payload.get("model_provider").and_then(Value::as_str) != Some(target_provider) {
+                payload.insert("model_provider".to_string(), json!(target_provider));
+                next_line = serde_json::to_string(&record)?;
+                rewrite.rewrite_needed = true;
             }
         }
         rewrite.next_text.push_str(&next_line);
@@ -661,8 +658,8 @@ fn to_desktop_workspace_path(value: &str) -> Option<String> {
     if lower.starts_with(r"\\?\unc\") {
         return Some(format!(r"\\{}", stripped[8..].replace('/', r"\")));
     }
-    if stripped.starts_with(r"\\?\") {
-        return Some(stripped[4..].replace('\\', "/"));
+    if let Some(stripped) = stripped.strip_prefix(r"\\?\") {
+        return Some(stripped.replace('\\', "/"));
     }
     Some(stripped.to_string())
 }
@@ -900,11 +897,13 @@ fn apply_sqlite_update(
         return Ok(SqliteUpdateCounts::default());
     }
     let tx = db.transaction()?;
-    let mut counts = SqliteUpdateCounts::default();
-    counts.provider_rows = tx.execute(
-        "UPDATE threads SET model_provider = ?1 WHERE COALESCE(model_provider, '') <> ?1",
-        [target_provider],
-    )?;
+    let mut counts = SqliteUpdateCounts {
+        provider_rows: tx.execute(
+            "UPDATE threads SET model_provider = ?1 WHERE COALESCE(model_provider, '') <> ?1",
+            [target_provider],
+        )?,
+        ..Default::default()
+    };
     if columns.contains("has_user_event") {
         for thread_id in user_event_thread_ids {
             counts.user_event_rows += tx.execute(
